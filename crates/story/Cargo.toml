@@ -1,0 +1,11 @@
+[package]
+name = "gpui-component-extras-story"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-rich-text.workspace = true
