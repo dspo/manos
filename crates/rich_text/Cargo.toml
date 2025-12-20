@@ -12,3 +12,6 @@ gpui.workspace = true
 ropey.workspace = true
 serde.workspace = true
 sum-tree.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

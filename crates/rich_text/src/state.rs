@@ -10,10 +10,14 @@ use serde::Deserialize;
 use sum_tree::Bias;
 
 use crate::RichTextTheme;
+use crate::document::{
+    BlockKind, BlockNode, BlockTextSize, InlineNode, RichTextDocument, TextNode,
+};
 use crate::rope_ext::RopeExt as _;
 use crate::selection::Selection;
+use crate::value::RichTextValue;
 
-use super::style::{InlineStyle, StyleRuns};
+use super::style::InlineStyle;
 
 pub(super) const CONTEXT: &str = "RichText";
 
@@ -108,52 +112,9 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlockTextSize {
-    Small,
-    Normal,
-    Large,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlockKind {
-    Paragraph,
-    Heading { level: u8 },
-    UnorderedListItem,
-    OrderedListItem,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockFormat {
-    pub kind: BlockKind,
-    pub size: BlockTextSize,
-}
-
-impl Default for BlockFormat {
-    fn default() -> Self {
-        Self {
-            kind: BlockKind::Paragraph,
-            size: BlockTextSize::Normal,
-        }
-    }
-}
-
-impl BlockFormat {
-    fn split_successor(self) -> Self {
-        match self.kind {
-            BlockKind::Heading { .. } => BlockFormat::default(),
-            BlockKind::Paragraph | BlockKind::UnorderedListItem | BlockKind::OrderedListItem => {
-                self
-            }
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Snapshot {
-    text: Rope,
-    styles: StyleRuns,
-    blocks: Vec<BlockFormat>,
+    document: RichTextDocument,
     selection: Selection,
     active_style: InlineStyle,
 }
@@ -171,9 +132,8 @@ pub struct RichTextState {
     pub(crate) scroll_handle: ScrollHandle,
     pub(crate) theme: RichTextTheme,
 
+    pub(crate) document: RichTextDocument,
     pub(crate) text: Rope,
-    pub(crate) blocks: Vec<BlockFormat>,
-    pub(crate) styles: StyleRuns,
     pub(crate) active_style: InlineStyle,
 
     /// Selection in UTF-8 byte offsets (anchor..focus).
@@ -193,24 +153,23 @@ impl RichTextState {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle().tab_stop(true);
 
-        let text = Rope::new();
-        let blocks = vec![BlockFormat::default()];
-        let styles = StyleRuns::new(text.len());
+        let document = RichTextDocument::default();
+        let text = Rope::from(document.to_plain_text().as_str());
+        let layout_cache = vec![None; document.blocks.len().max(1)];
 
         Self {
             focus_handle,
             scroll_handle: ScrollHandle::new(),
             theme: RichTextTheme::default(),
+            document,
             text,
-            blocks,
-            styles,
             active_style: InlineStyle::default(),
             selection: Selection::default(),
             ime_marked_range: None,
             selecting: false,
             preferred_x: None,
             viewport_bounds: Bounds::default(),
-            layout_cache: vec![None],
+            layout_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -221,19 +180,56 @@ impl RichTextState {
         self
     }
 
-    pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
-        let value: SharedString = value.into();
-        self.text = Rope::from(value.as_str());
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    pub fn default_richtext_value(mut self, value: RichTextValue) -> Self {
+        self.document = value.into_document();
+        self.text = Rope::from(self.document.to_plain_text().as_str());
         self.selection = Selection::default();
         self.ime_marked_range = None;
-        self.styles = StyleRuns::new(self.text.len());
         self.active_style = InlineStyle::default();
-        self.sync_blocks_to_text();
+        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self
+    }
+
+    pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
+        let value: SharedString = value.into();
+        self.document = RichTextDocument::from_plain_text(value.as_str());
+        self.text = Rope::from(self.document.to_plain_text().as_str());
+        self.selection = Selection::default();
+        self.ime_marked_range = None;
+        self.active_style = InlineStyle::default();
+        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
         self
     }
 
     pub fn value(&self) -> SharedString {
         SharedString::new(self.text.to_string())
+    }
+
+    pub fn richtext_value(&self) -> RichTextValue {
+        RichTextValue::from_document(&self.document)
+    }
+
+    pub fn set_richtext_value(
+        &mut self,
+        value: RichTextValue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        self.apply_loaded_richtext_value(value, true, window, cx);
+    }
+
+    pub fn load_richtext_value(
+        &mut self,
+        value: RichTextValue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_loaded_richtext_value(value, false, window, cx);
     }
 
     pub fn set_value(
@@ -244,15 +240,40 @@ impl RichTextState {
     ) {
         self.push_undo_snapshot();
         let value: SharedString = value.into();
-        self.text = Rope::from(value.as_str());
-        self.styles = StyleRuns::new(self.text.len());
-        self.blocks = vec![BlockFormat::default(); self.text.lines_len().max(1)];
+        self.document = RichTextDocument::from_plain_text(value.as_str());
+        self.text = Rope::from(self.document.to_plain_text().as_str());
         self.selection = Selection::default();
         self.active_style = InlineStyle::default();
         self.ime_marked_range = None;
-        self.layout_cache = vec![None; self.text.lines_len().max(1)];
+        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
         self.preferred_x = None;
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    fn apply_loaded_richtext_value(
+        &mut self,
+        value: RichTextValue,
+        keep_undo: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.document = value.into_document();
+        self.text = Rope::from(self.document.to_plain_text().as_str());
+        self.selection = Selection::default();
+        self.active_style = InlineStyle::default();
+        self.ime_marked_range = None;
+        self.selecting = false;
+        self.preferred_x = None;
+        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self.scroll_handle.set_offset(point(px(0.), px(0.)));
+
+        if !keep_undo {
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+        }
+
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -291,33 +312,22 @@ impl RichTextState {
         let offset = offset.min(self.text.len());
         self.selection = (offset..offset).into();
         self.preferred_x = None;
-        self.active_style = self.styles.style_at(offset);
+        self.active_style = self.style_at(offset);
     }
 
-    fn sync_blocks_to_text(&mut self) {
-        let lines = self.text.lines_len().max(1);
-        if self.blocks.len() < lines {
-            self.blocks
-                .extend(std::iter::repeat(BlockFormat::default()).take(lines - self.blocks.len()));
-        } else if self.blocks.len() > lines {
-            self.blocks.truncate(lines);
-        }
-
+    fn sync_layout_cache_to_document(&mut self) {
+        let lines = self.document.blocks.len().max(1);
         if self.layout_cache.len() < lines {
             self.layout_cache
                 .extend(std::iter::repeat(None).take(lines - self.layout_cache.len()));
         } else if self.layout_cache.len() > lines {
             self.layout_cache.truncate(lines);
         }
-
-        self.styles.set_total_len(self.text.len());
     }
 
     fn push_undo_snapshot(&mut self) {
         self.undo_stack.push(Snapshot {
-            text: self.text.clone(),
-            styles: self.styles.clone(),
-            blocks: self.blocks.clone(),
+            document: self.document.clone(),
             selection: self.selection,
             active_style: self.active_style.clone(),
         });
@@ -328,14 +338,13 @@ impl RichTextState {
     }
 
     fn restore_snapshot(&mut self, snapshot: Snapshot) {
-        self.text = snapshot.text;
-        self.styles = snapshot.styles;
-        self.blocks = snapshot.blocks;
+        self.document = snapshot.document;
+        self.text = Rope::from(self.document.to_plain_text().as_str());
         self.selection = snapshot.selection;
         self.active_style = snapshot.active_style;
         self.ime_marked_range = None;
         self.preferred_x = None;
-        self.sync_blocks_to_text();
+        self.sync_layout_cache_to_document();
     }
 
     fn replace_bytes_range(
@@ -354,6 +363,9 @@ impl RichTextState {
 
         let range = self.text.clip_offset(range.start, Bias::Left)
             ..self.text.clip_offset(range.end, Bias::Right);
+
+        let new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
+
         let removed_text = self.text.slice(range.clone()).to_string();
         let removed_newlines = removed_text
             .as_bytes()
@@ -362,32 +374,42 @@ impl RichTextState {
             .count();
         let inserted_newlines = new_text.as_bytes().iter().filter(|b| **b == b'\n').count();
 
-        let start_row = self.text.offset_to_point(range.start).row;
-        let start_block = self.blocks.get(start_row).copied().unwrap_or_default();
+        let start_point = self.text.offset_to_point(range.start);
+        let end_point = self.text.offset_to_point(range.end);
 
-        self.text.replace(range.clone(), new_text);
+        self.ensure_document_non_empty();
 
-        self.styles.delete_range(range.clone());
-        if !new_text.is_empty() {
-            self.styles
-                .insert_range(range.start, new_text.len(), self.active_style.clone());
-        }
+        let start_row = start_point
+            .row
+            .min(self.document.blocks.len().saturating_sub(1));
+        let end_row = end_point
+            .row
+            .min(self.document.blocks.len().saturating_sub(1));
 
-        // Update blocks based on newline count delta.
+        let start_col = start_point
+            .column
+            .min(self.document.blocks[start_row].text_len());
+        let end_col = end_point
+            .column
+            .min(self.document.blocks[end_row].text_len());
+
+        self.delete_document_range(start_row, start_col, end_row, end_col);
+        let active_style = self.active_style.clone();
+        self.insert_plain_text(start_row, start_col, &new_text, &active_style);
+
+        // Maintain layout cache length relative to newline changes for better scroll-to-caret.
         for _ in 0..removed_newlines {
-            if start_row + 1 < self.blocks.len() {
-                self.blocks.remove(start_row + 1);
-                if start_row + 1 < self.layout_cache.len() {
-                    self.layout_cache.remove(start_row + 1);
-                }
+            if start_row + 1 < self.layout_cache.len() {
+                self.layout_cache.remove(start_row + 1);
             }
         }
-        let new_block = start_block.split_successor();
         for _ in 0..inserted_newlines {
-            self.blocks.insert(start_row + 1, new_block);
             self.layout_cache.insert(start_row + 1, None);
         }
-        self.sync_blocks_to_text();
+
+        self.ensure_document_non_empty();
+        self.text = Rope::from(self.document.to_plain_text().as_str());
+        self.sync_layout_cache_to_document();
 
         let new_cursor = (range.start + new_text.len()).min(self.text.len());
         if mark_ime {
@@ -410,6 +432,309 @@ impl RichTextState {
 
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
+    }
+
+    fn ensure_document_non_empty(&mut self) {
+        if self.document.blocks.is_empty() {
+            self.document = RichTextDocument::default();
+        }
+        if self.layout_cache.is_empty() {
+            self.layout_cache.push(None);
+        }
+    }
+
+    fn style_at(&self, mut offset: usize) -> InlineStyle {
+        let total_len = self.text.len();
+        if total_len == 0 {
+            return InlineStyle::default();
+        }
+        if offset >= total_len {
+            offset = total_len.saturating_sub(1);
+        }
+
+        let cursor_point = self.text.offset_to_point(offset);
+        let row = cursor_point
+            .row
+            .min(self.document.blocks.len().saturating_sub(1));
+        let col = cursor_point.column;
+
+        let Some(block) = self.document.blocks.get(row) else {
+            return InlineStyle::default();
+        };
+
+        let block_len = block.text_len();
+        if block_len == 0 {
+            return block
+                .inlines
+                .iter()
+                .find_map(|node| match node {
+                    InlineNode::Text(text) => Some(text.style.clone()),
+                })
+                .unwrap_or_default();
+        }
+
+        let col = col.min(block_len);
+        if col >= block_len {
+            return block.last_style().cloned().unwrap_or_default();
+        }
+
+        let mut cursor = 0usize;
+        for node in &block.inlines {
+            match node {
+                InlineNode::Text(text) => {
+                    let end = cursor + text.text.len();
+                    if col < end {
+                        return text.style.clone();
+                    }
+                    cursor = end;
+                }
+            }
+        }
+
+        block.last_style().cloned().unwrap_or_default()
+    }
+
+    fn split_off_inlines_at(block: &mut BlockNode, offset: usize) -> Vec<InlineNode> {
+        let offset = offset.min(block.text_len());
+        let mut cursor = 0usize;
+
+        for ix in 0..block.inlines.len() {
+            let InlineNode::Text(text) = &block.inlines[ix];
+            let len = text.text.len();
+
+            if offset == cursor {
+                return block.inlines.split_off(ix);
+            }
+
+            if offset < cursor + len {
+                let rel = offset - cursor;
+                let mut tail = block.inlines.split_off(ix);
+                let mut head_text = match tail.remove(0) {
+                    InlineNode::Text(text) => text,
+                };
+
+                let right_text = head_text.text.split_off(rel);
+                let right_style = head_text.style.clone();
+                block.inlines.push(InlineNode::Text(head_text));
+
+                let mut suffix = vec![InlineNode::Text(TextNode {
+                    text: right_text,
+                    style: right_style,
+                })];
+                suffix.append(&mut tail);
+                return suffix;
+            }
+
+            cursor += len;
+        }
+
+        Vec::new()
+    }
+
+    fn delete_in_block(&mut self, row: usize, range: Range<usize>) {
+        let Some(block) = self.document.blocks.get_mut(row) else {
+            return;
+        };
+
+        let mut start = range.start;
+        let mut end = range.end;
+        if end < start {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let block_len = block.text_len();
+        start = start.min(block_len);
+        end = end.min(block_len);
+        if start >= end {
+            return;
+        }
+
+        let tail = Self::split_off_inlines_at(block, end);
+        let _ = Self::split_off_inlines_at(block, start);
+        block.inlines.extend(tail);
+        block.normalize();
+    }
+
+    fn delete_document_range(
+        &mut self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) {
+        if self.document.blocks.is_empty() {
+            return;
+        }
+
+        if start_row == end_row {
+            self.delete_in_block(start_row, start_col..end_col);
+            return;
+        }
+
+        let start_len = self
+            .document
+            .blocks
+            .get(start_row)
+            .map(|b| b.text_len())
+            .unwrap_or(0);
+        self.delete_in_block(start_row, start_col..start_len);
+        self.delete_in_block(end_row, 0..end_col);
+
+        for _ in (start_row + 1)..end_row {
+            if start_row + 1 < self.document.blocks.len() {
+                self.document.blocks.remove(start_row + 1);
+            }
+        }
+
+        if start_row + 1 < self.document.blocks.len() {
+            let end_block = self.document.blocks.remove(start_row + 1);
+            if let Some(start_block) = self.document.blocks.get_mut(start_row) {
+                start_block.inlines.extend(end_block.inlines);
+                start_block.normalize();
+            }
+        }
+    }
+
+    fn insert_text_in_block(&mut self, row: usize, col: usize, text: &str, style: &InlineStyle) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(block) = self.document.blocks.get_mut(row) else {
+            return;
+        };
+
+        let col = col.min(block.text_len());
+        let tail = Self::split_off_inlines_at(block, col);
+        block.inlines.push(InlineNode::Text(TextNode {
+            text: text.to_string(),
+            style: style.clone(),
+        }));
+        block.inlines.extend(tail);
+        block.normalize();
+    }
+
+    fn insert_plain_text(&mut self, row: usize, col: usize, text: &str, style: &InlineStyle) {
+        if text.is_empty() {
+            return;
+        }
+
+        if !text.contains('\n') {
+            self.insert_text_in_block(row, col, text, style);
+            return;
+        }
+
+        let successor_format = self
+            .document
+            .blocks
+            .get(row)
+            .map(|b| b.format.split_successor())
+            .unwrap_or_default();
+
+        let suffix = {
+            let Some(block) = self.document.blocks.get_mut(row) else {
+                return;
+            };
+            Self::split_off_inlines_at(block, col)
+        };
+
+        let mut parts = text.split('\n');
+        let first = parts.next().unwrap_or_default();
+        self.insert_text_in_block(row, col, first, style);
+
+        let mut insert_at = row + 1;
+        for part in parts {
+            let mut block = BlockNode {
+                format: successor_format,
+                inlines: vec![InlineNode::Text(TextNode {
+                    text: part.to_string(),
+                    style: style.clone(),
+                })],
+            };
+            block.normalize();
+            self.document.blocks.insert(insert_at, block);
+            insert_at += 1;
+        }
+
+        let last_row = insert_at.saturating_sub(1);
+        if let Some(last) = self.document.blocks.get_mut(last_row) {
+            last.inlines.extend(suffix);
+            last.normalize();
+        }
+    }
+
+    fn for_each_block_range_in_selection(
+        &self,
+        range: Range<usize>,
+        mut f: impl FnMut(usize, Range<usize>),
+    ) {
+        if range.is_empty() || self.document.blocks.is_empty() {
+            return;
+        }
+
+        let start_point = self.text.offset_to_point(range.start);
+        let end_point = self.text.offset_to_point(range.end);
+
+        let start_row = start_point
+            .row
+            .min(self.document.blocks.len().saturating_sub(1));
+        let end_row = end_point
+            .row
+            .min(self.document.blocks.len().saturating_sub(1));
+
+        for row in start_row..=end_row {
+            let block_len = self.document.blocks[row].text_len();
+            let local_start = if row == start_row {
+                start_point.column.min(block_len)
+            } else {
+                0
+            };
+            let local_end = if row == end_row {
+                end_point.column.min(block_len)
+            } else {
+                block_len
+            };
+
+            if local_start < local_end {
+                f(row, local_start..local_end);
+            }
+        }
+    }
+
+    fn update_inline_styles_in_block_range(
+        &mut self,
+        row: usize,
+        range: Range<usize>,
+        mut update: impl FnMut(&mut InlineStyle),
+    ) {
+        let Some(block) = self.document.blocks.get_mut(row) else {
+            return;
+        };
+
+        let mut start = range.start;
+        let mut end = range.end;
+        if end < start {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let block_len = block.text_len();
+        start = start.min(block_len);
+        end = end.min(block_len);
+        if start >= end {
+            return;
+        }
+
+        let tail = Self::split_off_inlines_at(block, end);
+        let mut mid = Self::split_off_inlines_at(block, start);
+
+        for node in &mut mid {
+            match node {
+                InlineNode::Text(text) => update(&mut text.style),
+            }
+        }
+
+        block.inlines.extend(mid);
+        block.inlines.extend(tail);
+        block.normalize();
     }
 
     pub(crate) fn scroll_cursor_into_view(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -461,9 +786,30 @@ impl RichTextState {
         if range.is_empty() {
             return get(&self.active_style);
         }
-        self.styles
-            .iter_runs_in_range(range)
-            .all(|(_, style)| get(style))
+
+        let mut enabled = true;
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            if !enabled {
+                return;
+            }
+            let mut cursor = 0usize;
+            for node in &self.document.blocks[row].inlines {
+                match node {
+                    InlineNode::Text(text) => {
+                        let end = cursor + text.text.len();
+                        let overlap_start = local_range.start.max(cursor);
+                        let overlap_end = local_range.end.min(end);
+                        if overlap_start < overlap_end && !get(&text.style) {
+                            enabled = false;
+                            return;
+                        }
+                        cursor = end;
+                    }
+                }
+            }
+        });
+
+        enabled
     }
 
     fn toggle_attr(
@@ -483,8 +829,15 @@ impl RichTextState {
 
         self.push_undo_snapshot();
         let enabled = self.is_attr_enabled(range.clone(), get);
-        self.styles
-            .update_range(range, |style| set(style, !enabled));
+        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            block_ranges.push((row, local_range));
+        });
+        for (row, local_range) in block_ranges {
+            self.update_inline_styles_in_block_range(row, local_range, |style| {
+                set(style, !enabled);
+            });
+        }
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -509,8 +862,8 @@ impl RichTextState {
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         for row in start_row..=end_row {
-            if let Some(block) = self.blocks.get_mut(row) {
-                block.kind = kind;
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = kind;
             }
         }
         cx.notify();
@@ -520,17 +873,113 @@ impl RichTextState {
     pub fn toggle_list(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
-        let all_match =
-            (start_row..=end_row).all(|row| self.blocks.get(row).is_some_and(|b| b.kind == kind));
+        let all_match = (start_row..=end_row).all(|row| {
+            self.document
+                .blocks
+                .get(row)
+                .is_some_and(|b| b.format.kind == kind)
+        });
         for row in start_row..=end_row {
-            if let Some(block) = self.blocks.get_mut(row) {
-                block.kind = if all_match {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = if all_match {
                     BlockKind::Paragraph
                 } else {
                     kind
                 };
             }
         }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn toggle_todo_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+        let all_todo = (start_row..=end_row).all(|row| {
+            self.document
+                .blocks
+                .get(row)
+                .is_some_and(|b| matches!(b.format.kind, BlockKind::Todo { .. }))
+        });
+
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = if all_todo {
+                    BlockKind::Paragraph
+                } else {
+                    BlockKind::Todo { checked: false }
+                };
+            }
+        }
+
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub(crate) fn toggle_todo_checked(
+        &mut self,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let checked = match self.document.blocks.get(row).map(|b| b.format.kind) {
+            Some(BlockKind::Todo { checked }) => checked,
+            _ => return,
+        };
+
+        self.push_undo_snapshot();
+
+        let Some(block) = self.document.blocks.get_mut(row) else {
+            return;
+        };
+        block.format.kind = BlockKind::Todo { checked: !checked };
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn insert_divider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.push_undo_snapshot();
+
+        let cursor = self.cursor();
+        let pos = self.text.offset_to_point(cursor);
+        let mut row = pos.row.min(self.document.blocks.len().saturating_sub(1));
+        if self.document.blocks.is_empty() {
+            self.document = RichTextDocument::default();
+            row = 0;
+        }
+
+        let replace_current =
+            self.document.blocks.get(row).is_some_and(|b| {
+                b.is_text_empty() && matches!(b.format.kind, BlockKind::Paragraph)
+            });
+
+        if replace_current {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = BlockKind::Divider;
+            }
+        } else {
+            row = row.saturating_add(1);
+            self.document.blocks.insert(row, BlockNode::default());
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = BlockKind::Divider;
+            }
+        }
+
+        // Ensure a paragraph after the divider and place the cursor there.
+        let insert_row = (row + 1).min(self.document.blocks.len());
+        self.document
+            .blocks
+            .insert(insert_row, BlockNode::default());
+
+        self.text = Rope::from(self.document.to_plain_text().as_str());
+        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self.selection = Selection::default();
+        self.ime_marked_range = None;
+        self.active_style = InlineStyle::default();
+        self.preferred_x = None;
+
+        let offset = self.text.line_start_offset(insert_row);
+        self.set_cursor(offset);
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -544,8 +993,8 @@ impl RichTextState {
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         for row in start_row..=end_row {
-            if let Some(block) = self.blocks.get_mut(row) {
-                block.size = size;
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.size = size;
             }
         }
         cx.notify();
@@ -566,7 +1015,15 @@ impl RichTextState {
         }
 
         self.push_undo_snapshot();
-        self.styles.update_range(range, |style| style.fg = color);
+        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            block_ranges.push((row, local_range));
+        });
+        for (row, local_range) in block_ranges {
+            self.update_inline_styles_in_block_range(row, local_range, |style| {
+                style.fg = color;
+            });
+        }
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -585,7 +1042,15 @@ impl RichTextState {
         }
 
         self.push_undo_snapshot();
-        self.styles.update_range(range, |style| style.bg = color);
+        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            block_ranges.push((row, local_range));
+        });
+        for (row, local_range) in block_ranges {
+            self.update_inline_styles_in_block_range(row, local_range, |style| {
+                style.bg = color;
+            });
+        }
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -608,8 +1073,8 @@ impl RichTextState {
             }
         }
 
-        start_row = start_row.min(self.blocks.len().saturating_sub(1));
-        end_row = end_row.min(self.blocks.len().saturating_sub(1));
+        start_row = start_row.min(self.document.blocks.len().saturating_sub(1));
+        end_row = end_row.min(self.document.blocks.len().saturating_sub(1));
         if end_row < start_row {
             std::mem::swap(&mut start_row, &mut end_row);
         }
@@ -626,39 +1091,51 @@ impl RichTextState {
         let line_end = line_range.end;
 
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-        for (range, style) in self.styles.iter_runs_in_range(line_start..line_end) {
-            let local = (range.start - line_start)..(range.end - line_start);
-            let mut highlight = HighlightStyle::default();
+        if let Some(block) = self.document.blocks.get(row) {
+            let mut cursor = 0usize;
+            for node in &block.inlines {
+                let InlineNode::Text(text) = node;
 
-            if style.bold {
-                highlight.font_weight = Some(FontWeight::BOLD);
-            }
-            if style.italic {
-                highlight.font_style = Some(FontStyle::Italic);
-            }
-            if style.underline {
-                highlight.underline = Some(UnderlineStyle {
-                    thickness: px(1.),
-                    color: style.fg,
-                    wavy: false,
-                });
-            }
-            if style.strikethrough {
-                highlight.strikethrough = Some(StrikethroughStyle {
-                    thickness: px(1.),
-                    color: style.fg,
-                    ..Default::default()
-                });
-            }
-            if let Some(color) = style.fg {
-                highlight.color = Some(color);
-            }
-            if let Some(bg) = style.bg {
-                highlight.background_color = Some(bg);
-            }
+                let len = text.text.len();
+                if len == 0 {
+                    continue;
+                }
 
-            if highlight != HighlightStyle::default() {
-                highlights.push((local, highlight));
+                let local = cursor..cursor + len;
+                let mut highlight = HighlightStyle::default();
+
+                if text.style.bold {
+                    highlight.font_weight = Some(FontWeight::BOLD);
+                }
+                if text.style.italic {
+                    highlight.font_style = Some(FontStyle::Italic);
+                }
+                if text.style.underline {
+                    highlight.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: text.style.fg,
+                        wavy: false,
+                    });
+                }
+                if text.style.strikethrough {
+                    highlight.strikethrough = Some(StrikethroughStyle {
+                        thickness: px(1.),
+                        color: text.style.fg,
+                        ..Default::default()
+                    });
+                }
+                if let Some(color) = text.style.fg {
+                    highlight.color = Some(color);
+                }
+                if let Some(bg) = text.style.bg {
+                    highlight.background_color = Some(bg);
+                }
+
+                if highlight != HighlightStyle::default() {
+                    highlights.push((local, highlight));
+                }
+
+                cursor += len;
             }
         }
 
@@ -743,18 +1220,42 @@ impl RichTextState {
             return;
         }
 
-        // Special: at start of line, downgrade heading/list.
+        // Special: at start of line, downgrade heading/list/quote/todo, or remove dividers.
         let pos = self.text.offset_to_point(cursor);
-        if pos.column == 0 && pos.row < self.blocks.len() {
-            let kind = self.blocks[pos.row].kind;
+        if pos.column == 0 && pos.row < self.document.blocks.len() {
+            let kind = self.document.blocks[pos.row].format.kind;
+            if matches!(kind, BlockKind::Divider) {
+                self.push_undo_snapshot();
+                self.document.blocks.remove(pos.row);
+                self.ensure_document_non_empty();
+                self.text = Rope::from(self.document.to_plain_text().as_str());
+                self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+
+                let target_row = pos
+                    .row
+                    .saturating_sub(1)
+                    .min(self.document.blocks.len() - 1);
+                let col = self
+                    .document
+                    .blocks
+                    .get(target_row)
+                    .map(|b| b.text_len())
+                    .unwrap_or(0);
+                let offset = self.text.line_start_offset(target_row) + col;
+                self.set_cursor(offset);
+                cx.notify();
+                return;
+            }
             if matches!(
                 kind,
                 BlockKind::Heading { .. }
+                    | BlockKind::Quote
                     | BlockKind::UnorderedListItem
                     | BlockKind::OrderedListItem
+                    | BlockKind::Todo { .. }
             ) {
                 self.push_undo_snapshot();
-                self.blocks[pos.row].kind = BlockKind::Paragraph;
+                self.document.blocks[pos.row].format.kind = BlockKind::Paragraph;
                 cx.notify();
                 return;
             }
@@ -789,18 +1290,45 @@ impl RichTextState {
         let cursor = self.cursor();
         let row = self.text.offset_to_point(cursor).row;
 
-        // Exit list on empty list item.
-        if row < self.blocks.len()
-            && matches!(
-                self.blocks[row].kind,
-                BlockKind::UnorderedListItem | BlockKind::OrderedListItem
-            )
-            && self.text.slice_line(row).len() == 0
-        {
-            self.push_undo_snapshot();
-            self.blocks[row].kind = BlockKind::Paragraph;
-            cx.notify();
-            return;
+        if row < self.document.blocks.len() {
+            let kind = self.document.blocks[row].format.kind;
+
+            // Divider is a void block; pressing enter should move to a new paragraph below.
+            if matches!(kind, BlockKind::Divider) {
+                self.push_undo_snapshot();
+                let insert_row = (row + 1).min(self.document.blocks.len());
+                self.document
+                    .blocks
+                    .insert(insert_row, BlockNode::default());
+
+                self.text = Rope::from(self.document.to_plain_text().as_str());
+                self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+                self.selection = Selection::default();
+                self.ime_marked_range = None;
+                self.active_style = InlineStyle::default();
+                self.preferred_x = None;
+
+                let offset = self.text.line_start_offset(insert_row);
+                self.set_cursor(offset);
+                cx.notify();
+                self.scroll_cursor_into_view(window, cx);
+                return;
+            }
+
+            // Exit list/quote/todo on an empty line.
+            if matches!(
+                kind,
+                BlockKind::UnorderedListItem
+                    | BlockKind::OrderedListItem
+                    | BlockKind::Quote
+                    | BlockKind::Todo { .. }
+            ) && self.document.blocks[row].is_text_empty()
+            {
+                self.push_undo_snapshot();
+                self.document.blocks[row].format.kind = BlockKind::Paragraph;
+                cx.notify();
+                return;
+            }
         }
 
         self.replace_bytes_range(cursor..cursor, "\n", window, cx, true, false, None);
@@ -978,9 +1506,7 @@ impl RichTextState {
             return;
         };
         self.redo_stack.push(Snapshot {
-            text: self.text.clone(),
-            styles: self.styles.clone(),
-            blocks: self.blocks.clone(),
+            document: self.document.clone(),
             selection: self.selection,
             active_style: self.active_style.clone(),
         });
@@ -993,9 +1519,7 @@ impl RichTextState {
             return;
         };
         self.undo_stack.push(Snapshot {
-            text: self.text.clone(),
-            styles: self.styles.clone(),
-            blocks: self.blocks.clone(),
+            document: self.document.clone(),
             selection: self.selection,
             active_style: self.active_style.clone(),
         });

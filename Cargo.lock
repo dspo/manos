@@ -2235,6 +2235,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-rich-text",
+ "serde_json",
 ]
 
 [[package]]
@@ -2267,6 +2268,7 @@ dependencies = [
  "gpui",
  "ropey",
  "serde",
+ "serde_json",
  "zed-sum-tree",
 ]
 

@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use ropey::{LineType, Rope, RopeSlice};
 use sum_tree::Bias;
 
@@ -20,8 +18,6 @@ pub(crate) trait RopeExt {
     fn line_end_offset(&self, row: usize) -> usize;
     fn slice_line(&self, row: usize) -> RopeSlice<'_>;
     fn lines_len(&self) -> usize;
-
-    fn replace(&mut self, range: Range<usize>, new_text: &str);
     fn char_at(&self, offset: usize) -> Option<char>;
 
     fn offset_to_point(&self, offset: usize) -> TextPoint;
@@ -65,13 +61,6 @@ impl RopeExt for Rope {
 
     fn lines_len(&self) -> usize {
         self.len_lines(LineType::LF)
-    }
-
-    fn replace(&mut self, range: Range<usize>, new_text: &str) {
-        let range =
-            self.clip_offset(range.start, Bias::Left)..self.clip_offset(range.end, Bias::Right);
-        self.remove(range.clone());
-        self.insert(range.start, new_text);
     }
 
     fn char_at(&self, offset: usize) -> Option<char> {

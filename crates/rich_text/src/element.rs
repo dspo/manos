@@ -1,16 +1,17 @@
 use std::ops::Range;
 
 use gpui::{
-    div, point, px, size, App, Bounds, CursorStyle, Element, ElementId, ElementInputHandler,
-    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
-    InteractiveElement as _, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledText, TextLayout, Window,
+    AnyElement, App, Bounds, CursorStyle, Element, ElementId, ElementInputHandler, GlobalElementId,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledText, TextLayout, Window, div, point, px, size,
 };
 
 use crate::rope_ext::RopeExt as _;
 
-use super::state::{BlockKind, BlockTextSize, LineLayoutCache, RichTextState};
+use super::state::{LineLayoutCache, RichTextState};
+use crate::document::{BlockKind, BlockTextSize};
 
 pub(crate) struct RichTextInputHandlerElement {
     state: gpui::Entity<RichTextState>,
@@ -304,6 +305,13 @@ impl Element for RichTextLineElement {
         self.highlights = highlights.clone();
 
         let text_style = window.text_style();
+        let render_text: SharedString = if text.is_empty() {
+            // Ensure empty lines still have stable layout bounds so hit-testing/caret placement
+            // work correctly (especially for list items where the prefix is rendered separately).
+            " ".into()
+        } else {
+            text.clone()
+        };
 
         let mut runs = Vec::new();
         let mut ix = 0;
@@ -314,11 +322,11 @@ impl Element for RichTextLineElement {
             runs.push(text_style.clone().highlight(*highlight).to_run(range.len()));
             ix = range.end;
         }
-        if ix < text.len() {
-            runs.push(text_style.to_run(text.len() - ix));
+        if ix < render_text.len() {
+            runs.push(text_style.to_run(render_text.len() - ix));
         }
 
-        self.styled_text = StyledText::new(text).with_runs(runs);
+        self.styled_text = StyledText::new(render_text).with_runs(runs);
         let (layout_id, _) =
             self.styled_text
                 .request_layout(global_element_id, inspector_id, window, cx);
@@ -423,14 +431,400 @@ impl Element for RichTextLineElement {
     }
 }
 
+pub(crate) struct DividerLineElement {
+    state: gpui::Entity<RichTextState>,
+    row: usize,
+    rule_color: gpui::Hsla,
+    text: SharedString,
+    styled_text: StyledText,
+}
+
+impl DividerLineElement {
+    pub(crate) fn new(
+        state: gpui::Entity<RichTextState>,
+        row: usize,
+        rule_color: gpui::Hsla,
+    ) -> Self {
+        Self {
+            state,
+            row,
+            rule_color,
+            text: SharedString::default(),
+            styled_text: StyledText::new(SharedString::default()),
+        }
+    }
+}
+
+impl IntoElement for DividerLineElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for DividerLineElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_element_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let state = self.state.read(cx);
+        let text: SharedString = state.text.slice_line(self.row).to_string().into();
+        self.text = text;
+
+        // Keep a 1-char placeholder so we have a stable TextLayout for hit-testing/caret.
+        let placeholder: SharedString = " ".into();
+        let text_style = window.text_style();
+        self.styled_text = StyledText::new(placeholder).with_runs(vec![text_style.to_run(1)]);
+        let (layout_id, _) =
+            self.styled_text
+                .request_layout(global_element_id, inspector_id, window, cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.styled_text
+            .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+
+        let line_len = self.text.len();
+        let line_start = self.state.read(cx).text.line_start_offset(self.row);
+        let text_layout = self.styled_text.layout().clone();
+
+        self.state.update(cx, |state, _| {
+            if self.row >= state.layout_cache.len() {
+                state.layout_cache.resize_with(self.row + 1, || None);
+            }
+            state.layout_cache[self.row] = Some(LineLayoutCache {
+                bounds,
+                start_offset: line_start,
+                line_len,
+                text_layout,
+            });
+        });
+
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let hitbox = prepaint;
+        window.set_cursor_style(CursorStyle::IBeam, hitbox);
+
+        let line_height = self.styled_text.layout().line_height();
+        let y = bounds.top() + (line_height - px(1.)) / 2.0;
+        let rule_bounds =
+            Bounds::from_corners(point(bounds.left(), y), point(bounds.right(), y + px(1.)));
+
+        window.paint_quad(gpui::quad(
+            rule_bounds,
+            px(0.),
+            self.rule_color,
+            gpui::Edges::default(),
+            gpui::transparent_black(),
+            gpui::BorderStyle::default(),
+        ));
+
+        // Mouse selection is handled by `RichTextInputHandlerElement`.
+    }
+}
+
+pub(crate) struct TodoCheckboxElement {
+    state: gpui::Entity<RichTextState>,
+    row: usize,
+    checked: bool,
+    styled_text: StyledText,
+}
+
+impl TodoCheckboxElement {
+    pub(crate) fn new(state: gpui::Entity<RichTextState>, row: usize, checked: bool) -> Self {
+        let glyph: SharedString = if checked { "☑".into() } else { "☐".into() };
+        Self {
+            state,
+            row,
+            checked,
+            styled_text: StyledText::new(glyph),
+        }
+    }
+}
+
+impl IntoElement for TodoCheckboxElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TodoCheckboxElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_element_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let glyph: SharedString = if self.checked {
+            "☑".into()
+        } else {
+            "☐".into()
+        };
+        let text_style = window.text_style();
+        // `to_run` expects a byte length; checkbox glyphs are multi-byte UTF-8.
+        let run_len = glyph.len().max(1);
+        self.styled_text = StyledText::new(glyph).with_runs(vec![text_style.to_run(run_len)]);
+        let (layout_id, _) =
+            self.styled_text
+                .request_layout(global_element_id, inspector_id, window, cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.styled_text
+            .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+
+        let hitbox = prepaint.clone();
+        window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+
+        window.on_mouse_event({
+            let state = self.state.clone();
+            let row = self.row;
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble() || event.button != MouseButton::Left {
+                    return;
+                }
+                if !hitbox.is_hovered(window) {
+                    return;
+                }
+
+                let focus_handle = { state.read(cx).focus_handle.clone() };
+                window.focus(&focus_handle);
+
+                state.update(cx, |this, cx| {
+                    this.toggle_todo_checked(row, window, cx);
+                });
+            }
+        });
+    }
+}
+
 impl Render for RichTextState {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let state = cx.entity().clone();
-        let muted_foreground = self.theme.muted_foreground;
+        let theme = self.theme;
+        let muted_foreground = theme.muted_foreground;
         let base_text_size = window.text_style().font_size.to_pixels(window.rem_size());
 
         let mut ordered_counter = 1usize;
-        let blocks = self.blocks.clone();
+        let blocks = self
+            .document
+            .blocks
+            .iter()
+            .map(|block| block.format)
+            .collect::<Vec<_>>();
+
+        let mut rendered_blocks: Vec<AnyElement> = Vec::with_capacity(blocks.len());
+        let mut row = 0usize;
+
+        while row < blocks.len() {
+            let block = blocks[row];
+
+            if matches!(block.kind, BlockKind::Quote) {
+                ordered_counter = 1;
+                let mut quote_lines: Vec<AnyElement> = Vec::new();
+
+                while row < blocks.len() && matches!(blocks[row].kind, BlockKind::Quote) {
+                    let quote_block = blocks[row];
+                    let line = RichTextLineElement::new(state.clone(), row).into_any_element();
+                    let mut content = div().child(line);
+
+                    content = match quote_block.size {
+                        BlockTextSize::Small => {
+                            content.text_size(px(f32::from(base_text_size) * 0.875))
+                        }
+                        BlockTextSize::Normal => content,
+                        BlockTextSize::Large => {
+                            content.text_size(px(f32::from(base_text_size) * 1.125))
+                        }
+                    };
+
+                    quote_lines.push(
+                        content
+                            .text_color(theme.muted_foreground)
+                            .italic()
+                            .into_any_element(),
+                    );
+                    row += 1;
+                }
+
+                rendered_blocks.push(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(12.))
+                        .px(px(8.))
+                        .py(px(2.))
+                        .child(div().w(px(3.)).bg(theme.border).rounded(px(2.)))
+                        .child(div().flex_1().flex_col().gap(px(4.)).children(quote_lines))
+                        .into_any_element(),
+                );
+
+                continue;
+            }
+
+            let line: AnyElement = match block.kind {
+                BlockKind::Divider => {
+                    DividerLineElement::new(state.clone(), row, theme.border).into_any_element()
+                }
+                _ => RichTextLineElement::new(state.clone(), row).into_any_element(),
+            };
+
+            let mut content = div().child(line);
+            content = match block.kind {
+                BlockKind::Heading { level } => match level {
+                    1 => content
+                        .text_size(px(f32::from(base_text_size) * 1.8))
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                    2 => content
+                        .text_size(px(f32::from(base_text_size) * 1.4))
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                    3 => content
+                        .text_size(px(f32::from(base_text_size) * 1.2))
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                    4 => content
+                        .text_size(px(f32::from(base_text_size) * 1.1))
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                    5 => content
+                        .text_size(px(f32::from(base_text_size) * 1.05))
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                    _ => content.font_weight(gpui::FontWeight::SEMIBOLD),
+                },
+                _ => match block.size {
+                    BlockTextSize::Small => {
+                        content.text_size(px(f32::from(base_text_size) * 0.875))
+                    }
+                    BlockTextSize::Normal => content,
+                    BlockTextSize::Large => {
+                        content.text_size(px(f32::from(base_text_size) * 1.125))
+                    }
+                },
+            };
+
+            let block_el: AnyElement = match block.kind {
+                BlockKind::Divider => {
+                    ordered_counter = 1;
+                    div().w_full().py(px(6.)).child(content).into_any_element()
+                }
+                BlockKind::UnorderedListItem => {
+                    ordered_counter = 1;
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(div().text_color(muted_foreground).child("•"))
+                        .child(content.flex_1())
+                        .into_any_element()
+                }
+                BlockKind::OrderedListItem => {
+                    let prefix = format!("{}.", ordered_counter);
+                    ordered_counter += 1;
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(div().text_color(muted_foreground).child(prefix))
+                        .child(content.flex_1())
+                        .into_any_element()
+                }
+                BlockKind::Todo { checked } => {
+                    ordered_counter = 1;
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_color(muted_foreground)
+                                .child(TodoCheckboxElement::new(state.clone(), row, checked)),
+                        )
+                        .child(content.flex_1())
+                        .into_any_element()
+                }
+                _ => {
+                    ordered_counter = 1;
+                    content.into_any_element()
+                }
+            };
+
+            rendered_blocks.push(block_el);
+            row += 1;
+        }
 
         div()
             .id("rich-text-state")
@@ -457,69 +851,7 @@ impl Render for RichTextState {
                             .flex_col()
                             .w_full()
                             .gap(px(4.))
-                            .children(blocks.into_iter().enumerate().map(move |(row, block)| {
-                                let line = RichTextLineElement::new(state.clone(), row);
-                                let content = div().flex_1().child(line);
-
-                                let content =
-                                    match block.kind {
-                                        BlockKind::Heading { level } => match level {
-                                            1 => content
-                                                .text_size(px(f32::from(base_text_size) * 1.8))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD),
-                                            2 => content
-                                                .text_size(px(f32::from(base_text_size) * 1.4))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD),
-                                            _ => content
-                                                .text_size(px(f32::from(base_text_size) * 1.2))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD),
-                                        },
-                                        _ => match block.size {
-                                            BlockTextSize::Small => content
-                                                .text_size(px(f32::from(base_text_size) * 0.875)),
-                                            BlockTextSize::Normal => content,
-                                            BlockTextSize::Large => content
-                                                .text_size(px(f32::from(base_text_size) * 1.125)),
-                                        },
-                                    };
-
-                                match block.kind {
-                                    BlockKind::UnorderedListItem => {
-                                        ordered_counter = 1;
-                                        div()
-                                            .flex_row()
-                                            .items_start()
-                                            .gap(px(8.))
-                                            .child(
-                                                div()
-                                                    .w(px(28.))
-                                                    .text_color(muted_foreground)
-                                                    .child("•"),
-                                            )
-                                            .child(content)
-                                    }
-                                    BlockKind::OrderedListItem => {
-                                        let prefix = format!("{}.", ordered_counter);
-                                        ordered_counter += 1;
-
-                                        div()
-                                            .flex_row()
-                                            .items_start()
-                                            .gap(px(8.))
-                                            .child(
-                                                div()
-                                                    .w(px(28.))
-                                                    .text_color(muted_foreground)
-                                                    .child(prefix),
-                                            )
-                                            .child(content)
-                                    }
-                                    _ => {
-                                        ordered_counter = 1;
-                                        content
-                                    }
-                                }
-                            })),
+                            .children(rendered_blocks),
                     ),
             )
     }
