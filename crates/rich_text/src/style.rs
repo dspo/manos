@@ -8,6 +8,7 @@ pub struct InlineStyle {
     pub strikethrough: bool,
     pub fg: Option<Hsla>,
     pub bg: Option<Hsla>,
+    pub link: Option<String>,
 }
 
 impl InlineStyle {

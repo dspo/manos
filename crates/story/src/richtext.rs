@@ -1,14 +1,19 @@
 use std::path::PathBuf;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
+use gpui_component::Root;
 use gpui_component::WindowExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
+use gpui_component::tooltip::Tooltip;
 use gpui_rich_text::{
-    BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, InlineStyle, RichTextDocument,
-    RichTextEditor, RichTextState, RichTextTheme, RichTextValue, SlateNode, TextNode, ToggleBold,
-    ToggleItalic, ToggleStrikethrough, ToggleUnderline,
+    BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, InlineStyle,
+    OrderedListStyle, RichTextDocument, RichTextEditor, RichTextState, RichTextTheme,
+    RichTextValue, SlateNode, TextNode, ToggleBold, ToggleItalic, ToggleStrikethrough,
+    ToggleUnderline,
 };
 
 fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
@@ -21,7 +26,11 @@ fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
 
     fn block(kind: BlockKind, size: BlockTextSize, runs: Vec<InlineNode>) -> BlockNode {
         let mut block = BlockNode {
-            format: BlockFormat { kind, size },
+            format: BlockFormat {
+                kind,
+                size,
+                ..Default::default()
+            },
             inlines: runs,
         };
         block.normalize();
@@ -55,6 +64,11 @@ fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
     };
     let highlight = InlineStyle {
         bg: Some(theme.yellow_light),
+        ..InlineStyle::default()
+    };
+    let link = InlineStyle {
+        fg: Some(theme.blue),
+        link: Some("https://github.com/zed-industries/zed".to_string()),
         ..InlineStyle::default()
     };
 
@@ -137,6 +151,41 @@ fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
             run(".", normal.clone()),
         ],
     ));
+    blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Normal,
+        vec![
+            run("Link (Cmd/Ctrl-click to open): ", normal.clone()),
+            run("Zed Editor", link.clone()),
+        ],
+    ));
+
+    blocks.push(block(
+        BlockKind::Heading { level: 2 },
+        BlockTextSize::Normal,
+        vec![run("Alignment", bold.clone())],
+    ));
+    blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Normal,
+        vec![run("Left aligned paragraph (default).", normal.clone())],
+    ));
+
+    let mut center = block(
+        BlockKind::Paragraph,
+        BlockTextSize::Normal,
+        vec![run("Center aligned paragraph.", normal.clone())],
+    );
+    center.format.align = BlockAlign::Center;
+    blocks.push(center);
+
+    let mut right = block(
+        BlockKind::Paragraph,
+        BlockTextSize::Normal,
+        vec![run("Right aligned paragraph.", normal.clone())],
+    );
+    right.format.align = BlockAlign::Right;
+    blocks.push(right);
 
     blocks.push(block(
         BlockKind::Heading { level: 2 },
@@ -156,16 +205,107 @@ fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
             run("bold", bold.clone()),
         ],
     ));
+
     blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Small,
+        vec![run("Numbered list styles:", normal.clone())],
+    ));
+
+    let mut ol_decimal_1 = block(
         BlockKind::OrderedListItem,
         BlockTextSize::Normal,
-        vec![run("Numbered item", normal.clone())],
-    ));
-    blocks.push(block(
+        vec![run("Decimal (1, 2, 3)", normal.clone())],
+    );
+    ol_decimal_1.format.ordered_list_style = OrderedListStyle::Decimal;
+    blocks.push(ol_decimal_1);
+    let mut ol_decimal_2 = block(
         BlockKind::OrderedListItem,
         BlockTextSize::Normal,
-        vec![run("Another numbered item", normal.clone())],
+        vec![run("Still decimal", normal.clone())],
+    );
+    ol_decimal_2.format.ordered_list_style = OrderedListStyle::Decimal;
+    blocks.push(ol_decimal_2);
+
+    blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Small,
+        vec![run("Lower alpha:", normal.clone())],
     ));
+    let mut ol_la_1 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Lower alpha (a, b, c)", normal.clone())],
+    );
+    ol_la_1.format.ordered_list_style = OrderedListStyle::LowerAlpha;
+    blocks.push(ol_la_1);
+    let mut ol_la_2 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Still lower alpha", normal.clone())],
+    );
+    ol_la_2.format.ordered_list_style = OrderedListStyle::LowerAlpha;
+    blocks.push(ol_la_2);
+
+    blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Small,
+        vec![run("Upper alpha:", normal.clone())],
+    ));
+    let mut ol_ua_1 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Upper alpha (A, B, C)", normal.clone())],
+    );
+    ol_ua_1.format.ordered_list_style = OrderedListStyle::UpperAlpha;
+    blocks.push(ol_ua_1);
+    let mut ol_ua_2 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Still upper alpha", normal.clone())],
+    );
+    ol_ua_2.format.ordered_list_style = OrderedListStyle::UpperAlpha;
+    blocks.push(ol_ua_2);
+
+    blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Small,
+        vec![run("Lower roman:", normal.clone())],
+    ));
+    let mut ol_lr_1 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Lower roman (i, ii, iii)", normal.clone())],
+    );
+    ol_lr_1.format.ordered_list_style = OrderedListStyle::LowerRoman;
+    blocks.push(ol_lr_1);
+    let mut ol_lr_2 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Still lower roman", normal.clone())],
+    );
+    ol_lr_2.format.ordered_list_style = OrderedListStyle::LowerRoman;
+    blocks.push(ol_lr_2);
+
+    blocks.push(block(
+        BlockKind::Paragraph,
+        BlockTextSize::Small,
+        vec![run("Upper roman:", normal.clone())],
+    ));
+    let mut ol_ur_1 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Upper roman (I, II, III)", normal.clone())],
+    );
+    ol_ur_1.format.ordered_list_style = OrderedListStyle::UpperRoman;
+    blocks.push(ol_ur_1);
+    let mut ol_ur_2 = block(
+        BlockKind::OrderedListItem,
+        BlockTextSize::Normal,
+        vec![run("Still upper roman", normal.clone())],
+    );
+    ol_ur_2.format.ordered_list_style = OrderedListStyle::UpperRoman;
+    blocks.push(ol_ur_2);
 
     blocks.push(block(
         BlockKind::Heading { level: 2 },
@@ -216,6 +356,7 @@ fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
 pub struct RichTextExample {
     editor: Entity<RichTextState>,
     file_path: Option<PathBuf>,
+    link_input: Entity<InputState>,
 }
 
 impl RichTextExample {
@@ -227,6 +368,7 @@ impl RichTextExample {
             radius: theme.radius,
             foreground: theme.foreground,
             muted_foreground: theme.muted_foreground,
+            link: theme.blue,
             selection: theme.selection,
         };
 
@@ -235,9 +377,15 @@ impl RichTextExample {
                 .theme(rich_text_theme)
                 .default_richtext_value(demo_richtext_value(&theme))
         });
+        let link_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("https://example.com", window, cx);
+            state
+        });
         Self {
             editor,
             file_path: None,
+            link_input,
         }
     }
 
@@ -257,6 +405,33 @@ impl RichTextExample {
         let fallback = RichTextValue::from_document(&RichTextDocument::from_plain_text(content));
         let warning = "Opened as plain text because the JSON could not be parsed".to_string();
         (fallback, Some(warning))
+    }
+
+    fn open_link_dialog(&self, initial: String, window: &mut Window, cx: &mut Context<Self>) {
+        let link_input = self.link_input.clone();
+        let editor = self.editor.clone();
+
+        link_input.update(cx, |state, cx| {
+            state.set_value(initial, window, cx);
+        });
+
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let link_input = link_input.clone();
+            let editor = editor.clone();
+            dialog
+                .title("Set Link")
+                .w(px(520.))
+                .child(div().p(px(12.)).child(Input::new(&link_input).w_full()))
+                .on_ok(move |_, window, cx| {
+                    let url = link_input.read(cx).value().to_string();
+                    editor.update(cx, |editor, cx| {
+                        editor.set_link_at_cursor_or_selection(Some(url), window, cx);
+                    });
+                    let handle = editor.read(cx).focus_handle();
+                    window.focus(&handle);
+                    true
+                })
+        });
     }
 
     fn open_from_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -379,7 +554,7 @@ impl RichTextExample {
 }
 
 impl Render for RichTextExample {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let red = theme.red;
         let green = theme.green;
@@ -388,12 +563,40 @@ impl Render for RichTextExample {
         let cyan_light = theme.cyan_light;
         let magenta_light = theme.magenta_light;
 
+        let toolbar_button = |id: &'static str, label: &'static str, selected: bool| {
+            div()
+                .id(id)
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(32.))
+                .min_w(px(32.))
+                .px(px(6.))
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .bg(theme.transparent)
+                .text_color(theme.foreground)
+                .hover(|this| this.bg(theme.muted).text_color(theme.muted_foreground))
+                .active(|this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                .when(selected, |this| {
+                    this.bg(theme.accent).text_color(theme.accent_foreground)
+                })
+                .child(label)
+        };
+        let toolbar_sep = || div().mx(px(6.)).h(px(18.)).w(px(1.)).bg(theme.border);
+
         div()
             .size_full()
+            .relative()
+            .flex()
+            .flex_col()
             .bg(theme.muted)
             .child(
                 div()
                     .w_full()
+                    .flex_none()
                     .bg(theme.background)
                     .border_1()
                     .border_color(theme.border)
@@ -438,60 +641,117 @@ impl Render for RichTextExample {
                                         this.save_as(window, cx);
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(toolbar_sep())
                             .child(
-                                Button::new("bold")
-                                    .ghost()
-                                    .label("B")
-                                    .tooltip_with_action("Bold", &ToggleBold, Some("RichText"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                toolbar_button(
+                                    "bold",
+                                    "B",
+                                    self.editor.read(cx).bold_mark_active(),
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Bold")
+                                        .action(&ToggleBold, Some("RichText"))
+                                        .build(window, cx)
+                                })
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_bold_mark(window, cx);
                                         });
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("italic")
-                                    .ghost()
-                                    .label("I")
-                                    .tooltip_with_action("Italic", &ToggleItalic, Some("RichText"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                toolbar_button(
+                                    "italic",
+                                    "I",
+                                    self.editor.read(cx).italic_mark_active(),
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Italic")
+                                        .action(&ToggleItalic, Some("RichText"))
+                                        .build(window, cx)
+                                })
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_italic_mark(window, cx);
                                         });
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("underline")
-                                    .ghost()
-                                    .label("U")
-                                    .tooltip_with_action(
-                                        "Underline",
-                                        &ToggleUnderline,
-                                        Some("RichText"),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                toolbar_button(
+                                    "underline",
+                                    "U",
+                                    self.editor.read(cx).underline_mark_active(),
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Underline")
+                                        .action(&ToggleUnderline, Some("RichText"))
+                                        .build(window, cx)
+                                })
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_underline_mark(window, cx);
                                         });
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("strike")
-                                    .ghost()
-                                    .label("S")
-                                    .tooltip_with_action(
-                                        "Strikethrough",
-                                        &ToggleStrikethrough,
-                                        Some("RichText"),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                toolbar_button(
+                                    "strike",
+                                    "S",
+                                    self.editor.read(cx).strikethrough_mark_active(),
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Strikethrough")
+                                        .action(&ToggleStrikethrough, Some("RichText"))
+                                        .build(window, cx)
+                                })
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_strikethrough_mark(window, cx);
                                         });
+                                    },
+                                )),
+                            )
+                            .child(toolbar_sep())
+                            .child(
+                                toolbar_button(
+                                    "link",
+                                    "Link",
+                                    self.editor.read(cx).current_link_url().is_some(),
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Set or edit link URL").build(window, cx)
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        let current = this.editor.read(cx).current_link_url();
+                                        let initial = current.unwrap_or_default();
+                                        this.open_link_dialog(initial, window, cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                                toolbar_button("unlink", "Unlink", false)
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Remove link").build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor
+                                                .set_link_at_cursor_or_selection(None, window, cx);
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(toolbar_sep())
                             .child(
                                 Button::new("h1")
                                     .ghost()
@@ -633,6 +893,46 @@ impl Render for RichTextExample {
                             )
                             .child(div().w(px(12.)))
                             .child(
+                                Button::new("align-left")
+                                    .ghost()
+                                    .label("L")
+                                    .tooltip("Align left")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.set_block_align(BlockAlign::Left, window, cx);
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("align-center")
+                                    .ghost()
+                                    .label("C")
+                                    .tooltip("Align center")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.set_block_align(BlockAlign::Center, window, cx);
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("align-right")
+                                    .ghost()
+                                    .label("R")
+                                    .tooltip("Align right")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.set_block_align(BlockAlign::Right, window, cx);
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(div().w(px(12.)))
+                            .child(
                                 Button::new("ul")
                                     .ghost()
                                     .label("•")
@@ -650,14 +950,82 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol")
+                                Button::new("ol-dec")
                                     .ghost()
                                     .label("1.")
-                                    .tooltip("Numbered list")
+                                    .tooltip("Numbered list: Decimal")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_list(
-                                                BlockKind::OrderedListItem,
+                                            editor.toggle_ordered_list(
+                                                OrderedListStyle::Decimal,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("ol-la")
+                                    .ghost()
+                                    .label("a.")
+                                    .tooltip("Numbered list: Lower alpha")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.toggle_ordered_list(
+                                                OrderedListStyle::LowerAlpha,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("ol-ua")
+                                    .ghost()
+                                    .label("A.")
+                                    .tooltip("Numbered list: Upper alpha")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.toggle_ordered_list(
+                                                OrderedListStyle::UpperAlpha,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("ol-lr")
+                                    .ghost()
+                                    .label("i.")
+                                    .tooltip("Numbered list: Lower roman")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.toggle_ordered_list(
+                                                OrderedListStyle::LowerRoman,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("ol-ur")
+                                    .ghost()
+                                    .label("I.")
+                                    .tooltip("Numbered list: Upper roman")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.toggle_ordered_list(
+                                                OrderedListStyle::UpperRoman,
                                                 window,
                                                 cx,
                                             );
@@ -804,16 +1172,18 @@ impl Render for RichTextExample {
                     ),
             )
             .child(
-                div().flex_1().p(px(16.)).child(
+                div().flex_1().min_h(px(0.)).p(px(16.)).child(
                     div().flex().flex_row().justify_center().size_full().child(
                         div()
                             .w_full()
                             .max_w(px(960.))
                             .h_full()
+                            .min_h(px(0.))
                             .bg(theme.background)
                             .border_1()
                             .border_color(theme.border)
                             .rounded(px(12.))
+                            .relative()
                             .child(
                                 RichTextEditor::new(&self.editor)
                                     .bordered(false)
@@ -822,6 +1192,86 @@ impl Render for RichTextExample {
                             ),
                     ),
                 ),
+            )
+            .when_some(
+                self.editor.read(cx).active_link_overlay(),
+                |this, overlay| {
+                    let url_for_edit = overlay.url.clone();
+                    let url_for_open = overlay.url.clone();
+                    let anchor = overlay.anchor;
+                    let theme = cx.theme();
+                    let make_button = |id: &'static str, label: &'static str| {
+                        div()
+                            .id(id)
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(32.))
+                            .rounded(px(6.))
+                            .px(px(12.))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .bg(theme.transparent)
+                            .text_color(theme.popover_foreground)
+                            .hover(|this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                            .active(|this| {
+                                this.bg(theme.accent).text_color(theme.accent_foreground)
+                            })
+                            .child(label)
+                    };
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(anchor.y)
+                            .left(anchor.x)
+                            .block_mouse_except_scroll()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .bg(theme.popover)
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded(theme.radius)
+                            .p(px(4.))
+                            .shadow_md()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(make_button("link-toolbar-edit", "Edit link").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.open_link_dialog(url_for_edit.clone(), window, cx);
+                                }),
+                            ))
+                            .child(make_button("link-toolbar-open", "Open").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_this, _, _window, cx| {
+                                    cx.open_url(&url_for_open);
+                                }),
+                            ))
+                            .child(div().w(px(1.)).h(px(22.)).bg(theme.border))
+                            .child(make_button("link-toolbar-unlink", "Unlink").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.editor.update(cx, |editor, cx| {
+                                        editor.set_link_at_cursor_or_selection(None, window, cx);
+                                    });
+                                    let handle = this.editor.read(cx).focus_handle();
+                                    window.focus(&handle);
+                                }),
+                            )),
+                    )
+                },
+            )
+            .when_some(Root::render_sheet_layer(window, cx), |this, layer| {
+                this.child(layer)
+            })
+            .when_some(Root::render_dialog_layer(window, cx), |this, layer| {
+                this.child(layer)
+            })
+            .when_some(
+                Root::render_notification_layer(window, cx),
+                |this, layer| this.child(layer),
             )
     }
 }

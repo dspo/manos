@@ -2,7 +2,8 @@ use gpui::{Hsla, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, RichTextDocument, TextNode,
+    BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, OrderedListStyle,
+    RichTextDocument, TextNode,
 };
 use crate::style::InlineStyle;
 
@@ -70,14 +71,17 @@ impl RichTextValue {
                 }
                 BlockKind::OrderedListItem => {
                     let mut items = Vec::new();
+                    let style = document.blocks[ix].format.ordered_list_style;
                     while ix < document.blocks.len()
                         && matches!(document.blocks[ix].format.kind, BlockKind::OrderedListItem)
+                        && document.blocks[ix].format.ordered_list_style == style
                     {
                         items.push(SlateNode::Element(block_to_list_item(&document.blocks[ix])));
                         ix += 1;
                     }
                     out.push(SlateNode::Element(SlateElement {
                         kind: "numbered-list".to_string(),
+                        list_style: Some(ordered_list_style_to_string(style)),
                         children: items,
                         ..Default::default()
                     }));
@@ -132,6 +136,15 @@ pub struct SlateElement {
 
     #[serde(default, rename = "listType", skip_serializing_if = "Option::is_none")]
     pub list_type: Option<String>,
+
+    #[serde(default, rename = "listStyle", skip_serializing_if = "Option::is_none")]
+    pub list_style: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "href")]
+    pub url: Option<String>,
 
     #[serde(default)]
     pub children: Vec<SlateNode>,
@@ -192,6 +205,13 @@ fn block_to_element(block: &BlockNode) -> SlateElement {
         BlockKind::OrderedListItem => Some("ordered".to_string()),
         _ => None,
     };
+    let list_style = match block.format.kind {
+        BlockKind::OrderedListItem => Some(ordered_list_style_to_string(
+            block.format.ordered_list_style,
+        )),
+        _ => None,
+    };
+    let align = block_align_to_string(block.format.align);
 
     SlateElement {
         kind,
@@ -199,11 +219,14 @@ fn block_to_element(block: &BlockNode) -> SlateElement {
         checked,
         text_size,
         list_type,
+        list_style,
+        align,
         children: if matches!(block.format.kind, BlockKind::Divider) {
             Vec::new()
         } else {
             inlines_to_slate_children(&block.inlines)
         },
+        ..Default::default()
     }
 }
 
@@ -211,6 +234,7 @@ fn block_to_quote_paragraph(block: &BlockNode) -> SlateElement {
     SlateElement {
         kind: "paragraph".to_string(),
         text_size: block_text_size_to_string(block.format.size),
+        align: block_align_to_string(block.format.align),
         children: inlines_to_slate_children(&block.inlines),
         ..Default::default()
     }
@@ -220,6 +244,7 @@ fn block_to_list_item(block: &BlockNode) -> SlateElement {
     SlateElement {
         kind: "list-item".to_string(),
         text_size: block_text_size_to_string(block.format.size),
+        align: block_align_to_string(block.format.align),
         children: inlines_to_slate_children(&block.inlines),
         ..Default::default()
     }
@@ -227,17 +252,53 @@ fn block_to_list_item(block: &BlockNode) -> SlateElement {
 
 fn inlines_to_slate_children(inlines: &[InlineNode]) -> Vec<SlateNode> {
     let mut children = Vec::new();
+
+    let mut current_link: Option<String> = None;
+    let mut link_children: Vec<SlateNode> = Vec::new();
+
+    let flush_link = |children: &mut Vec<SlateNode>,
+                      current_link: &mut Option<String>,
+                      link_children: &mut Vec<SlateNode>| {
+        if let Some(url) = current_link.take() {
+            let nodes = std::mem::take(link_children);
+            children.push(SlateNode::Element(SlateElement {
+                kind: "link".to_string(),
+                url: Some(url),
+                children: nodes,
+                ..Default::default()
+            }));
+        } else if !link_children.is_empty() {
+            children.extend(std::mem::take(link_children));
+        }
+    };
+
     for node in inlines {
-        match node {
-            InlineNode::Text(text) => children.push(SlateNode::Text(text_node_to_slate(text))),
+        let InlineNode::Text(text) = node;
+
+        match text.style.link.as_deref() {
+            Some(url) => {
+                if current_link.as_deref() != Some(url) {
+                    flush_link(&mut children, &mut current_link, &mut link_children);
+                    current_link = Some(url.to_string());
+                }
+                link_children.push(SlateNode::Text(text_node_to_slate(text)));
+            }
+            None => {
+                flush_link(&mut children, &mut current_link, &mut link_children);
+                children.push(SlateNode::Text(text_node_to_slate(text)));
+            }
         }
     }
+
+    flush_link(&mut children, &mut current_link, &mut link_children);
+
     if children.is_empty() {
         children.push(SlateNode::Text(SlateText {
             text: String::new(),
             ..Default::default()
         }));
     }
+
     children
 }
 
@@ -318,6 +379,7 @@ fn quote_container_to_blocks(element: &SlateElement) -> Vec<BlockNode> {
                     format: BlockFormat {
                         kind: BlockKind::Quote,
                         size: BlockTextSize::Normal,
+                        ..Default::default()
                     },
                     inlines: vec![InlineNode::Text(slate_text_to_text_node(text))],
                 };
@@ -332,6 +394,7 @@ fn quote_container_to_blocks(element: &SlateElement) -> Vec<BlockNode> {
             format: BlockFormat {
                 kind: BlockKind::Quote,
                 size: BlockTextSize::Normal,
+                ..Default::default()
             },
             ..BlockNode::default()
         });
@@ -349,6 +412,8 @@ fn element_to_divider_block() -> BlockNode {
 
 fn list_container_to_blocks(element: &SlateElement, kind: BlockKind) -> Vec<BlockNode> {
     let mut blocks = Vec::new();
+    let ordered_list_style =
+        (kind == BlockKind::OrderedListItem).then(|| parse_ordered_list_style(element));
 
     for child in &element.children {
         match child {
@@ -364,6 +429,8 @@ fn list_container_to_blocks(element: &SlateElement, kind: BlockKind) -> Vec<Bloc
                     format: BlockFormat {
                         kind,
                         size: BlockTextSize::Normal,
+                        ordered_list_style: ordered_list_style.unwrap_or_default(),
+                        ..Default::default()
                     },
                     inlines: vec![InlineNode::Text(slate_text_to_text_node(text))],
                 };
@@ -378,6 +445,8 @@ fn list_container_to_blocks(element: &SlateElement, kind: BlockKind) -> Vec<Bloc
             format: BlockFormat {
                 kind,
                 size: BlockTextSize::Normal,
+                ordered_list_style: ordered_list_style.unwrap_or_default(),
+                ..Default::default()
             },
             inlines: vec![InlineNode::Text(TextNode {
                 text: String::new(),
@@ -386,6 +455,12 @@ fn list_container_to_blocks(element: &SlateElement, kind: BlockKind) -> Vec<Bloc
         };
         block.normalize();
         blocks.push(block);
+    }
+
+    if let Some(style) = ordered_list_style {
+        for block in &mut blocks {
+            block.format.ordered_list_style = style;
+        }
     }
 
     blocks
@@ -398,10 +473,21 @@ fn is_list_item(element: &SlateElement) -> bool {
 fn element_to_block(element: &SlateElement, force_kind: Option<BlockKind>) -> BlockNode {
     let kind = force_kind.unwrap_or_else(|| parse_block_kind(element));
     let size = parse_text_size(element.text_size.as_deref());
-    let format = BlockFormat { kind, size };
+    let ordered_list_style = if kind == BlockKind::OrderedListItem {
+        parse_ordered_list_style(element)
+    } else {
+        OrderedListStyle::default()
+    };
+    let align = parse_block_align(element.align.as_deref());
+    let format = BlockFormat {
+        kind,
+        size,
+        ordered_list_style,
+        align,
+    };
 
     let mut inlines = Vec::new();
-    collect_text_leaves(&element.children, &mut inlines);
+    collect_text_leaves(&element.children, None, &mut inlines);
     if inlines.is_empty() {
         inlines.push(InlineNode::Text(TextNode {
             text: String::new(),
@@ -414,11 +500,66 @@ fn element_to_block(element: &SlateElement, force_kind: Option<BlockKind>) -> Bl
     block
 }
 
-fn collect_text_leaves(nodes: &[SlateNode], out: &mut Vec<InlineNode>) {
+fn parse_ordered_list_style(element: &SlateElement) -> OrderedListStyle {
+    let Some(style) = element.list_style.as_deref() else {
+        return OrderedListStyle::Decimal;
+    };
+
+    match style.to_ascii_lowercase().as_str() {
+        "decimal" => OrderedListStyle::Decimal,
+        "lower-alpha" | "loweralpha" => OrderedListStyle::LowerAlpha,
+        "upper-alpha" | "upperalpha" => OrderedListStyle::UpperAlpha,
+        "lower-roman" | "lowerroman" => OrderedListStyle::LowerRoman,
+        "upper-roman" | "upperroman" => OrderedListStyle::UpperRoman,
+        _ => OrderedListStyle::Decimal,
+    }
+}
+
+fn ordered_list_style_to_string(style: OrderedListStyle) -> String {
+    match style {
+        OrderedListStyle::Decimal => "decimal",
+        OrderedListStyle::LowerAlpha => "lower-alpha",
+        OrderedListStyle::UpperAlpha => "upper-alpha",
+        OrderedListStyle::LowerRoman => "lower-roman",
+        OrderedListStyle::UpperRoman => "upper-roman",
+    }
+    .to_string()
+}
+
+fn block_align_to_string(align: BlockAlign) -> Option<String> {
+    match align {
+        BlockAlign::Left => None,
+        BlockAlign::Center => Some("center".to_string()),
+        BlockAlign::Right => Some("right".to_string()),
+    }
+}
+
+fn parse_block_align(align: Option<&str>) -> BlockAlign {
+    match align.map(|s| s.to_ascii_lowercase()) {
+        Some(ref s) if s == "center" => BlockAlign::Center,
+        Some(ref s) if s == "right" => BlockAlign::Right,
+        _ => BlockAlign::Left,
+    }
+}
+
+fn collect_text_leaves(nodes: &[SlateNode], link: Option<&str>, out: &mut Vec<InlineNode>) {
     for node in nodes {
         match node {
-            SlateNode::Text(text) => out.push(InlineNode::Text(slate_text_to_text_node(text))),
-            SlateNode::Element(element) => collect_text_leaves(&element.children, out),
+            SlateNode::Text(text) => {
+                let mut text_node = slate_text_to_text_node(text);
+                if let Some(url) = link {
+                    text_node.style.link = Some(url.to_string());
+                }
+                out.push(InlineNode::Text(text_node));
+            }
+            SlateNode::Element(element) => {
+                let next_link = if element.kind == "link" {
+                    element.url.as_deref().or(link)
+                } else {
+                    link
+                };
+                collect_text_leaves(&element.children, next_link, out)
+            }
         }
     }
 }
@@ -487,6 +628,7 @@ fn slate_text_to_text_node(text: &SlateText) -> TextNode {
             strikethrough: text.strikethrough.unwrap_or(false),
             fg,
             bg,
+            link: None,
         },
     }
 }

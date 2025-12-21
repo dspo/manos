@@ -1,4 +1,4 @@
-use gpui::{hsla, px, Hsla, Pixels};
+use gpui::{Hsla, Pixels, hsla, px};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RichTextTheme {
@@ -7,6 +7,7 @@ pub struct RichTextTheme {
     pub radius: Pixels,
     pub foreground: Hsla,
     pub muted_foreground: Hsla,
+    pub link: Hsla,
     pub selection: Hsla,
 }
 
@@ -18,6 +19,7 @@ impl Default for RichTextTheme {
             radius: px(8.),
             foreground: hsla(0., 0., 0.12, 1.),
             muted_foreground: hsla(0., 0., 0.42, 1.),
+            link: hsla(0.58, 1.0, 0.5, 1.0),
             selection: hsla(0.58, 1.0, 0.5, 0.25),
         }
     }

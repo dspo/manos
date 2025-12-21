@@ -5,13 +5,13 @@ use gpui::{
     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _,
     IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledText, TextLayout, Window, div, point, px, size,
+    Styled as _, StyledText, Window, div, point, px, size,
 };
 
 use crate::rope_ext::RopeExt as _;
 
 use super::state::{LineLayoutCache, RichTextState};
-use crate::document::{BlockKind, BlockTextSize};
+use crate::document::{BlockAlign, BlockKind, BlockTextSize, OrderedListStyle};
 
 pub(crate) struct RichTextInputHandlerElement {
     state: gpui::Entity<RichTextState>,
@@ -68,7 +68,9 @@ impl Element for RichTextInputHandlerElement {
         self.state.update(cx, |state, _| {
             state.viewport_bounds = bounds;
         });
-        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        // The editor uses an absolute-positioned overlay input handler. Use `BlockMouseExceptScroll`
+        // so the underlying scroll area can still receive wheel events.
+        window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll)
     }
 
     fn paint(
@@ -100,6 +102,16 @@ impl Element for RichTextInputHandlerElement {
                 }
                 if !hitbox.is_hovered(window) {
                     return;
+                }
+
+                // Cmd/Ctrl-click opens a link instead of moving the caret.
+                if event.modifiers.secondary() && !event.modifiers.shift {
+                    if let Some(offset) = state.read(cx).offset_for_point(event.position) {
+                        if let Some(url) = state.read(cx).link_at_offset(offset) {
+                            cx.open_url(&url);
+                            return;
+                        }
+                    }
                 }
 
                 let focus_handle = { state.read(cx).focus_handle.clone() };
@@ -180,32 +192,14 @@ impl RichTextLineElement {
         }
     }
 
-    fn paint_selection(
-        selection: Range<usize>,
-        text_layout: &TextLayout,
+    fn paint_selection_positions(
+        start_position: Point<Pixels>,
+        end_position: Point<Pixels>,
         bounds: &Bounds<Pixels>,
+        line_height: Pixels,
         window: &mut Window,
         selection_color: gpui::Hsla,
     ) {
-        if selection.is_empty() {
-            return;
-        }
-
-        let mut start = selection.start;
-        let mut end = selection.end;
-        if end < start {
-            std::mem::swap(&mut start, &mut end);
-        }
-
-        let Some(start_position) = text_layout.position_for_index(start) else {
-            return;
-        };
-        let Some(end_position) = text_layout.position_for_index(end) else {
-            return;
-        };
-
-        let line_height = text_layout.line_height();
-
         if start_position.y == end_position.y {
             window.paint_quad(gpui::quad(
                 Bounds::from_corners(
@@ -258,16 +252,6 @@ impl RichTextLineElement {
             gpui::transparent_black(),
             gpui::BorderStyle::default(),
         ));
-    }
-
-    fn caret_position(
-        layout: &TextLayout,
-        line_len: usize,
-        local_offset: usize,
-    ) -> Option<Point<Pixels>> {
-        layout
-            .position_for_index(local_offset.min(line_len))
-            .or_else(|| layout.position_for_index(line_len))
     }
 }
 
@@ -402,18 +386,32 @@ impl Element for RichTextLineElement {
         };
 
         if let Some(selection_local) = selection_local {
-            Self::paint_selection(
-                selection_local,
-                &text_layout,
-                &bounds,
-                window,
-                theme.selection,
-            );
+            let (start_pos, end_pos, line_height) = {
+                let state = self.state.read(cx);
+                (
+                    state.aligned_position_for_row_col(self.row, selection_local.start),
+                    state.aligned_position_for_row_col(self.row, selection_local.end),
+                    text_layout.line_height(),
+                )
+            };
+            if let (Some(start_pos), Some(end_pos)) = (start_pos, end_pos) {
+                Self::paint_selection_positions(
+                    start_pos,
+                    end_pos,
+                    &bounds,
+                    line_height,
+                    window,
+                    theme.selection,
+                );
+            }
         }
 
         if let Some(caret_column) = caret_column {
-            let line_len = self.text.len();
-            if let Some(pos) = Self::caret_position(&text_layout, line_len, caret_column) {
+            if let Some(pos) = self
+                .state
+                .read(cx)
+                .aligned_position_for_row_col(self.row, caret_column)
+            {
                 let line_height = text_layout.line_height();
                 let caret_bounds = Bounds::new(pos, size(px(1.5), line_height));
                 window.paint_quad(gpui::quad(
@@ -679,6 +677,7 @@ impl Render for RichTextState {
         let base_text_size = window.text_style().font_size.to_pixels(window.rem_size());
 
         let mut ordered_counter = 1usize;
+        let mut ordered_style: Option<OrderedListStyle> = None;
         let blocks = self
             .document
             .blocks
@@ -694,6 +693,7 @@ impl Render for RichTextState {
 
             if matches!(block.kind, BlockKind::Quote) {
                 ordered_counter = 1;
+                ordered_style = None;
                 let mut quote_lines: Vec<AnyElement> = Vec::new();
 
                 while row < blocks.len() && matches!(blocks[row].kind, BlockKind::Quote) {
@@ -709,6 +709,12 @@ impl Render for RichTextState {
                         BlockTextSize::Large => {
                             content.text_size(px(f32::from(base_text_size) * 1.125))
                         }
+                    };
+
+                    content = match quote_block.align {
+                        BlockAlign::Left => content.text_left(),
+                        BlockAlign::Center => content.text_center(),
+                        BlockAlign::Right => content.text_right(),
                     };
 
                     quote_lines.push(
@@ -773,13 +779,21 @@ impl Render for RichTextState {
                 },
             };
 
+            content = match block.align {
+                BlockAlign::Left => content.text_left(),
+                BlockAlign::Center => content.text_center(),
+                BlockAlign::Right => content.text_right(),
+            };
+
             let block_el: AnyElement = match block.kind {
                 BlockKind::Divider => {
                     ordered_counter = 1;
+                    ordered_style = None;
                     div().w_full().py(px(6.)).child(content).into_any_element()
                 }
                 BlockKind::UnorderedListItem => {
                     ordered_counter = 1;
+                    ordered_style = None;
                     div()
                         .flex()
                         .flex_row()
@@ -790,7 +804,13 @@ impl Render for RichTextState {
                         .into_any_element()
                 }
                 BlockKind::OrderedListItem => {
-                    let prefix = format!("{}.", ordered_counter);
+                    let style = block.ordered_list_style;
+                    if ordered_style != Some(style) {
+                        ordered_counter = 1;
+                        ordered_style = Some(style);
+                    }
+                    let prefix =
+                        format!("{}.", format_ordered_list_counter(style, ordered_counter));
                     ordered_counter += 1;
                     div()
                         .flex()
@@ -803,6 +823,7 @@ impl Render for RichTextState {
                 }
                 BlockKind::Todo { checked } => {
                     ordered_counter = 1;
+                    ordered_style = None;
                     div()
                         .flex()
                         .flex_row()
@@ -818,6 +839,7 @@ impl Render for RichTextState {
                 }
                 _ => {
                     ordered_counter = 1;
+                    ordered_style = None;
                     content.into_any_element()
                 }
             };
@@ -855,4 +877,63 @@ impl Render for RichTextState {
                     ),
             )
     }
+}
+
+fn format_ordered_list_counter(style: OrderedListStyle, counter: usize) -> String {
+    match style {
+        OrderedListStyle::Decimal => counter.to_string(),
+        OrderedListStyle::LowerAlpha => to_alpha(counter, false),
+        OrderedListStyle::UpperAlpha => to_alpha(counter, true),
+        OrderedListStyle::LowerRoman => to_roman(counter, false),
+        OrderedListStyle::UpperRoman => to_roman(counter, true),
+    }
+}
+
+fn to_alpha(counter: usize, upper: bool) -> String {
+    if counter == 0 {
+        return "0".to_string();
+    }
+
+    let mut n = counter;
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        let ch = (b'a' + (n % 26) as u8) as char;
+        out.push(if upper { ch.to_ascii_uppercase() } else { ch });
+        n /= 26;
+    }
+    out.into_iter().rev().collect()
+}
+
+fn to_roman(counter: usize, upper: bool) -> String {
+    if counter == 0 {
+        return "0".to_string();
+    }
+
+    let mut n = counter.min(3999);
+    let symbols = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+
+    let mut out = String::new();
+    for (value, sym) in symbols {
+        while n >= value {
+            out.push_str(sym);
+            n -= value;
+        }
+    }
+
+    if upper { out.to_ascii_uppercase() } else { out }
 }

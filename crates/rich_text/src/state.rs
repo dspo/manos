@@ -11,7 +11,8 @@ use sum_tree::Bias;
 
 use crate::RichTextTheme;
 use crate::document::{
-    BlockKind, BlockNode, BlockTextSize, InlineNode, RichTextDocument, TextNode,
+    BlockAlign, BlockKind, BlockNode, BlockTextSize, InlineNode, OrderedListStyle,
+    RichTextDocument, TextNode,
 };
 use crate::rope_ext::RopeExt as _;
 use crate::selection::Selection;
@@ -125,6 +126,13 @@ pub(crate) struct LineLayoutCache {
     pub(crate) start_offset: usize,
     pub(crate) line_len: usize,
     pub(crate) text_layout: gpui::TextLayout,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActiveLinkOverlay {
+    pub url: String,
+    /// Anchor position in window coordinates.
+    pub anchor: Point<Pixels>,
 }
 
 pub struct RichTextState {
@@ -764,16 +772,116 @@ impl RichTextState {
         cx.notify();
     }
 
+    fn align_offset_x_for_wrap_line(
+        cache: &LineLayoutCache,
+        wrap_line_ix: usize,
+        align: BlockAlign,
+    ) -> Pixels {
+        let align_width = cache.bounds.size.width;
+        if align_width <= px(0.) {
+            return px(0.);
+        }
+
+        let Some(layout) = cache.text_layout.line_layout_for_index(0) else {
+            return px(0.);
+        };
+
+        let segments = layout.wrap_boundaries().len().saturating_add(1);
+        if segments == 0 {
+            return px(0.);
+        }
+        let wrap_line_ix = wrap_line_ix.min(segments - 1);
+
+        let end_ix = if wrap_line_ix < layout.wrap_boundaries().len() {
+            let boundary = layout.wrap_boundaries()[wrap_line_ix];
+            layout.runs()[boundary.run_ix]
+                .glyphs
+                .get(boundary.glyph_ix)
+                .map(|g| g.index)
+                .unwrap_or(layout.len())
+        } else {
+            layout.len()
+        };
+
+        let line_height = cache.text_layout.line_height();
+        let line_width = layout
+            .position_for_index(end_ix, line_height)
+            .map(|p| p.x)
+            .unwrap_or(px(0.));
+
+        match align {
+            BlockAlign::Left => px(0.),
+            BlockAlign::Center => (align_width - line_width) / 2.0,
+            BlockAlign::Right => align_width - line_width,
+        }
+    }
+
+    pub(crate) fn aligned_position_for_row_col(
+        &self,
+        row: usize,
+        col: usize,
+    ) -> Option<Point<Pixels>> {
+        let cache = self.layout_cache.get(row)?.as_ref()?;
+        let align = self
+            .document
+            .blocks
+            .get(row)
+            .map(|b| b.format.align)
+            .unwrap_or(BlockAlign::Left);
+
+        let col = col.min(cache.line_len);
+        let base = cache
+            .text_layout
+            .position_for_index(col)
+            .or_else(|| cache.text_layout.position_for_index(cache.line_len))?;
+
+        if align == BlockAlign::Left {
+            return Some(base);
+        }
+
+        let line_height = cache.text_layout.line_height();
+        let wrap_line_ix =
+            ((base.y - cache.bounds.origin.y).max(px(0.0)) / line_height).floor() as usize;
+        let dx = Self::align_offset_x_for_wrap_line(cache, wrap_line_ix, align);
+        Some(point(base.x + dx, base.y))
+    }
+
+    pub(crate) fn aligned_index_for_row_point(&self, row: usize, position: Point<Pixels>) -> usize {
+        let Some(cache) = self.layout_cache.get(row).and_then(|c| c.as_ref()) else {
+            return 0;
+        };
+
+        let align = self
+            .document
+            .blocks
+            .get(row)
+            .map(|b| b.format.align)
+            .unwrap_or(BlockAlign::Left);
+
+        let adjusted_point = if align == BlockAlign::Left {
+            position
+        } else {
+            let line_height = cache.text_layout.line_height();
+            let wrap_line_ix =
+                ((position.y - cache.bounds.origin.y).max(px(0.0)) / line_height).floor() as usize;
+            let dx = Self::align_offset_x_for_wrap_line(cache, wrap_line_ix, align);
+            point(position.x - dx, position.y)
+        };
+
+        let mut local_index = match cache.text_layout.index_for_position(adjusted_point) {
+            Ok(ix) | Err(ix) => ix,
+        };
+        local_index = local_index.min(cache.line_len);
+        local_index
+    }
+
     fn caret_bounds_for_offset(&self, offset: usize) -> Option<Bounds<Pixels>> {
         let cursor_point = self.text.offset_to_point(offset);
         let row = cursor_point.row;
         let col = cursor_point.column;
 
         let cache = self.layout_cache.get(row)?.as_ref()?;
-        let pos = cache
-            .text_layout
-            .position_for_index(col)
-            .or_else(|| cache.text_layout.position_for_index(cache.line_len))?;
+        let pos = self.aligned_position_for_row_col(row, col)?;
         let line_height = cache.text_layout.line_height();
 
         Some(Bounds::from_corners(
@@ -842,6 +950,22 @@ impl RichTextState {
         self.scroll_cursor_into_view(window, cx);
     }
 
+    pub fn bold_mark_active(&self) -> bool {
+        self.is_attr_enabled(self.ordered_selection(), |s| s.bold)
+    }
+
+    pub fn italic_mark_active(&self) -> bool {
+        self.is_attr_enabled(self.ordered_selection(), |s| s.italic)
+    }
+
+    pub fn underline_mark_active(&self) -> bool {
+        self.is_attr_enabled(self.ordered_selection(), |s| s.underline)
+    }
+
+    pub fn strikethrough_mark_active(&self) -> bool {
+        self.is_attr_enabled(self.ordered_selection(), |s| s.strikethrough)
+    }
+
     pub fn toggle_bold_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_attr(window, cx, |s| s.bold, |s, v| s.bold = v);
     }
@@ -888,6 +1012,36 @@ impl RichTextState {
                 };
             }
         }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn toggle_ordered_list(
+        &mut self,
+        style: OrderedListStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+
+        let all_match = (start_row..=end_row).all(|row| {
+            self.document.blocks.get(row).is_some_and(|b| {
+                b.format.kind == BlockKind::OrderedListItem && b.format.ordered_list_style == style
+            })
+        });
+
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                if all_match {
+                    block.format.kind = BlockKind::Paragraph;
+                } else {
+                    block.format.kind = BlockKind::OrderedListItem;
+                    block.format.ordered_list_style = style;
+                }
+            }
+        }
+
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -1001,6 +1155,23 @@ impl RichTextState {
         self.scroll_cursor_into_view(window, cx);
     }
 
+    pub fn set_block_align(
+        &mut self,
+        align: BlockAlign,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.align = align;
+            }
+        }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
     pub fn set_text_color(
         &mut self,
         color: Option<gpui::Hsla>,
@@ -1053,6 +1224,132 @@ impl RichTextState {
         }
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn set_link(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let url = url.and_then(|s| {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+
+        let range = self.ordered_selection();
+        if range.is_empty() {
+            self.active_style.link = url;
+            cx.notify();
+            return;
+        }
+
+        self.push_undo_snapshot();
+        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            block_ranges.push((row, local_range));
+        });
+        for (row, local_range) in block_ranges {
+            let url = url.clone();
+            self.update_inline_styles_in_block_range(row, local_range, |style| {
+                style.link = url.clone();
+            });
+        }
+
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn current_link_url(&self) -> Option<String> {
+        let range = self.ordered_selection();
+        if range.is_empty() {
+            return self.link_at_offset(self.cursor());
+        }
+
+        let mut found: Option<Option<String>> = None;
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            let Some(block) = self.document.blocks.get(row) else {
+                return;
+            };
+            let mut cursor = 0usize;
+            for node in &block.inlines {
+                let InlineNode::Text(text) = node;
+                let end = cursor + text.text.len();
+                let overlap_start = local_range.start.max(cursor);
+                let overlap_end = local_range.end.min(end);
+                if overlap_start < overlap_end {
+                    let link = text.style.link.clone();
+                    match &mut found {
+                        None => found = Some(link),
+                        Some(existing) => {
+                            if *existing != link {
+                                found = Some(None);
+                            }
+                        }
+                    }
+                }
+                cursor = end;
+            }
+        });
+
+        found.flatten()
+    }
+
+    pub fn set_link_at_cursor_or_selection(
+        &mut self,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url = url.and_then(|s| {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+
+        let range = self.ordered_selection();
+        if !range.is_empty() {
+            self.set_link(url, window, cx);
+            return;
+        }
+
+        let cursor = self.cursor();
+        if self.text.len() == 0 || self.document.blocks.is_empty() {
+            self.active_style.link = url;
+            cx.notify();
+            return;
+        }
+
+        let point = self.text.offset_to_point(cursor);
+        let row = point.row.min(self.document.blocks.len().saturating_sub(1));
+        let col = point.column;
+
+        let Some(block) = self.document.blocks.get(row) else {
+            self.active_style.link = url;
+            cx.notify();
+            return;
+        };
+
+        let mut cursor_in_block = 0usize;
+        let mut target: Option<Range<usize>> = None;
+        for node in &block.inlines {
+            let InlineNode::Text(text) = node;
+            let end = cursor_in_block + text.text.len();
+            if col < end {
+                if text.style.link.is_some() {
+                    target = Some(cursor_in_block..end);
+                }
+                break;
+            }
+            cursor_in_block = end;
+        }
+
+        if let Some(local_range) = target {
+            self.push_undo_snapshot();
+            self.update_inline_styles_in_block_range(row, local_range, |style| {
+                style.link = url.clone();
+            });
+            cx.notify();
+            self.scroll_cursor_into_view(window, cx);
+            return;
+        }
+
+        self.active_style.link = url;
+        cx.notify();
     }
 
     fn selected_rows(&self) -> (usize, usize) {
@@ -1117,6 +1414,21 @@ impl RichTextState {
                         wavy: false,
                     });
                 }
+                if text.style.link.is_some() {
+                    let link_color = text.style.fg.unwrap_or(self.theme.link);
+                    highlight.color = Some(link_color);
+                    if let Some(underline) = highlight.underline.as_mut() {
+                        if underline.color.is_none() {
+                            underline.color = Some(link_color);
+                        }
+                    } else {
+                        highlight.underline = Some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(link_color),
+                            wavy: false,
+                        });
+                    }
+                }
                 if text.style.strikethrough {
                     highlight.strikethrough = Some(StrikethroughStyle {
                         thickness: px(1.),
@@ -1162,6 +1474,99 @@ impl RichTextState {
         highlights
     }
 
+    pub(crate) fn link_at_offset(&self, offset: usize) -> Option<String> {
+        let point = self.text.offset_to_point(offset.min(self.text.len()));
+        let row = point.row;
+        let col = point.column;
+
+        let block = self.document.blocks.get(row)?;
+        let mut cursor = 0usize;
+        for node in &block.inlines {
+            let InlineNode::Text(text) = node;
+            let len = text.text.len();
+            if col < cursor + len {
+                return text.style.link.clone();
+            }
+            cursor += len;
+        }
+
+        None
+    }
+
+    fn link_range_at_offset(&self, offset: usize) -> Option<(Range<usize>, String)> {
+        let point = self.text.offset_to_point(offset.min(self.text.len()));
+        let row = point.row.min(self.document.blocks.len().saturating_sub(1));
+        let col = point.column;
+
+        let block = self.document.blocks.get(row)?;
+        let mut ranges: Vec<(Range<usize>, String)> = Vec::new();
+
+        let mut cursor = 0usize;
+        let mut current: Option<(usize, String)> = None;
+        for node in &block.inlines {
+            let InlineNode::Text(text) = node;
+            let len = text.text.len();
+
+            match (&mut current, text.style.link.as_ref()) {
+                (Some((_start, url)), Some(link)) if url == link => {}
+                (Some((start, url)), Some(link)) => {
+                    ranges.push((*start..cursor, url.clone()));
+                    *start = cursor;
+                    *url = link.clone();
+                }
+                (Some((start, url)), None) => {
+                    ranges.push((*start..cursor, url.clone()));
+                    current = None;
+                }
+                (None, Some(link)) => current = Some((cursor, link.clone())),
+                (None, None) => {}
+            }
+
+            cursor += len;
+        }
+
+        if let Some((start, url)) = current {
+            ranges.push((start..cursor, url));
+        }
+
+        let block_start = self.text.line_start_offset(row);
+        for (range, url) in ranges {
+            if col >= range.start && col <= range.end {
+                return Some(((block_start + range.start)..(block_start + range.end), url));
+            }
+        }
+
+        None
+    }
+
+    pub fn active_link_overlay(&self) -> Option<ActiveLinkOverlay> {
+        let viewport = self.viewport_bounds;
+        if viewport.size.width <= px(0.) || viewport.size.height <= px(0.) {
+            return None;
+        }
+
+        let cursor = self.cursor();
+        let (range, url) = self.link_range_at_offset(cursor)?;
+        let caret_bounds = self.caret_bounds_for_offset(range.start)?;
+
+        let mut anchor = point(caret_bounds.left(), caret_bounds.top() - px(8.));
+
+        let min_x = viewport.left() + px(8.);
+        let max_x = (viewport.right() - px(200.)).max(min_x);
+        if anchor.x < min_x {
+            anchor.x = min_x;
+        } else if anchor.x > max_x {
+            anchor.x = max_x;
+        }
+
+        let min_y = viewport.top() + px(4.);
+        if anchor.y < min_y {
+            anchor.y = min_y;
+        }
+
+        Some(ActiveLinkOverlay { url, anchor })
+    }
+
     pub(crate) fn offset_for_point(&self, point: Point<Pixels>) -> Option<usize> {
         // Find the closest row by y distance.
         let mut best: Option<(usize, Pixels)> = None;
@@ -1185,10 +1590,7 @@ impl RichTextState {
         let (row, _) = best?;
         let cache = self.layout_cache.get(row)?.as_ref()?;
 
-        let mut local_index = match cache.text_layout.index_for_position(point) {
-            Ok(ix) | Err(ix) => ix,
-        };
-        local_index = local_index.min(cache.line_len);
+        let local_index = self.aligned_index_for_row_point(row, point);
 
         Some((cache.start_offset + local_index).min(self.text.len()))
     }

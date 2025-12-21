@@ -8,6 +8,29 @@ pub enum BlockTextSize {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderedListStyle {
+    Decimal,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    UpperRoman,
+}
+
+impl Default for OrderedListStyle {
+    fn default() -> Self {
+        Self::Decimal
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlockAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockKind {
     Paragraph,
     Heading { level: u8 },
@@ -22,6 +45,8 @@ pub enum BlockKind {
 pub struct BlockFormat {
     pub kind: BlockKind,
     pub size: BlockTextSize,
+    pub ordered_list_style: OrderedListStyle,
+    pub align: BlockAlign,
 }
 
 impl Default for BlockFormat {
@@ -29,6 +54,8 @@ impl Default for BlockFormat {
         Self {
             kind: BlockKind::Paragraph,
             size: BlockTextSize::Normal,
+            ordered_list_style: OrderedListStyle::default(),
+            align: BlockAlign::default(),
         }
     }
 }
@@ -36,8 +63,12 @@ impl Default for BlockFormat {
 impl BlockFormat {
     pub(crate) fn split_successor(self) -> Self {
         match self.kind {
-            BlockKind::Heading { .. } => BlockFormat::default(),
-            BlockKind::Divider => BlockFormat::default(),
+            BlockKind::Heading { .. } | BlockKind::Divider => BlockFormat {
+                kind: BlockKind::Paragraph,
+                size: BlockTextSize::Normal,
+                ordered_list_style: self.ordered_list_style,
+                align: self.align,
+            },
             BlockKind::Paragraph
             | BlockKind::Quote
             | BlockKind::UnorderedListItem
