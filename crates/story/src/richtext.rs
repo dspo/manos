@@ -4,16 +4,17 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_component::Root;
+use gpui_component::Selectable as _;
 use gpui_component::WindowExt as _;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::tooltip::Tooltip;
+use gpui_component_extras::plate_toolbar::{
+    PlateIconName, PlateToolbarButton, PlateToolbarIconButton, PlateToolbarSeparator,
+};
 use gpui_rich_text::{
     BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, InlineStyle,
     OrderedListStyle, RichTextDocument, RichTextEditor, RichTextState, RichTextTheme,
-    RichTextValue, SlateNode, TextNode, ToggleBold, ToggleItalic, ToggleStrikethrough,
-    ToggleUnderline,
+    RichTextValue, SlateNode, TextNode,
 };
 
 fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
@@ -563,30 +564,6 @@ impl Render for RichTextExample {
         let cyan_light = theme.cyan_light;
         let magenta_light = theme.magenta_light;
 
-        let toolbar_button = |id: &'static str, label: &'static str, selected: bool| {
-            div()
-                .id(id)
-                .cursor_pointer()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(32.))
-                .min_w(px(32.))
-                .px(px(6.))
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .bg(theme.transparent)
-                .text_color(theme.foreground)
-                .hover(|this| this.bg(theme.muted).text_color(theme.muted_foreground))
-                .active(|this| this.bg(theme.accent).text_color(theme.accent_foreground))
-                .when(selected, |this| {
-                    this.bg(theme.accent).text_color(theme.accent_foreground)
-                })
-                .child(label)
-        };
-        let toolbar_sep = || div().mx(px(6.)).h(px(18.)).w(px(1.)).bg(theme.border);
-
         div()
             .size_full()
             .relative()
@@ -605,6 +582,7 @@ impl Render for RichTextExample {
                         div()
                             .flex()
                             .flex_row()
+                            .flex_wrap()
                             .gap(px(4.))
                             .items_center()
                             .child(
@@ -615,133 +593,92 @@ impl Render for RichTextExample {
                             )
                             .child(div().w(px(12.)))
                             .child(
-                                Button::new("open")
-                                    .ghost()
-                                    .label("Open")
+                                PlateToolbarButton::new("open")
                                     .tooltip("Open from JSON file")
+                                    .child("Open")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_from_file(window, cx);
                                     })),
                             )
                             .child(
-                                Button::new("save")
-                                    .ghost()
-                                    .label("Save")
+                                PlateToolbarButton::new("save")
                                     .tooltip("Save to JSON file")
+                                    .child("Save")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.save_to_file(window, cx);
                                     })),
                             )
                             .child(
-                                Button::new("save-as")
-                                    .ghost()
-                                    .label("Save As")
+                                PlateToolbarButton::new("save-as")
                                     .tooltip("Save to a new JSON file")
+                                    .child("Save As")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.save_as(window, cx);
                                     })),
                             )
-                            .child(toolbar_sep())
+                            .child(PlateToolbarSeparator)
                             .child(
-                                toolbar_button(
-                                    "bold",
-                                    "B",
-                                    self.editor.read(cx).bold_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Bold")
-                                        .action(&ToggleBold, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("bold", PlateIconName::Bold)
+                                    .selected(self.editor.read(cx).bold_mark_active())
+                                    .tooltip("Bold")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_bold_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
                             .child(
-                                toolbar_button(
-                                    "italic",
-                                    "I",
-                                    self.editor.read(cx).italic_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Italic")
-                                        .action(&ToggleItalic, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("italic", PlateIconName::Italic)
+                                    .selected(self.editor.read(cx).italic_mark_active())
+                                    .tooltip("Italic")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_italic_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
                             .child(
-                                toolbar_button(
-                                    "underline",
-                                    "U",
-                                    self.editor.read(cx).underline_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Underline")
-                                        .action(&ToggleUnderline, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("underline", PlateIconName::Underline)
+                                    .selected(self.editor.read(cx).underline_mark_active())
+                                    .tooltip("Underline")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_underline_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
                             .child(
-                                toolbar_button(
-                                    "strike",
-                                    "S",
-                                    self.editor.read(cx).strikethrough_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Strikethrough")
-                                        .action(&ToggleStrikethrough, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("strike", PlateIconName::Strikethrough)
+                                    .selected(self.editor.read(cx).strikethrough_mark_active())
+                                    .tooltip("Strikethrough")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_strikethrough_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
-                            .child(toolbar_sep())
+                            .child(PlateToolbarSeparator)
                             .child(
-                                toolbar_button(
-                                    "link",
-                                    "Link",
-                                    self.editor.read(cx).current_link_url().is_some(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Set or edit link URL").build(window, cx)
-                                })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, window, cx| {
+                                PlateToolbarIconButton::new("link", PlateIconName::Link)
+                                    .selected(self.editor.read(cx).current_link_url().is_some())
+                                    .tooltip("Set or edit link URL")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         let current = this.editor.read(cx).current_link_url();
                                         let initial = current.unwrap_or_default();
                                         this.open_link_dialog(initial, window, cx);
-                                    }),
-                                ),
+                                    })),
                             )
                             .child(
-                                toolbar_button("unlink", "Unlink", false)
-                                    .tooltip(|window, cx| {
-                                        Tooltip::new("Remove link").build(window, cx)
-                                    })
+                                PlateToolbarIconButton::new("unlink", PlateIconName::Unlink)
+                                    .tooltip("Remove link")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor
@@ -751,12 +688,11 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     })),
                             )
-                            .child(toolbar_sep())
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("h1")
-                                    .ghost()
-                                    .label("H1")
+                                PlateToolbarButton::new("h1")
                                     .tooltip("Heading 1")
+                                    .child("H1")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(
@@ -768,10 +704,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("h2")
-                                    .ghost()
-                                    .label("H2")
+                                PlateToolbarButton::new("h2")
                                     .tooltip("Heading 2")
+                                    .child("H2")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(
@@ -783,10 +718,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("h3")
-                                    .ghost()
-                                    .label("H3")
+                                PlateToolbarButton::new("h3")
                                     .tooltip("Heading 3")
+                                    .child("H3")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(
@@ -798,10 +732,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("h4")
-                                    .ghost()
-                                    .label("H4")
+                                PlateToolbarButton::new("h4")
                                     .tooltip("Heading 4")
+                                    .child("H4")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(
@@ -813,10 +746,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("h5")
-                                    .ghost()
-                                    .label("H5")
+                                PlateToolbarButton::new("h5")
                                     .tooltip("Heading 5")
+                                    .child("H5")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(
@@ -828,10 +760,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("h6")
-                                    .ghost()
-                                    .label("H6")
+                                PlateToolbarButton::new("h6")
                                     .tooltip("Heading 6")
+                                    .child("H6")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(
@@ -843,22 +774,20 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("p")
-                                    .ghost()
-                                    .label("P")
+                                PlateToolbarButton::new("p")
                                     .tooltip("Paragraph")
+                                    .child("P")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(BlockKind::Paragraph, window, cx);
                                         });
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("size-sm")
-                                    .ghost()
-                                    .label("A-")
+                                PlateToolbarButton::new("size-sm")
                                     .tooltip("Text size: Small")
+                                    .child("A-")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_size(BlockTextSize::Small, window, cx);
@@ -866,10 +795,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("size-md")
-                                    .ghost()
-                                    .label("A")
+                                PlateToolbarButton::new("size-md")
                                     .tooltip("Text size: Normal")
+                                    .child("A")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_size(
@@ -881,21 +809,18 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("size-lg")
-                                    .ghost()
-                                    .label("A+")
+                                PlateToolbarButton::new("size-lg")
                                     .tooltip("Text size: Large")
+                                    .child("A+")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_size(BlockTextSize::Large, window, cx);
                                         });
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("align-left")
-                                    .ghost()
-                                    .label("L")
+                                PlateToolbarIconButton::new("align-left", PlateIconName::AlignLeft)
                                     .tooltip("Align left")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
@@ -906,10 +831,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("align-center")
-                                    .ghost()
-                                    .label("C")
+                                PlateToolbarButton::new("align-center")
                                     .tooltip("Align center")
+                                    .child("C")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_align(BlockAlign::Center, window, cx);
@@ -919,10 +843,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("align-right")
-                                    .ghost()
-                                    .label("R")
+                                PlateToolbarButton::new("align-right")
                                     .tooltip("Align right")
+                                    .child("R")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_align(BlockAlign::Right, window, cx);
@@ -931,11 +854,9 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("ul")
-                                    .ghost()
-                                    .label("•")
+                                PlateToolbarIconButton::new("ul", PlateIconName::List)
                                     .tooltip("Bulleted list")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
@@ -950,9 +871,7 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol-dec")
-                                    .ghost()
-                                    .label("1.")
+                                PlateToolbarIconButton::new("ol-dec", PlateIconName::ListOrdered)
                                     .tooltip("Numbered list: Decimal")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
@@ -967,10 +886,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol-la")
-                                    .ghost()
-                                    .label("a.")
+                                PlateToolbarButton::new("ol-la")
                                     .tooltip("Numbered list: Lower alpha")
+                                    .child("a.")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_ordered_list(
@@ -984,10 +902,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol-ua")
-                                    .ghost()
-                                    .label("A.")
+                                PlateToolbarButton::new("ol-ua")
                                     .tooltip("Numbered list: Upper alpha")
+                                    .child("A.")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_ordered_list(
@@ -1001,10 +918,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol-lr")
-                                    .ghost()
-                                    .label("i.")
+                                PlateToolbarButton::new("ol-lr")
                                     .tooltip("Numbered list: Lower roman")
+                                    .child("i.")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_ordered_list(
@@ -1018,10 +934,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol-ur")
-                                    .ghost()
-                                    .label("I.")
+                                PlateToolbarButton::new("ol-ur")
                                     .tooltip("Numbered list: Upper roman")
+                                    .child("I.")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_ordered_list(
@@ -1035,9 +950,7 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("todo")
-                                    .ghost()
-                                    .label("☐")
+                                PlateToolbarIconButton::new("todo", PlateIconName::ListTodo)
                                     .tooltip("To-do list")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
@@ -1048,10 +961,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("quote")
-                                    .ghost()
-                                    .label("❝")
+                                PlateToolbarButton::new("quote")
                                     .tooltip("Quote")
+                                    .child("❝")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(BlockKind::Quote, window, cx);
@@ -1061,10 +973,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("divider")
-                                    .ghost()
-                                    .label("—")
+                                PlateToolbarButton::new("divider")
                                     .tooltip("Divider")
+                                    .child("—")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.insert_divider(window, cx);
@@ -1073,12 +984,11 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("color-clear")
-                                    .ghost()
-                                    .label("Tx")
+                                PlateToolbarButton::new("color-clear")
                                     .tooltip("Text color: Clear")
+                                    .child("Tx")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_text_color(None, window, cx);
@@ -1086,10 +996,10 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("color-red")
-                                    .ghost()
-                                    .label("R")
+                                PlateToolbarButton::new("color-red")
                                     .tooltip("Text color: Red")
+                                    .text_color(red)
+                                    .child("R")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let color = red;
                                         this.editor.update(cx, |editor, cx| {
@@ -1098,10 +1008,10 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("color-green")
-                                    .ghost()
-                                    .label("G")
+                                PlateToolbarButton::new("color-green")
                                     .tooltip("Text color: Green")
+                                    .text_color(green)
+                                    .child("G")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let color = green;
                                         this.editor.update(cx, |editor, cx| {
@@ -1110,10 +1020,10 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("color-blue")
-                                    .ghost()
-                                    .label("B")
+                                PlateToolbarButton::new("color-blue")
                                     .tooltip("Text color: Blue")
+                                    .text_color(blue)
+                                    .child("B")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let color = blue;
                                         this.editor.update(cx, |editor, cx| {
@@ -1121,12 +1031,11 @@ impl Render for RichTextExample {
                                         });
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("hl-clear")
-                                    .ghost()
-                                    .label("HL")
+                                PlateToolbarButton::new("hl-clear")
                                     .tooltip("Highlight: Clear")
+                                    .child("HL")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_highlight_color(None, window, cx);
@@ -1134,10 +1043,10 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("hl-yellow")
-                                    .ghost()
-                                    .label("Y")
+                                PlateToolbarButton::new("hl-yellow")
                                     .tooltip("Highlight: Yellow")
+                                    .text_color(yellow_light)
+                                    .child("Y")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let color = yellow_light;
                                         this.editor.update(cx, |editor, cx| {
@@ -1146,10 +1055,10 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("hl-cyan")
-                                    .ghost()
-                                    .label("C")
+                                PlateToolbarButton::new("hl-cyan")
                                     .tooltip("Highlight: Cyan")
+                                    .text_color(cyan_light)
+                                    .child("C")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let color = cyan_light;
                                         this.editor.update(cx, |editor, cx| {
@@ -1158,10 +1067,10 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("hl-magenta")
-                                    .ghost()
-                                    .label("M")
+                                PlateToolbarButton::new("hl-magenta")
                                     .tooltip("Highlight: Magenta")
+                                    .text_color(magenta_light)
+                                    .child("M")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let color = magenta_light;
                                         this.editor.update(cx, |editor, cx| {
