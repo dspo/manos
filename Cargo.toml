@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rich_text", "crates/story"]
+members = ["crates/extras", "crates/rich_text", "crates/story"]
 default-members = ["crates/story"]
 resolver = "2"
 
@@ -11,6 +11,7 @@ publish = false
 anyhow = "1"
 gpui = "0.2.2"
 gpui-component = "0.4.0"
+gpui-component-extras = { path = "crates/extras", version = "0.1.0" }
 gpui-rich-text = { path = "crates/rich_text", version = "0.1.0" }
 ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
 serde = { version = "1", features = ["derive"] }

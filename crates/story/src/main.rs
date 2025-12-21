@@ -1,10 +1,11 @@
 use gpui::*;
 use gpui_component::Root;
+use gpui_component_extras::assets::ExtrasAssetSource;
 
 use gpui_component_extras_story::richtext::RichTextExample;
 
 fn main() {
-    let app = Application::new();
+    let app = Application::new().with_assets(ExtrasAssetSource::new());
 
     app.run(move |cx| {
         gpui_component::init(cx);

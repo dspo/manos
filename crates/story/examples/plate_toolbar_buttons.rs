@@ -1,29 +1,27 @@
 use gpui::*;
 use gpui_component::Root;
 use gpui_component_extras::assets::ExtrasAssetSource;
-
-use gpui_component_extras_story::richtext::RichTextExample;
+use gpui_component_extras_story::plate_toolbar_buttons::PlateToolbarButtonsStory;
 
 fn main() {
     let app = Application::new().with_assets(ExtrasAssetSource::new());
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        gpui_rich_text::init(cx);
         cx.activate(true);
 
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Rich Text Editor".into()),
+                        title: Some("Plate Toolbar Buttons".into()),
                         appears_transparent: false,
                         traffic_light_position: None,
                     }),
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = RichTextExample::view(window, cx);
+                    let view = PlateToolbarButtonsStory::view(window, cx);
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )?;

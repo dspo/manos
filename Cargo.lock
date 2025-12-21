@@ -2228,12 +2228,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-component-extras"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+]
+
+[[package]]
 name = "gpui-component-extras-story"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
  "gpui-component",
+ "gpui-component-extras",
  "gpui-rich-text",
  "serde_json",
 ]

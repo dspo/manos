@@ -1,0 +1,110 @@
+# Plate Toolbar Buttons（GPUI 组件实现教程）
+
+本教程介绍如何在本仓库中使用/扩展 `plate.js` 风格的 Toolbar Buttons，并说明这些组件是如何用 `gpui + gpui-component` 的方式组织起来的。
+
+## 运行预览
+
+本仓库提供了一个集中预览页面：
+
+- 运行：`cargo run --example plate_toolbar_buttons`
+- 入口：`crates/story/src/plate_toolbar_buttons.rs`
+
+## 组件与模块位置
+
+- 组件库：`crates/extras`
+  - SVG 资源：`crates/extras/src/assets.rs`
+  - Toolbar 组件：`crates/extras/src/plate_toolbar.rs`
+- Story（预览页）：`crates/story/src/plate_toolbar_buttons.rs`
+
+对外 API：
+
+- 资源：`gpui_component_extras::assets::ExtrasAssetSource`
+- Toolbar：`gpui_component_extras::plate_toolbar::*`
+
+## 关键点 1：让 SVG 能显示（资产源）
+
+GPUI 的 `svg().path("...")` 会从 `App` 的 `AssetSource` 里加载文件内容，所以要在 `main` 里配置资源。
+
+本仓库用 `ExtrasAssetSource` 把 `crates/extras/assets/icons/*.svg` 编译进二进制并提供给 GPUI：
+
+```rust
+use gpui::*;
+use gpui_component_extras::assets::ExtrasAssetSource;
+
+fn main() {
+    let app = Application::new().with_assets(ExtrasAssetSource::new());
+    app.run(|cx| {
+        gpui_component::init(cx);
+        // ...open_window
+    });
+}
+```
+
+参考实现：
+
+- `crates/story/src/main.rs`
+- `crates/story/examples/plate_toolbar_buttons.rs`
+
+## 关键点 2：Icon 的复用方式
+
+`PlateIconName` 对齐了 `plate.js` 示例中的 SVG（本质是 lucide icons），并实现了 `gpui_component::IconNamed`：
+
+- SVG 文件：`crates/extras/assets/icons/*.svg`
+- 路径映射：`crates/extras/src/plate_toolbar.rs`（`impl IconNamed for PlateIconName`）
+
+使用方式：
+
+```rust
+use gpui_component_extras::plate_toolbar::PlateIconName;
+use gpui_component::Icon;
+
+let icon = Icon::new(PlateIconName::Undo2);
+```
+
+如果要新增一个图标：
+
+1. 添加 SVG 文件到 `crates/extras/assets/icons/xxx.svg`
+2. 在 `crates/extras/src/assets.rs` 的 `ASSETS` 数组里注册路径
+3. 在 `crates/extras/src/plate_toolbar.rs` 的 `PlateIconName` 增加枚举值，并在 `IconNamed::path` 里映射到 `icons/xxx.svg`
+
+## 关键点 3：Toolbar Button 的“gpui-component 风格”实现思路
+
+以 `PlateToolbarButton` 为例（`crates/extras/src/plate_toolbar.rs`）：
+
+- **Builder 风格**：struct + `#[derive(IntoElement)]` + `impl RenderOnce`
+- **主题一致性**：在 `render()` 里读取 `cx.theme()`，用 `muted/accent/border/...` 等 token
+- **状态样式**：
+  - `Selectable`：`selected(true)` 走 `accent` 背景
+  - `Disableable`：`disabled(true)` 降低透明度并阻断交互
+- **编辑器友好**：在 `on_mouse_down` 里 `window.prevent_default()`，避免按钮抢焦点（更接近 Web 编辑器 Toolbar 的体验）
+
+在它之上，组件库封装了几个常用形态，和 plate.js 的 HTML 对应关系如下：
+
+- `PlateToolbarIconButton`：单图标按钮（Undo/Redo/Bold/Italic…）
+- `PlateToolbarDropdownButton`：左侧内容 + 右侧 Chevron 的下拉触发器
+- `PlateToolbarSplitButton`：主按钮 + 右侧小 Chevron（split button）
+- `PlateToolbarStepper`：Minus + 输入框 + Plus（字号步进器）
+- `PlateToolbarSeparator`：组间分隔线
+
+## 代码示例：组合一个 Toolbar Group
+
+```rust
+use gpui_component_extras::plate_toolbar::*;
+
+div()
+    .flex()
+    .items_center()
+    .child(PlateToolbarIconButton::new("undo", PlateIconName::Undo2).tooltip("Undo"))
+    .child(PlateToolbarIconButton::new("redo", PlateIconName::Redo2).tooltip("Redo").disabled(true))
+    .child(PlateToolbarSeparator)
+    .child(
+        PlateToolbarDropdownButton::new("insert")
+            .tooltip("Insert")
+            .child(PlateIconName::ArrowDownToLine),
+    );
+```
+
+更完整示例可直接参考：
+
+- `crates/story/src/plate_toolbar_buttons.rs`
+
