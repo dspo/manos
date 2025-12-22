@@ -3,7 +3,9 @@ use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName, Sizable as _, h_flex, v_flex};
-use gpui_dnd_tree::{DndTreeDropTarget, DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree};
+use gpui_dnd_tree::{
+    DndTreeDropTarget, DndTreeIndicatorCap, DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree,
+};
 
 pub struct DndTreeExample {
     tree: Entity<DndTreeState>,
@@ -16,6 +18,11 @@ impl DndTreeExample {
             DndTreeState::new(cx)
                 .indent_width(px(16.))
                 .indent_offset(px(10.))
+                .indicator_color(cx.theme().foreground)
+                .indicator_cap(DndTreeIndicatorCap::StartAndEndBars {
+                    width: px(2.),
+                    height: px(10.),
+                })
                 .items(items)
         });
         cx.new(|_| Self { tree })
@@ -45,7 +52,7 @@ impl Render for DndTreeExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("提示：拖拽节点；目标行会高亮并显示插入线（类似 Zed Tab：向下移动时插入到目标行之后，向上移动时插入到目标行之前）；左右决定层级（缩进）；向右拖动到更深层级或按住 Option(Alt) 可作为子节点投放。"),
+                            .child("提示：拖拽节点；目标行会高亮并显示插入线（类似 Zed Tab：向下移动时插入到目标行之后，向上移动时插入到目标行之前）；左右决定层级（缩进）；向右拖动到更深层级或按住 Option(Alt) 可作为子节点投放；插入线样式可通过 `indicator_style / indicator_color / indicator_cap` 配置。"),
                     )
                     .child(
                         div()

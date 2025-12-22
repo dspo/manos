@@ -36,7 +36,7 @@
 - drag 开始时，GPUI 会把 `value` 存到 `cx.active_drag`
 - 同时调用你的 closure，创建拖拽“影子”（ghost），用于显示拖拽中的浮层
 
-本组件用一个轻量的 `DragGhost` 来显示当前拖拽节点的 label（见 `crates/dnd_tree/src/tree.rs`）。
+本组件用一个轻量的 `DragGhost` 来显示当前拖拽节点的 label（见 `crates/dnd_tree/src/tree.rs`），并利用 `cursor_offset` 把 ghost 内容对齐到鼠标附近，避免“drag 源很宽但 ghost 很窄”导致 ghost 偏离鼠标的问题。
 
 ### 2.2 拖拽过程：`on_drag_move::<T>(...)`
 
@@ -97,11 +97,13 @@
 - `scroll_handle`：读 scroll offset 与 item height（`uniform_list` 记录）
 - `drop_preview`：拖拽过程的预览（插入线位置/目标行）
 - `indent_width/indent_offset`：用于把鼠标 x 推导为“目标 depth”，并绘制缩进插入线
+- `indicator_style`：插入线样式（颜色/粗细/端点），用于表达层级与对齐
 
 你可以通过 builder 配置它们：
 
 - `DndTreeState::indent_width(px(...))`
 - `DndTreeState::indent_offset(px(...))`（纯视觉，对齐插入线）
+- `DndTreeState::indicator_style(...) / indicator_color(...) / indicator_thickness(...) / indicator_cap(...)`
 
 ---
 
@@ -174,6 +176,8 @@ line_x = indent_offset + desired_depth * indent_width
 
 - 目标节点 `can_accept_children == true`（可用 `DndTreeItem::accept_children(false)` 禁止接收子节点）
 - 目标不能是自身，且不能把节点拖进自己的子树（预览阶段会直接拒绝；落地阶段也会用 `subtree_contains` 二次防环）
+
+Inside 预览也会绘制插入线：`line_x = indent_offset + (target.depth + 1) * indent_width`，`line_y` 位于目标节点可见子树末尾（`subtree_end_ix(target_ix)`），从而用“左侧起点 + 线长”表达层级。
 
 ### 5.4 Gap + desired_depth → Before/After 目标（跨层级移动的关键）
 

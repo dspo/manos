@@ -1,7 +1,7 @@
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, ElementId, Entity, EntityId, FocusHandle,
+    App, AppContext as _, Context, ElementId, Entity, EntityId, FocusHandle, Hsla,
     InteractiveElement as _, IntoElement, ListSizingBehavior, Modifiers, ParentElement as _,
     Pixels, Point, Render, RenderOnce, SharedString, StatefulInteractiveElement as _,
     StyleRefinement, Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px,
@@ -30,18 +30,25 @@ struct DndTreeDrag {
 
 struct DragGhost {
     label: SharedString,
+    cursor_offset: Point<Pixels>,
 }
 
 impl DragGhost {
-    fn new(label: SharedString) -> Self {
-        Self { label }
+    fn new(label: SharedString, cursor_offset: Point<Pixels>) -> Self {
+        Self {
+            label,
+            cursor_offset,
+        }
     }
 }
 
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        div()
+        let x = (self.cursor_offset.x - px(12.)).max(px(0.));
+        let y = (self.cursor_offset.y - px(12.)).max(px(0.));
+
+        let card = div()
             .px(px(10.))
             .py(px(6.))
             .rounded(px(8.))
@@ -51,7 +58,12 @@ impl Render for DragGhost {
             .shadow_md()
             .text_color(theme.popover_foreground)
             .text_sm()
-            .child(self.label.clone())
+            .child(self.label.clone());
+
+        div()
+            .flex_col()
+            .child(div().h(y))
+            .child(div().flex_row().child(div().w(x)).child(card))
     }
 }
 
@@ -182,6 +194,33 @@ pub enum DndTreeDropTarget {
     Inside,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum DndTreeIndicatorCap {
+    None,
+    StartBar { width: Pixels, height: Pixels },
+    StartAndEndBars { width: Pixels, height: Pixels },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DndTreeIndicatorStyle {
+    pub color: Option<Hsla>,
+    pub thickness: Pixels,
+    pub cap: DndTreeIndicatorCap,
+}
+
+impl Default for DndTreeIndicatorStyle {
+    fn default() -> Self {
+        Self {
+            color: None,
+            thickness: px(2.),
+            cap: DndTreeIndicatorCap::StartBar {
+                width: px(2.),
+                height: px(10.),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DndTreeRowState {
     pub selected: bool,
@@ -219,6 +258,7 @@ pub struct DndTreeState {
     entries: Vec<DndTreeEntry>,
     indent_width: Pixels,
     indent_offset: Pixels,
+    indicator_style: DndTreeIndicatorStyle,
     scrollbar_state: ScrollbarState,
     scroll_handle: UniformListScrollHandle,
     selected_ix: Option<usize>,
@@ -238,6 +278,7 @@ impl DndTreeState {
             entries: Vec::new(),
             indent_width: px(16.),
             indent_offset: px(0.),
+            indicator_style: DndTreeIndicatorStyle::default(),
             scrollbar_state: ScrollbarState::default(),
             scroll_handle: UniformListScrollHandle::default(),
             selected_ix: None,
@@ -262,6 +303,30 @@ impl DndTreeState {
     /// This is purely visual and does not affect the actual tree indentation.
     pub fn indent_offset(mut self, indent_offset: Pixels) -> Self {
         self.indent_offset = indent_offset;
+        self
+    }
+
+    /// Configure the drop indicator line style (color/thickness/caps).
+    pub fn indicator_style(mut self, style: DndTreeIndicatorStyle) -> Self {
+        self.indicator_style = style;
+        self
+    }
+
+    /// Override the drop indicator line color.
+    pub fn indicator_color(mut self, color: Hsla) -> Self {
+        self.indicator_style.color = Some(color);
+        self
+    }
+
+    /// Override the drop indicator thickness.
+    pub fn indicator_thickness(mut self, thickness: Pixels) -> Self {
+        self.indicator_style.thickness = thickness;
+        self
+    }
+
+    /// Override the drop indicator caps.
+    pub fn indicator_cap(mut self, cap: DndTreeIndicatorCap) -> Self {
+        self.indicator_style.cap = cap;
         self
     }
 
@@ -510,8 +575,8 @@ impl DndTreeState {
                             target_id: prev.item().id.clone(),
                         },
                         target_ix: Some(gap_index - 1),
-                        line_y: None,
-                        line_x: None,
+                        line_y: Some(item_height * self.subtree_end_ix(gap_index - 1) + scroll_y),
+                        line_x: Some(self.indent_offset + self.indent_width * (prev.depth() + 1)),
                     });
                 }
 
@@ -623,13 +688,21 @@ impl DndTreeState {
                 && entry.can_accept_children()
                 && *dragged_id != entry.item().id
             {
+                let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
+                let item_height = self
+                    .scroll_handle
+                    .0
+                    .borrow()
+                    .last_item_size
+                    .map(|s| s.item.height)
+                    .unwrap_or(px(28.));
                 return Some(DropPreview {
                     target: DropPreviewTarget::Inside {
                         target_id: entry.item().id.clone(),
                     },
                     target_ix: Some(hovered_ix),
-                    line_y: None,
-                    line_x: None,
+                    line_y: Some(item_height * self.subtree_end_ix(hovered_ix) + scroll_y),
+                    line_x: Some(self.indent_offset + self.indent_width * (entry.depth() + 1)),
                 });
             }
 
@@ -826,19 +899,63 @@ impl Render for DndTreeState {
         let state_entity = cx.entity();
         let dragged_id = self.dragged_id.clone();
         let drop_preview = self.drop_preview.clone();
+        let indicator_style = self.indicator_style;
 
         let line = drop_preview
             .as_ref()
             .and_then(|p| p.line_y.zip(p.line_x))
             .map(|(y, x)| {
                 let theme = cx.theme();
-                div()
+                let color = indicator_style.color.unwrap_or(theme.drag_border);
+                let thickness = indicator_style.thickness.max(px(1.));
+
+                let mut line = div()
                     .absolute()
                     .left(x)
                     .right_0()
                     .top(y)
-                    .h(px(2.))
-                    .bg(theme.drag_border)
+                    .h(thickness)
+                    .bg(color);
+
+                match indicator_style.cap {
+                    DndTreeIndicatorCap::None => {}
+                    DndTreeIndicatorCap::StartBar { width, height } => {
+                        let offset_y = (thickness - height) / 2.0;
+                        line = line.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(offset_y)
+                                .w(width.max(px(1.)))
+                                .h(height.max(px(1.)))
+                                .bg(color),
+                        );
+                    }
+                    DndTreeIndicatorCap::StartAndEndBars { width, height } => {
+                        let offset_y = (thickness - height) / 2.0;
+                        line = line
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top(offset_y)
+                                    .w(width.max(px(1.)))
+                                    .h(height.max(px(1.)))
+                                    .bg(color),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right_0()
+                                    .top(offset_y)
+                                    .w(width.max(px(1.)))
+                                    .h(height.max(px(1.)))
+                                    .bg(color),
+                            );
+                    }
+                }
+
+                line
             });
 
         div()
@@ -931,7 +1048,7 @@ impl Render for DndTreeState {
                                                 );
                                             });
                                             let label = drag.label.clone();
-                                            cx.new(|_| DragGhost::new(label))
+                                            cx.new(|_| DragGhost::new(label, cursor_offset))
                                         },
                                     )
                                 });
