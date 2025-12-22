@@ -311,6 +311,80 @@ impl RichTextState {
         start..end
     }
 
+    pub(crate) fn word_range(&self, offset: usize) -> Range<usize> {
+        let len = self.text.len();
+        if len == 0 {
+            return 0..0;
+        }
+
+        let mut offset = offset.min(len);
+        if offset == len {
+            offset = len.saturating_sub(1);
+        }
+        offset = self.text.clip_offset(offset, Bias::Left);
+
+        if matches!(self.text.char_at(offset), Some('\n' | '\r')) && offset > 0 {
+            offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
+        }
+
+        let Some(ch) = self.text.char_at(offset) else {
+            return offset..offset;
+        };
+
+        let is_word_char = |c: char| c == '_' || c.is_alphanumeric();
+        let is_whitespace_char = |c: char| c.is_whitespace() && !matches!(c, '\n' | '\r');
+
+        enum Group {
+            Word,
+            Whitespace,
+            Other,
+        }
+
+        let group = if is_word_char(ch) {
+            Group::Word
+        } else if is_whitespace_char(ch) {
+            Group::Whitespace
+        } else {
+            Group::Other
+        };
+
+        let matches_group = |c: char| match group {
+            Group::Word => is_word_char(c),
+            Group::Whitespace => is_whitespace_char(c),
+            Group::Other => !is_word_char(c) && !is_whitespace_char(c) && !matches!(c, '\n' | '\r'),
+        };
+
+        let mut start = offset;
+        while start > 0 {
+            let prev = self.text.clip_offset(start.saturating_sub(1), Bias::Left);
+            if prev == start {
+                break;
+            }
+            let Some(prev_ch) = self.text.char_at(prev) else {
+                break;
+            };
+            if matches_group(prev_ch) {
+                start = prev;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = self.text.clip_offset(offset + 1, Bias::Right);
+        while end < len {
+            let Some(next_ch) = self.text.char_at(end) else {
+                break;
+            };
+            if matches_group(next_ch) {
+                end = self.text.clip_offset(end + 1, Bias::Right);
+            } else {
+                break;
+            }
+        }
+
+        start..end
+    }
+
     pub(crate) fn set_selection(&mut self, anchor: usize, focus: usize) {
         self.selection.start = anchor.min(self.text.len());
         self.selection.end = focus.min(self.text.len());
@@ -1714,7 +1788,12 @@ impl RichTextState {
         let (range, url) = self.link_range_at_offset(cursor)?;
         let caret_bounds = self.caret_bounds_for_offset(range.start)?;
 
-        let mut anchor = point(caret_bounds.left(), caret_bounds.top() - px(8.));
+        let overlay_height = px(40.);
+        let vertical_margin = px(8.);
+        let prefer_above_y = caret_bounds.top() - overlay_height - vertical_margin;
+        let prefer_below_y = caret_bounds.bottom() + vertical_margin;
+
+        let mut anchor = point(caret_bounds.left(), prefer_above_y);
 
         let min_x = viewport.left() + px(8.);
         let max_x = (viewport.right() - px(200.)).max(min_x);
@@ -1725,8 +1804,14 @@ impl RichTextState {
         }
 
         let min_y = viewport.top() + px(4.);
+        let max_y = (viewport.bottom() - overlay_height - px(4.)).max(min_y);
+        if anchor.y < min_y {
+            anchor.y = prefer_below_y;
+        }
         if anchor.y < min_y {
             anchor.y = min_y;
+        } else if anchor.y > max_y {
+            anchor.y = max_y;
         }
 
         Some(ActiveLinkOverlay { url, anchor })
@@ -1769,7 +1854,7 @@ impl RichTextState {
         let cache = self.layout_cache.get(row)?.as_ref()?;
         let line_height = cache.text_layout.line_height();
 
-        let y = caret_bounds.top() + (direction as f32) * line_height;
+        let y = caret_bounds.top() + line_height * 0.5 + (direction as f32) * line_height;
         self.offset_for_point(point(x, y))
     }
 

@@ -1000,10 +1000,8 @@ impl RenderOnce for PlateToolbarColorPicker {
                 let total_swatches = swatches.len().saturating_add(1).max(1);
                 let columns = (total_swatches as f32).sqrt().ceil() as usize;
                 let columns = columns.clamp(1, 10);
-                let swatch_grid_width = px(
-                    columns as f32 * swatch_size_px
-                        + (columns.saturating_sub(1) as f32) * swatch_gap_px,
-                );
+                let swatch_grid_width = px(columns as f32 * swatch_size_px
+                    + (columns.saturating_sub(1) as f32) * swatch_gap_px);
 
                 div()
                     .p(px(4.))
