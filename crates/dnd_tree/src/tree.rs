@@ -406,6 +406,35 @@ impl DndTreeState {
                 self.drop_preview = new_preview;
                 cx.notify();
             }
+            return;
+        }
+
+        // When the content height is smaller than the viewport, there is a trailing blank region
+        // inside `uniform_list` where no row receives `on_drag_move`. Update the preview there so
+        // users can still see an "after last" insertion line (and drop is handled by
+        // `on_drop_after_last`).
+        let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
+        let item_height = self
+            .scroll_handle
+            .0
+            .borrow()
+            .last_item_size
+            .map(|s| s.item.height)
+            .unwrap_or(px(28.));
+        let content_bottom = item_height * self.entries.len() + scroll_y;
+        let y_in_list = mouse_position.y - list_bounds.origin.y;
+        if y_in_list >= content_bottom {
+            let origin_x = self.drag_origin_x.unwrap_or(list_bounds.origin.x);
+            let x_in_list = mouse_position.x - origin_x;
+            let new_preview = self.compute_drop_preview_for_row_hover(
+                self.entries.len(),
+                x_in_list,
+                event.event.modifiers,
+            );
+            if self.drop_preview != new_preview {
+                self.drop_preview = new_preview;
+                cx.notify();
+            }
         }
     }
 
@@ -641,7 +670,8 @@ impl DndTreeState {
             return;
         }
 
-        let x_in_list = mouse_position.x - event.bounds.origin.x;
+        let origin_x = self.drag_origin_x.unwrap_or(event.bounds.origin.x);
+        let x_in_list = mouse_position.x - origin_x;
         let new_preview =
             self.compute_drop_preview_for_row_hover(row_ix, x_in_list, event.event.modifiers);
         if self.drop_preview != new_preview {

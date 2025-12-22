@@ -122,19 +122,19 @@
 
 ---
 
-## 5. Drop 预览算法：Y 决定插入位置，X 决定层级
+## 5. Drop 预览算法：命中行决定 before/after，X 决定层级
 
-核心在 `DndTreeState::compute_drop_preview`。
+核心在 `DndTreeState::compute_drop_preview_for_row_hover`（行命中）与 `compute_drop_preview_for_gap`（树层级对齐）。
 
 ### 5.1 用 X 推导目标层级（depth）
 
-基本公式：
+用鼠标的 x（相对列表左侧）推导“期望深度”：
 
 ```
-desired_depth = floor((mouse_x - list_left) / indent_width)
+desired_depth = floor((x_in_list - indent_offset) / indent_width)
 ```
 
-插入线的起始 x：
+并绘制插入线的起始 x：
 
 ```
 line_x = indent_offset + desired_depth * indent_width
@@ -145,34 +145,48 @@ line_x = indent_offset + desired_depth * indent_width
 - `indent_width = 16px`
 - `indent_offset = 10px`
 
-对齐了插入线的视觉缩进。
+从而对齐插入线与行内容的缩进。
 
-### 5.2 用 Y 推导“插入缝隙”（gap）
+### 5.2 用“命中行”推导 before/after（Zed 风格）
 
-`uniform_list` 的行高是统一的（第一行测量并缓存），所以：
+为了让命中更稳定、交互更像 Zed 的 tab 重排，`gpui-dnd-tree` **不再依赖 mouse y 去推导“落在行的上半还是下半”**，而是：
 
-- `hovered_ix = floor(y_in_content / item_height)`
-- 行的 **上半/下半** 决定 gap 在行前还是行后
+- 每一行都是 drop target：行上绑定 `on_drag_move` 更新 `drop_preview`，绑定 `on_drop` 完成落地
+- 当鼠标 hover 到某行时，组件把该行当作交互目标：
+  - 若拖拽源在目标行上方（向下移动）：插入点视为 **After hovered**
+  - 若拖拽源在目标行下方（向上移动）：插入点视为 **Before hovered**
 
-这里刻意不再用 “上 1/4 / 中间 / 下 1/4” 的三分区，因为三分区会让同级重排命中非常困难；改成上半/下半更稳定。
+实现上把它表达为 `gap_index`：
+
+- `hovered_ix < dragged_ix`：`gap_index = hovered_ix`
+- `hovered_ix > dragged_ix`：`gap_index = hovered_ix + 1`
+
+同时，为了覆盖 `uniform_list` 末尾的“空白区域”（内容高度小于视口时，鼠标可能落不到任何一行的 hitbox），列表容器会在拖拽移动时补充更新预览为 **after last**，并由容器上的 `on_drop_after_last` 处理最终落地。
 
 ### 5.3 Inside（投放为子节点）的判定
 
-两种方式都支持（更符合实际使用习惯）：
+当鼠标命中某行时，以下任一条件成立则视为 inside（投放为子节点）：
 
-1. **在行的中间区域**（25%~75%）并且：
-   - `desired_depth > target.depth`（向右拖动表示“想变深层”）
-   - 或按住 `Option(Alt)` 强制 inside
-2. **在两行之间投放**且 `desired_depth == prev.depth + 1`：
-   - 这相当于“把节点投放到上一行作为父节点”
+- 按住 `Option(Alt)` 强制 inside
+- 或 `desired_depth > target.depth`（向右拖动表示“想变深层”）
 
-### 5.4 Before/After 的目标推导（跨层级移动的关键）
+同时还要求：
 
-当不是 inside 时，需要把“gap + desired_depth”映射回树上的 Before/After：
+- 目标节点 `can_accept_children == true`（可用 `DndTreeItem::accept_children(false)` 禁止接收子节点）
+- 目标不能是自身，且不能把节点拖进自己的子树（预览阶段会直接拒绝；落地阶段也会用 `subtree_contains` 二次防环）
 
-- 从 gap 往下找第一个 `depth <= desired_depth` 的“边界行”
+### 5.4 Gap + desired_depth → Before/After 目标（跨层级移动的关键）
+
+当不是 inside 时，需要把“gap + desired_depth”映射回树上的 Before/After（`compute_drop_preview_for_gap`）：
+
+- 先将 `desired_depth` clamp 到当前 gap 允许的最大深度（最多只能比 gap 前一个节点深 1 层，且前一个节点必须允许接收子节点）
+- 然后从 gap 往下找第一个 `depth <= desired_depth` 的“边界行”
   - 如果边界行 `depth == desired_depth`：插到它 **Before**
   - 否则：插到 gap 之前最近的同 depth 行 **After**（相当于追加到该层最后）
+
+此外还支持一种“gap 内 inside”：
+
+- 当 `desired_depth == prev.depth + 1` 且 `prev.can_accept_children()` 时，直接视为 **Inside(prev)**（常用于 drop 在两行之间/末尾时，把节点塞进上一行）
 
 ### 5.5 After 的插入线必须落到“子树末尾”
 
@@ -244,4 +258,3 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 2. **悬停自动展开**（hover 某节点一段时间自动 expanded）
 3. **拖拽时忽略自身子树命中**（拖拽目录节点时更易跨越其子节点区域）
 4. **可插拔 drop policy**（限制某些节点不可投放、跨树拖拽等）
-
