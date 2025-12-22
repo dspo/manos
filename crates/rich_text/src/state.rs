@@ -311,6 +311,80 @@ impl RichTextState {
         start..end
     }
 
+    pub(crate) fn word_range(&self, offset: usize) -> Range<usize> {
+        let len = self.text.len();
+        if len == 0 {
+            return 0..0;
+        }
+
+        let mut offset = offset.min(len);
+        if offset == len {
+            offset = len.saturating_sub(1);
+        }
+        offset = self.text.clip_offset(offset, Bias::Left);
+
+        if matches!(self.text.char_at(offset), Some('\n' | '\r')) && offset > 0 {
+            offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
+        }
+
+        let Some(ch) = self.text.char_at(offset) else {
+            return offset..offset;
+        };
+
+        let is_word_char = |c: char| c == '_' || c.is_alphanumeric();
+        let is_whitespace_char = |c: char| c.is_whitespace() && !matches!(c, '\n' | '\r');
+
+        enum Group {
+            Word,
+            Whitespace,
+            Other,
+        }
+
+        let group = if is_word_char(ch) {
+            Group::Word
+        } else if is_whitespace_char(ch) {
+            Group::Whitespace
+        } else {
+            Group::Other
+        };
+
+        let matches_group = |c: char| match group {
+            Group::Word => is_word_char(c),
+            Group::Whitespace => is_whitespace_char(c),
+            Group::Other => !is_word_char(c) && !is_whitespace_char(c) && !matches!(c, '\n' | '\r'),
+        };
+
+        let mut start = offset;
+        while start > 0 {
+            let prev = self.text.clip_offset(start.saturating_sub(1), Bias::Left);
+            if prev == start {
+                break;
+            }
+            let Some(prev_ch) = self.text.char_at(prev) else {
+                break;
+            };
+            if matches_group(prev_ch) {
+                start = prev;
+            } else {
+                break;
+            }
+        }
+
+        let mut end = self.text.clip_offset(offset + 1, Bias::Right);
+        while end < len {
+            let Some(next_ch) = self.text.char_at(end) else {
+                break;
+            };
+            if matches_group(next_ch) {
+                end = self.text.clip_offset(end + 1, Bias::Right);
+            } else {
+                break;
+            }
+        }
+
+        start..end
+    }
+
     pub(crate) fn set_selection(&mut self, anchor: usize, focus: usize) {
         self.selection.start = anchor.min(self.text.len());
         self.selection.end = focus.min(self.text.len());
@@ -920,6 +994,49 @@ impl RichTextState {
         enabled
     }
 
+    fn active_color_in_range(
+        &self,
+        range: Range<usize>,
+        get: impl Fn(&InlineStyle) -> Option<gpui::Hsla>,
+    ) -> Option<gpui::Hsla> {
+        if range.is_empty() {
+            return get(&self.active_style);
+        }
+
+        let mut value: Option<Option<gpui::Hsla>> = None;
+        let mut mixed = false;
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            if mixed {
+                return;
+            }
+
+            let mut cursor = 0usize;
+            for node in &self.document.blocks[row].inlines {
+                match node {
+                    InlineNode::Text(text) => {
+                        let end = cursor + text.text.len();
+                        let overlap_start = local_range.start.max(cursor);
+                        let overlap_end = local_range.end.min(end);
+                        if overlap_start < overlap_end {
+                            let next = get(&text.style);
+                            match value {
+                                None => value = Some(next),
+                                Some(prev) if prev == next => {}
+                                Some(_) => {
+                                    mixed = true;
+                                    return;
+                                }
+                            }
+                        }
+                        cursor = end;
+                    }
+                }
+            }
+        });
+
+        if mixed { None } else { value.flatten() }
+    }
+
     fn toggle_attr(
         &mut self,
         window: &mut Window,
@@ -966,6 +1083,14 @@ impl RichTextState {
         self.is_attr_enabled(self.ordered_selection(), |s| s.strikethrough)
     }
 
+    pub fn active_text_color(&self) -> Option<gpui::Hsla> {
+        self.active_color_in_range(self.ordered_selection(), |s| s.fg)
+    }
+
+    pub fn active_highlight_color(&self) -> Option<gpui::Hsla> {
+        self.active_color_in_range(self.ordered_selection(), |s| s.bg)
+    }
+
     pub fn toggle_bold_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_attr(window, cx, |s| s.bold, |s, v| s.bold = v);
     }
@@ -994,6 +1119,27 @@ impl RichTextState {
         self.scroll_cursor_into_view(window, cx);
     }
 
+    pub fn active_block_kind(&self) -> Option<BlockKind> {
+        let (start_row, end_row) = self.selected_rows();
+        let first = self.document.blocks.get(start_row)?;
+        let normalize = |kind: BlockKind| match kind {
+            BlockKind::Todo { .. } => BlockKind::Todo { checked: false },
+            kind => kind,
+        };
+        let kind = normalize(first.format.kind);
+
+        for row in start_row..=end_row {
+            let Some(block) = self.document.blocks.get(row) else {
+                continue;
+            };
+            if normalize(block.format.kind) != kind {
+                return None;
+            }
+        }
+
+        Some(kind)
+    }
+
     pub fn toggle_list(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
@@ -1012,6 +1158,79 @@ impl RichTextState {
                 };
             }
         }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn active_ordered_list_style(&self) -> Option<OrderedListStyle> {
+        let (start_row, end_row) = self.selected_rows();
+        let first = self.document.blocks.get(start_row)?;
+        if first.format.kind != BlockKind::OrderedListItem {
+            return None;
+        }
+
+        let style = first.format.ordered_list_style;
+        for row in start_row..=end_row {
+            let Some(block) = self.document.blocks.get(row) else {
+                continue;
+            };
+            if block.format.kind != BlockKind::OrderedListItem
+                || block.format.ordered_list_style != style
+            {
+                return None;
+            }
+        }
+
+        Some(style)
+    }
+
+    pub fn set_ordered_list_style(
+        &mut self,
+        style: OrderedListStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = BlockKind::OrderedListItem;
+                block.format.ordered_list_style = style;
+            }
+        }
+
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn toggle_ordered_list_any(
+        &mut self,
+        style: OrderedListStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+
+        let all_ordered = (start_row..=end_row).all(|row| {
+            self.document
+                .blocks
+                .get(row)
+                .is_some_and(|b| b.format.kind == BlockKind::OrderedListItem)
+        });
+
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                if all_ordered {
+                    block.format.kind = BlockKind::Paragraph;
+                } else {
+                    block.format.kind = BlockKind::OrderedListItem;
+                    block.format.ordered_list_style = style;
+                }
+            }
+        }
+
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }
@@ -1170,6 +1389,26 @@ impl RichTextState {
         }
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn active_block_align(&self) -> BlockAlign {
+        let (start_row, end_row) = self.selected_rows();
+        let Some(first) = self.document.blocks.get(start_row) else {
+            return BlockAlign::default();
+        };
+
+        let mut align = first.format.align;
+        for row in start_row..=end_row {
+            let Some(block) = self.document.blocks.get(row) else {
+                continue;
+            };
+            if block.format.align != align {
+                align = BlockAlign::default();
+                break;
+            }
+        }
+
+        align
     }
 
     pub fn set_text_color(
@@ -1549,7 +1788,12 @@ impl RichTextState {
         let (range, url) = self.link_range_at_offset(cursor)?;
         let caret_bounds = self.caret_bounds_for_offset(range.start)?;
 
-        let mut anchor = point(caret_bounds.left(), caret_bounds.top() - px(8.));
+        let overlay_height = px(40.);
+        let vertical_margin = px(8.);
+        let prefer_above_y = caret_bounds.top() - overlay_height - vertical_margin;
+        let prefer_below_y = caret_bounds.bottom() + vertical_margin;
+
+        let mut anchor = point(caret_bounds.left(), prefer_above_y);
 
         let min_x = viewport.left() + px(8.);
         let max_x = (viewport.right() - px(200.)).max(min_x);
@@ -1560,8 +1804,14 @@ impl RichTextState {
         }
 
         let min_y = viewport.top() + px(4.);
+        let max_y = (viewport.bottom() - overlay_height - px(4.)).max(min_y);
+        if anchor.y < min_y {
+            anchor.y = prefer_below_y;
+        }
         if anchor.y < min_y {
             anchor.y = min_y;
+        } else if anchor.y > max_y {
+            anchor.y = max_y;
         }
 
         Some(ActiveLinkOverlay { url, anchor })
@@ -1604,7 +1854,7 @@ impl RichTextState {
         let cache = self.layout_cache.get(row)?.as_ref()?;
         let line_height = cache.text_layout.line_height();
 
-        let y = caret_bounds.top() + (direction as f32) * line_height;
+        let y = caret_bounds.top() + line_height * 0.5 + (direction as f32) * line_height;
         self.offset_for_point(point(x, y))
     }
 

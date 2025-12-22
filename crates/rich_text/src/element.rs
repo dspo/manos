@@ -122,7 +122,14 @@ impl Element for RichTextInputHandlerElement {
                         .offset_for_point(event.position)
                         .unwrap_or(this.text.len());
 
-                    if event.modifiers.shift {
+                    if event.click_count >= 3 {
+                        let row = this.text.offset_to_point(offset).row;
+                        let range = this.line_range(row);
+                        this.set_selection(range.start, range.end);
+                    } else if event.click_count == 2 {
+                        let range = this.word_range(offset);
+                        this.set_selection(range.start, range.end);
+                    } else if event.modifiers.shift {
                         let anchor = this.selection.start;
                         this.set_selection(anchor, offset);
                     } else {

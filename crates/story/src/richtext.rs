@@ -2,365 +2,47 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme as _;
-use gpui_component::Root;
-use gpui_component::WindowExt as _;
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
-use gpui_component::tooltip::Tooltip;
-use gpui_rich_text::{
-    BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, InlineStyle,
-    OrderedListStyle, RichTextDocument, RichTextEditor, RichTextState, RichTextTheme,
-    RichTextValue, SlateNode, TextNode, ToggleBold, ToggleItalic, ToggleStrikethrough,
-    ToggleUnderline,
+use gpui_component::{
+    ActiveTheme as _, IconName, PixelsExt as _, Root, Selectable as _, Sizable as _, Theme,
+    ThemeMode, ThemeRegistry, TitleBar, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    input::{Input, InputState},
+    menu::AppMenuBar,
+    notification::Notification,
+    popover::Popover,
+    scroll::ScrollbarShow,
+};
+use gpui_manos_components::plate_toolbar::{
+    PlateIconName, PlateToolbarButton, PlateToolbarColorPicker, PlateToolbarDropdownButton,
+    PlateToolbarIconButton, PlateToolbarRounding, PlateToolbarSeparator,
+};
+use gpui_manos_plate::{
+    BlockAlign, BlockKind, BlockTextSize, OrderedListStyle, RichTextDocument, RichTextEditor,
+    RichTextState, RichTextTheme, RichTextValue, SlateNode,
 };
 
-fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
-    fn run(text: impl Into<String>, style: InlineStyle) -> InlineNode {
-        InlineNode::Text(TextNode {
-            text: text.into(),
-            style,
-        })
-    }
+use crate::app_menus::{About, Open, Save, SaveAs};
 
-    fn block(kind: BlockKind, size: BlockTextSize, runs: Vec<InlineNode>) -> BlockNode {
-        let mut block = BlockNode {
-            format: BlockFormat {
-                kind,
-                size,
-                ..Default::default()
-            },
-            inlines: runs,
-        };
-        block.normalize();
-        block
-    }
-
-    let normal = InlineStyle::default();
-    let bold = InlineStyle {
-        bold: true,
-        ..InlineStyle::default()
-    };
-    let italic = InlineStyle {
-        italic: true,
-        ..InlineStyle::default()
-    };
-    let underline = InlineStyle {
-        underline: true,
-        ..InlineStyle::default()
-    };
-    let strike = InlineStyle {
-        strikethrough: true,
-        ..InlineStyle::default()
-    };
-    let red = InlineStyle {
-        fg: Some(theme.red),
-        ..InlineStyle::default()
-    };
-    let blue = InlineStyle {
-        fg: Some(theme.blue),
-        ..InlineStyle::default()
-    };
-    let highlight = InlineStyle {
-        bg: Some(theme.yellow_light),
-        ..InlineStyle::default()
-    };
-    let link = InlineStyle {
-        fg: Some(theme.blue),
-        link: Some("https://github.com/zed-industries/zed".to_string()),
-        ..InlineStyle::default()
-    };
-
-    let mut blocks = Vec::new();
-
-    blocks.push(block(
-        BlockKind::Heading { level: 1 },
-        BlockTextSize::Normal,
-        vec![run("GPUI Rich Text Editor", bold.clone())],
-    ));
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![
-            run("This document demonstrates ", normal.clone()),
-            run("headings", bold.clone()),
-            run(", ", normal.clone()),
-            run("inline marks", italic.clone()),
-            run(", lists, quotes, dividers and ", normal.clone()),
-            run("to-do items", underline.clone()),
-            run(".", normal.clone()),
-        ],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Headings", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 3 },
-        BlockTextSize::Normal,
-        vec![run("Heading 3", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 4 },
-        BlockTextSize::Normal,
-        vec![run("Heading 4", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 5 },
-        BlockTextSize::Normal,
-        vec![run("Heading 5", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 6 },
-        BlockTextSize::Normal,
-        vec![run("Heading 6", normal.clone())],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Inline Marks", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![
-            run("Bold", bold.clone()),
-            run(" / ", normal.clone()),
-            run("Italic", italic.clone()),
-            run(" / ", normal.clone()),
-            run("Underline", underline.clone()),
-            run(" / ", normal.clone()),
-            run("Strikethrough", strike.clone()),
-        ],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![
-            run("Colors: ", normal.clone()),
-            run("Red", red.clone()),
-            run(", ", normal.clone()),
-            run("Blue", blue.clone()),
-            run(".  Highlight: ", normal.clone()),
-            run("Yellow", highlight.clone()),
-            run(".", normal.clone()),
-        ],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![
-            run("Link (Cmd/Ctrl-click to open): ", normal.clone()),
-            run("Zed Editor", link.clone()),
-        ],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Alignment", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![run("Left aligned paragraph (default).", normal.clone())],
-    ));
-
-    let mut center = block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![run("Center aligned paragraph.", normal.clone())],
-    );
-    center.format.align = BlockAlign::Center;
-    blocks.push(center);
-
-    let mut right = block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![run("Right aligned paragraph.", normal.clone())],
-    );
-    right.format.align = BlockAlign::Right;
-    blocks.push(right);
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Lists", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::UnorderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Bulleted item", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::UnorderedListItem,
-        BlockTextSize::Normal,
-        vec![
-            run("Bulleted item with ", normal.clone()),
-            run("bold", bold.clone()),
-        ],
-    ));
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Numbered list styles:", normal.clone())],
-    ));
-
-    let mut ol_decimal_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Decimal (1, 2, 3)", normal.clone())],
-    );
-    ol_decimal_1.format.ordered_list_style = OrderedListStyle::Decimal;
-    blocks.push(ol_decimal_1);
-    let mut ol_decimal_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still decimal", normal.clone())],
-    );
-    ol_decimal_2.format.ordered_list_style = OrderedListStyle::Decimal;
-    blocks.push(ol_decimal_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Lower alpha:", normal.clone())],
-    ));
-    let mut ol_la_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Lower alpha (a, b, c)", normal.clone())],
-    );
-    ol_la_1.format.ordered_list_style = OrderedListStyle::LowerAlpha;
-    blocks.push(ol_la_1);
-    let mut ol_la_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still lower alpha", normal.clone())],
-    );
-    ol_la_2.format.ordered_list_style = OrderedListStyle::LowerAlpha;
-    blocks.push(ol_la_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Upper alpha:", normal.clone())],
-    ));
-    let mut ol_ua_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Upper alpha (A, B, C)", normal.clone())],
-    );
-    ol_ua_1.format.ordered_list_style = OrderedListStyle::UpperAlpha;
-    blocks.push(ol_ua_1);
-    let mut ol_ua_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still upper alpha", normal.clone())],
-    );
-    ol_ua_2.format.ordered_list_style = OrderedListStyle::UpperAlpha;
-    blocks.push(ol_ua_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Lower roman:", normal.clone())],
-    ));
-    let mut ol_lr_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Lower roman (i, ii, iii)", normal.clone())],
-    );
-    ol_lr_1.format.ordered_list_style = OrderedListStyle::LowerRoman;
-    blocks.push(ol_lr_1);
-    let mut ol_lr_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still lower roman", normal.clone())],
-    );
-    ol_lr_2.format.ordered_list_style = OrderedListStyle::LowerRoman;
-    blocks.push(ol_lr_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Upper roman:", normal.clone())],
-    ));
-    let mut ol_ur_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Upper roman (I, II, III)", normal.clone())],
-    );
-    ol_ur_1.format.ordered_list_style = OrderedListStyle::UpperRoman;
-    blocks.push(ol_ur_1);
-    let mut ol_ur_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still upper roman", normal.clone())],
-    );
-    ol_ur_2.format.ordered_list_style = OrderedListStyle::UpperRoman;
-    blocks.push(ol_ur_2);
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("To-do List", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Todo { checked: false },
-        BlockTextSize::Normal,
-        vec![run("Unchecked task", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Todo { checked: true },
-        BlockTextSize::Normal,
-        vec![run("Checked task", normal.clone())],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Quote", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Quote,
-        BlockTextSize::Normal,
-        vec![run(
-            "Blockquotes are perfect for highlighting important information.",
-            normal.clone(),
-        )],
-    ));
-    blocks.push(block(
-        BlockKind::Quote,
-        BlockTextSize::Normal,
-        vec![run("They can span multiple paragraphs.", normal.clone())],
-    ));
-
-    blocks.push(block(BlockKind::Divider, BlockTextSize::Normal, vec![]));
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Large,
-        vec![run("Divider above.", normal.clone())],
-    ));
-
-    RichTextValue::from_document(&RichTextDocument { blocks })
+fn demo_richtext_value(_theme: &gpui_component::Theme) -> RichTextValue {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../richtext.example.json");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| include_str!("../../../richtext.example.json").to_string());
+    RichTextExample::parse_richtext_value(&content).0
 }
 
 pub struct RichTextExample {
+    app_menu_bar: Entity<AppMenuBar>,
     editor: Entity<RichTextState>,
     file_path: Option<PathBuf>,
     link_input: Entity<InputState>,
 }
 
 impl RichTextExample {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_menu_bar: Entity<AppMenuBar>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let theme = cx.theme().clone();
         let rich_text_theme = RichTextTheme {
             background: theme.background,
@@ -383,14 +65,19 @@ impl RichTextExample {
             state
         });
         Self {
+            app_menu_bar,
             editor,
             file_path: None,
             link_input,
         }
     }
 
-    pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| Self::new(window, cx))
+    pub fn view(
+        app_menu_bar: Entity<AppMenuBar>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|cx| Self::new(app_menu_bar, window, cx))
     }
 
     fn parse_richtext_value(content: &str) -> (RichTextValue, Option<String>) {
@@ -556,36 +243,6 @@ impl RichTextExample {
 impl Render for RichTextExample {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let red = theme.red;
-        let green = theme.green;
-        let blue = theme.blue;
-        let yellow_light = theme.yellow_light;
-        let cyan_light = theme.cyan_light;
-        let magenta_light = theme.magenta_light;
-
-        let toolbar_button = |id: &'static str, label: &'static str, selected: bool| {
-            div()
-                .id(id)
-                .cursor_pointer()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(32.))
-                .min_w(px(32.))
-                .px(px(6.))
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .bg(theme.transparent)
-                .text_color(theme.foreground)
-                .hover(|this| this.bg(theme.muted).text_color(theme.muted_foreground))
-                .active(|this| this.bg(theme.accent).text_color(theme.accent_foreground))
-                .when(selected, |this| {
-                    this.bg(theme.accent).text_color(theme.accent_foreground)
-                })
-                .child(label)
-        };
-        let toolbar_sep = || div().mx(px(6.)).h(px(18.)).w(px(1.)).bg(theme.border);
 
         div()
             .size_full()
@@ -593,155 +250,129 @@ impl Render for RichTextExample {
             .flex()
             .flex_col()
             .bg(theme.muted)
+            .on_action(cx.listener(|this, _: &Open, window, cx| {
+                this.open_from_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Save, window, cx| {
+                this.save_to_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveAs, window, cx| {
+                this.save_as(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &About, window, cx| {
+                window.push_notification(
+                    Notification::new()
+                        .message("Manos Rich Text Editor")
+                        .autohide(true),
+                    cx,
+                );
+            }))
+            .child(
+                TitleBar::new()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(self.app_menu_bar.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .px(px(8.))
+                            .gap(px(4.))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new("github")
+                                    .icon(IconName::GitHub)
+                                    .small()
+                                    .ghost()
+                                    .on_click(|_, _, cx| {
+                                        cx.open_url("https://github.com/dspo/manos");
+                                    }),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .w_full()
                     .flex_none()
                     .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .p(px(8.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(4.))
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Rich Text"),
-                            )
-                            .child(div().w(px(12.)))
-                            .child(
-                                Button::new("open")
-                                    .ghost()
-                                    .label("Open")
-                                    .tooltip("Open from JSON file")
+                    .border_b_1()
+	                    .border_color(theme.border)
+	                    .p(px(8.))
+	                    .child(
+	                        div()
+	                            .flex()
+	                            .w_full()
+	                            .flex_row()
+	                            .flex_wrap()
+	                            .justify_center()
+	                            .gap(px(4.))
+	                            .items_center()
+	                            .child(
+	                                PlateToolbarIconButton::new("bold", PlateIconName::Bold)
+	                                    .selected(self.editor.read(cx).bold_mark_active())
+	                                    .tooltip("Bold")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_from_file(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("save")
-                                    .ghost()
-                                    .label("Save")
-                                    .tooltip("Save to JSON file")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_to_file(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("save-as")
-                                    .ghost()
-                                    .label("Save As")
-                                    .tooltip("Save to a new JSON file")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_as(window, cx);
-                                    })),
-                            )
-                            .child(toolbar_sep())
-                            .child(
-                                toolbar_button(
-                                    "bold",
-                                    "B",
-                                    self.editor.read(cx).bold_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Bold")
-                                        .action(&ToggleBold, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_bold_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
                             .child(
-                                toolbar_button(
-                                    "italic",
-                                    "I",
-                                    self.editor.read(cx).italic_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Italic")
-                                        .action(&ToggleItalic, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("italic", PlateIconName::Italic)
+                                    .selected(self.editor.read(cx).italic_mark_active())
+                                    .tooltip("Italic")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_italic_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
                             .child(
-                                toolbar_button(
-                                    "underline",
-                                    "U",
-                                    self.editor.read(cx).underline_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Underline")
-                                        .action(&ToggleUnderline, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("underline", PlateIconName::Underline)
+                                    .selected(self.editor.read(cx).underline_mark_active())
+                                    .tooltip("Underline")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_underline_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
                             .child(
-                                toolbar_button(
-                                    "strike",
-                                    "S",
-                                    self.editor.read(cx).strikethrough_mark_active(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Strikethrough")
-                                        .action(&ToggleStrikethrough, Some("RichText"))
-                                        .build(window, cx)
-                                })
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
+                                PlateToolbarIconButton::new("strike", PlateIconName::Strikethrough)
+                                    .selected(self.editor.read(cx).strikethrough_mark_active())
+                                    .tooltip("Strikethrough")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_strikethrough_mark(window, cx);
                                         });
-                                    },
-                                )),
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
                             )
-                            .child(toolbar_sep())
+                            .child(PlateToolbarSeparator)
                             .child(
-                                toolbar_button(
-                                    "link",
-                                    "Link",
-                                    self.editor.read(cx).current_link_url().is_some(),
-                                )
-                                .tooltip(|window, cx| {
-                                    Tooltip::new("Set or edit link URL").build(window, cx)
-                                })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, window, cx| {
+                                PlateToolbarIconButton::new("link", PlateIconName::Link)
+                                    .selected(self.editor.read(cx).current_link_url().is_some())
+                                    .tooltip("Set or edit link URL")
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         let current = this.editor.read(cx).current_link_url();
                                         let initial = current.unwrap_or_default();
                                         this.open_link_dialog(initial, window, cx);
-                                    }),
-                                ),
+                                    })),
                             )
                             .child(
-                                toolbar_button("unlink", "Unlink", false)
-                                    .tooltip(|window, cx| {
-                                        Tooltip::new("Remove link").build(window, cx)
-                                    })
+                                PlateToolbarIconButton::new("unlink", PlateIconName::Unlink)
+                                    .tooltip("Remove link")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor
@@ -751,114 +382,332 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     })),
                             )
-                            .child(toolbar_sep())
+                            .child(PlateToolbarSeparator)
+                            .child({
+                                let editor = self.editor.clone();
+                                let active_kind = editor.read(cx).active_block_kind();
+                                let trigger_label: SharedString = match active_kind {
+                                    Some(BlockKind::Heading { level }) => {
+                                        format!("Heading\u{00A0}{level}").into()
+                                    }
+                                    Some(BlockKind::Paragraph) => "Text".into(),
+                                    Some(BlockKind::Quote) => "Quote".into(),
+                                    Some(BlockKind::UnorderedListItem) => "Bulleted list".into(),
+                                    Some(BlockKind::OrderedListItem) => "Numbered list".into(),
+                                    Some(BlockKind::Todo { .. }) => "To-do list".into(),
+                                    Some(BlockKind::Divider) => "Divider".into(),
+                                    None => "Turn into".into(),
+                                };
+
+                                Popover::new("richtext-turn-into-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-turn-into-menu-trigger",
+                                        )
+                                        .tooltip("Turn into")
+                                        .min_width(px(140.))
+                                        .child(trigger_label)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+	                                        let active_kind = editor.read(cx).active_block_kind();
+	                                        let editor_for_items = editor.clone();
+	                                        let popover_for_items = popover.clone();
+
+	                                        #[derive(Clone, Copy)]
+	                                        enum TurnIntoAction {
+	                                            SetKind(BlockKind),
+	                                            SetOrderedListFromSelection,
+	                                        }
+
+	                                        let make_item = move |id: &'static str,
+	                                                              prefix: &'static str,
+	                                                              label: &'static str,
+	                                                              action: TurnIntoAction,
+	                                                              selected: bool,
+	                                                              disabled: bool| {
+	                                            let editor = editor_for_items.clone();
+	                                            let popover = popover_for_items.clone();
+
+		                                            div()
+		                                                .id(id)
+		                                                .flex()
+		                                                .items_center()
+		                                                .h(px(32.))
+		                                                .w_full()
+		                                                .min_w(px(180.))
+		                                                .px(px(8.))
+		                                                .text_size(px(12.))
+		                                                .font_weight(FontWeight::MEDIUM)
+		                                                .rounded(px(4.))
+		                                                .bg(theme.transparent)
+		                                                .text_color(theme.popover_foreground)
+		                                                .when(disabled, |this| {
+		                                                    this.opacity(0.5).cursor_not_allowed()
+	                                                })
+	                                                .when(!disabled, |this| {
+	                                                    this.cursor_pointer()
+	                                                        .hover(|this| {
+	                                                            this.bg(theme.accent).text_color(
+	                                                                theme.accent_foreground,
+	                                                            )
+	                                                        })
+	                                                        .active(|this| {
+	                                                            this.bg(theme.accent).text_color(
+	                                                                theme.accent_foreground,
+	                                                            )
+	                                                        })
+	                                                })
+		                                                .when(!disabled && selected, |this| {
+		                                                    this.bg(theme.accent)
+		                                                        .text_color(theme.accent_foreground)
+		                                                })
+		                                                .child(
+		                                                    div()
+		                                                        .flex()
+		                                                        .flex_1()
+		                                                        .min_w(px(0.))
+		                                                        .items_center()
+		                                                        .gap(px(8.))
+		                                                        .child(
+		                                                            div()
+		                                                                .flex_none()
+		                                                                .w(px(32.))
+		                                                                .text_center()
+		                                                                .text_size(px(12.))
+		                                                                .font_weight(FontWeight::SEMIBOLD)
+		                                                                .child(prefix),
+		                                                        )
+		                                                        .child(
+		                                                            div()
+		                                                                .flex_1()
+		                                                                .min_w(px(0.))
+		                                                                .child(label),
+		                                                        ),
+		                                                )
+		                                                .when(selected, |this| {
+		                                                    this.child(
+		                                                        div()
+		                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+	                                                            .child("✓"),
+	                                                    )
+	                                                })
+	                                                .when(!disabled, |this| {
+	                                                    this.on_mouse_down(
+	                                                        MouseButton::Left,
+	                                                        move |_, window, cx| {
+	                                                            window.prevent_default();
+
+	                                                            match action {
+	                                                                TurnIntoAction::SetKind(kind) => {
+	                                                                    editor.update(cx, |editor, cx| {
+	                                                                        editor.set_block_kind(
+	                                                                            kind, window, cx,
+	                                                                        );
+	                                                                    });
+	                                                                }
+	                                                                TurnIntoAction::SetOrderedListFromSelection => {
+	                                                                    let style = editor
+	                                                                        .read(cx)
+	                                                                        .active_ordered_list_style()
+	                                                                        .unwrap_or(
+	                                                                            OrderedListStyle::Decimal,
+	                                                                        );
+	                                                                    editor.update(cx, |editor, cx| {
+	                                                                        editor.set_ordered_list_style(
+	                                                                            style, window, cx,
+	                                                                        );
+	                                                                    });
+	                                                                }
+	                                                            }
+
+	                                                            let handle =
+	                                                                editor.read(cx).focus_handle();
+	                                                            window.focus(&handle);
+	                                                            popover.update(cx, |state, cx| {
+	                                                                state.dismiss(window, cx);
+	                                                            });
+	                                                        },
+	                                                    )
+	                                                })
+	                                        };
+
+	                                        div()
+	                                            .p(px(4.))
+	                                            .bg(theme.popover)
+	                                            .border_1()
+	                                            .border_color(theme.border)
+	                                            .rounded(theme.radius)
+	                                            .shadow_md()
+	                                            .w(px(220.))
+	                                            .flex()
+	                                            .flex_col()
+	                                            .gap(px(2.))
+	                                            .child(
+	                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Turn into"),
+                                            )
+	                                            .child(make_item(
+	                                                "richtext-turn-into-text",
+	                                                "P",
+	                                                "Text",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                matches!(active_kind, Some(BlockKind::Paragraph)),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h1",
+	                                                "H1",
+	                                                "Heading 1",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 1 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 1 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h2",
+	                                                "H2",
+	                                                "Heading 2",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 2 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 2 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h3",
+	                                                "H3",
+	                                                "Heading 3",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 3 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 3 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h4",
+	                                                "H4",
+	                                                "Heading 4",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 4 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 4 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h5",
+	                                                "H5",
+	                                                "Heading 5",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 5 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 5 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h6",
+	                                                "H6",
+	                                                "Heading 6",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 6 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 6 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(div().h(px(1.)).bg(theme.border).my(px(4.)))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-ul",
+	                                                "•",
+	                                                "Bulleted list",
+	                                                TurnIntoAction::SetKind(
+	                                                    BlockKind::UnorderedListItem,
+	                                                ),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::UnorderedListItem)
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-ol",
+	                                                "1.",
+	                                                "Numbered list",
+	                                                TurnIntoAction::SetOrderedListFromSelection,
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::OrderedListItem)
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-todo",
+	                                                "☐",
+	                                                "To-do list",
+	                                                TurnIntoAction::SetKind(BlockKind::Todo {
+	                                                    checked: false,
+	                                                }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Todo { .. })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-toggle",
+	                                                "▸",
+	                                                "Toggle list",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                false,
+	                                                true,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-code",
+	                                                "</>",
+	                                                "Code",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                false,
+	                                                true,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-quote",
+	                                                "❝",
+	                                                "Quote",
+	                                                TurnIntoAction::SetKind(BlockKind::Quote),
+	                                                matches!(active_kind, Some(BlockKind::Quote)),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-columns",
+	                                                "|||",
+	                                                "3 columns",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                false,
+	                                                true,
+	                                            ))
+	                                    })
+	                            })
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("h1")
-                                    .ghost()
-                                    .label("H1")
-                                    .tooltip("Heading 1")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 1 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("h2")
-                                    .ghost()
-                                    .label("H2")
-                                    .tooltip("Heading 2")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 2 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("h3")
-                                    .ghost()
-                                    .label("H3")
-                                    .tooltip("Heading 3")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 3 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("h4")
-                                    .ghost()
-                                    .label("H4")
-                                    .tooltip("Heading 4")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 4 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("h5")
-                                    .ghost()
-                                    .label("H5")
-                                    .tooltip("Heading 5")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 5 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("h6")
-                                    .ghost()
-                                    .label("H6")
-                                    .tooltip("Heading 6")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 6 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("p")
-                                    .ghost()
-                                    .label("P")
-                                    .tooltip("Paragraph")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(BlockKind::Paragraph, window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(div().w(px(12.)))
-                            .child(
-                                Button::new("size-sm")
-                                    .ghost()
-                                    .label("A-")
+                                PlateToolbarButton::new("size-sm")
                                     .tooltip("Text size: Small")
+                                    .child("A-")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_size(BlockTextSize::Small, window, cx);
@@ -866,10 +715,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("size-md")
-                                    .ghost()
-                                    .label("A")
+                                PlateToolbarButton::new("size-md")
                                     .tooltip("Text size: Normal")
+                                    .child("A")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_size(
@@ -881,61 +729,140 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("size-lg")
-                                    .ghost()
-                                    .label("A+")
+                                PlateToolbarButton::new("size-lg")
                                     .tooltip("Text size: Large")
+                                    .child("A+")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_size(BlockTextSize::Large, window, cx);
                                         });
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
+                            .child({
+                                let editor = self.editor.clone();
+                                let active_align = editor.read(cx).active_block_align();
+                                let trigger_icon = match active_align {
+                                    BlockAlign::Left => PlateIconName::AlignLeft,
+                                    BlockAlign::Center => PlateIconName::AlignCenter,
+                                    BlockAlign::Right => PlateIconName::AlignRight,
+                                };
+
+                                Popover::new("richtext-align-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-align-menu-trigger",
+                                        )
+                                        .tooltip("Align")
+                                        .child(trigger_icon)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+                                        let active_align = editor.read(cx).active_block_align();
+                                        let editor_for_items = editor.clone();
+                                        let popover_for_items = popover.clone();
+                                        let make_item =
+                                            move |id: &'static str,
+                                                  icon: PlateIconName,
+                                                  align: BlockAlign,
+                                                  disabled: bool| {
+                                                let editor = editor_for_items.clone();
+                                                let popover = popover_for_items.clone();
+
+                                                div()
+                                                    .id(id)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .h(px(32.))
+                                                    .w(px(32.))
+                                                    .rounded(px(4.))
+                                                    .bg(theme.transparent)
+                                                    .text_color(theme.popover_foreground)
+                                                    .when(disabled, |this| {
+                                                        this.opacity(0.5).cursor_not_allowed()
+                                                    })
+                                                    .when(!disabled, |this| {
+                                                        this.cursor_pointer()
+                                                            .hover(|this| {
+                                                                this.bg(theme.accent).text_color(
+                                                                    theme.accent_foreground,
+                                                                )
+                                                            })
+                                                            .active(|this| {
+                                                                this.bg(theme.accent).text_color(
+                                                                    theme.accent_foreground,
+                                                                )
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                move |_, window, cx| {
+                                                                    window.prevent_default();
+                                                                    editor.update(cx, |editor, cx| {
+                                                                        editor.set_block_align(
+                                                                            align, window, cx,
+                                                                        );
+                                                                    });
+                                                                    let handle = editor
+                                                                        .read(cx)
+                                                                        .focus_handle();
+                                                                    window.focus(&handle);
+                                                                    popover.update(cx, |state, cx| {
+                                                                        state.dismiss(window, cx);
+                                                                    });
+                                                                },
+                                                            )
+                                                    })
+                                                    .when(!disabled && active_align == align, |this| {
+                                                        this.bg(theme.accent)
+                                                            .text_color(theme.accent_foreground)
+                                                    })
+                                                    .child(gpui_component::Icon::new(icon))
+                                            };
+
+                                        div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.))
+                                            .child(make_item(
+                                                "richtext-align-left",
+                                                PlateIconName::AlignLeft,
+                                                BlockAlign::Left,
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-align-center",
+                                                PlateIconName::AlignCenter,
+                                                BlockAlign::Center,
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-align-right",
+                                                PlateIconName::AlignRight,
+                                                BlockAlign::Right,
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-align-justify",
+                                                PlateIconName::AlignJustify,
+                                                BlockAlign::Left,
+                                                true,
+                                            ))
+                                    })
+                            })
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("align-left")
-                                    .ghost()
-                                    .label("L")
-                                    .tooltip("Align left")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_align(BlockAlign::Left, window, cx);
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                Button::new("align-center")
-                                    .ghost()
-                                    .label("C")
-                                    .tooltip("Align center")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_align(BlockAlign::Center, window, cx);
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                Button::new("align-right")
-                                    .ghost()
-                                    .label("R")
-                                    .tooltip("Align right")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_align(BlockAlign::Right, window, cx);
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(div().w(px(12.)))
-                            .child(
-                                Button::new("ul")
-                                    .ghost()
-                                    .label("•")
+                                PlateToolbarIconButton::new("ul", PlateIconName::List)
                                     .tooltip("Bulleted list")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
@@ -950,94 +877,164 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("ol-dec")
-                                    .ghost()
-                                    .label("1.")
-                                    .tooltip("Numbered list: Decimal")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::Decimal,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(0.))
+                                    .child({
+                                        let editor = self.editor.clone();
+                                        let ordered_list_active = matches!(
+                                            editor.read(cx).active_block_kind(),
+                                            Some(BlockKind::OrderedListItem)
+                                        );
+
+                                        PlateToolbarButton::new("ordered-list")
+                                            .rounding(PlateToolbarRounding::Left)
+                                            .tooltip("Numbered list")
+                                            .selected(ordered_list_active)
+                                            .child(PlateIconName::ListOrdered)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let style = this
+                                                    .editor
+                                                    .read(cx)
+                                                    .active_ordered_list_style()
+                                                    .unwrap_or(OrderedListStyle::Decimal);
+                                                this.editor.update(cx, |editor, cx| {
+                                                    editor.toggle_ordered_list_any(style, window, cx);
+                                                });
+                                                let handle = this.editor.read(cx).focus_handle();
+                                                window.focus(&handle);
+                                            }))
+                                    })
+                                    .child({
+                                        let editor = self.editor.clone();
+                                        let ordered_list_active = matches!(
+                                            editor.read(cx).active_block_kind(),
+                                            Some(BlockKind::OrderedListItem)
+                                        );
+
+                                        Popover::new("ordered-list-style-menu")
+                                            .appearance(false)
+                                            .trigger(
+                                                PlateToolbarButton::new("ordered-list-style-trigger")
+                                                    .rounding(PlateToolbarRounding::Right)
+                                                    .min_width(px(16.))
+                                                    .padding_x(px(0.))
+                                                    .selected(ordered_list_active)
+                                                    .default_text_color(theme.muted_foreground)
+                                                    .child(
+                                                        gpui_component::Icon::new(
+                                                            PlateIconName::ChevronDown,
+                                                        )
+                                                        .size_3p5(),
+                                                    )
+                                                    .on_click(|_, _, _| {}),
+                                            )
+                                            .content(move |_, _window, cx| {
+                                                let theme = cx.theme();
+                                                let popover = cx.entity();
+
+                                                let active_style = editor
+                                                    .read(cx)
+                                                    .active_ordered_list_style()
+                                                    .unwrap_or(OrderedListStyle::Decimal);
+
+                                                let editor_for_items = editor.clone();
+                                                let popover_for_items = popover.clone();
+
+	                                                let make_item = move |id: &'static str,
+	                                                                      label: &'static str,
+	                                                                      style: OrderedListStyle| {
+                                                    let editor = editor_for_items.clone();
+                                                    let popover = popover_for_items.clone();
+                                                    let selected = active_style == style;
+
+	                                                    div()
+	                                                        .id(id)
+	                                                        .flex()
+	                                                        .items_center()
+	                                                        .h(px(32.))
+	                                                        .w_full()
+	                                                        .px(px(8.))
+	                                                        .text_size(px(12.))
+	                                                        .font_weight(FontWeight::MEDIUM)
+	                                                        .rounded(px(4.))
+	                                                        .bg(theme.transparent)
+	                                                        .text_color(theme.popover_foreground)
+	                                                        .cursor_pointer()
+                                                        .hover(|this| {
+                                                            this.bg(theme.accent)
+                                                                .text_color(theme.accent_foreground)
+                                                        })
+                                                        .active(|this| {
+                                                            this.bg(theme.accent)
+                                                                .text_color(theme.accent_foreground)
+                                                        })
+                                                        .when(selected, |this| {
+                                                            this.bg(theme.accent)
+                                                                .text_color(theme.accent_foreground)
+                                                        })
+                                                        .child(label)
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_, window, cx| {
+                                                                window.prevent_default();
+                                                                editor.update(cx, |editor, cx| {
+                                                                    editor.set_ordered_list_style(
+                                                                        style, window, cx,
+                                                                    );
+                                                                });
+                                                                let handle =
+                                                                    editor.read(cx).focus_handle();
+                                                                window.focus(&handle);
+                                                                popover.update(cx, |state, cx| {
+                                                                    state.dismiss(window, cx);
+                                                                });
+                                                            },
+                                                        )
+                                                };
+
+	                                                div()
+	                                                    .p(px(4.))
+	                                                    .bg(theme.popover)
+	                                                    .border_1()
+	                                                    .border_color(theme.border)
+	                                                    .rounded(theme.radius)
+	                                                    .shadow_md()
+	                                                    .w(px(240.))
+	                                                    .flex()
+	                                                    .flex_col()
+	                                                    .gap(px(2.))
+	                                                    .child(make_item(
+	                                                        "ordered-list-style-decimal",
+                                                        "Decimal (1, 2, 3)",
+                                                        OrderedListStyle::Decimal,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-lower-alpha",
+                                                        "Lower Alpha (a, b, c)",
+                                                        OrderedListStyle::LowerAlpha,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-upper-alpha",
+                                                        "Upper Alpha (A, B, C)",
+                                                        OrderedListStyle::UpperAlpha,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-lower-roman",
+                                                        "Lower Roman (i, ii, iii)",
+                                                        OrderedListStyle::LowerRoman,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-upper-roman",
+                                                        "Upper Roman (I, II, III)",
+                                                        OrderedListStyle::UpperRoman,
+                                                    ))
+                                            })
+                                    }),
                             )
                             .child(
-                                Button::new("ol-la")
-                                    .ghost()
-                                    .label("a.")
-                                    .tooltip("Numbered list: Lower alpha")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::LowerAlpha,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                Button::new("ol-ua")
-                                    .ghost()
-                                    .label("A.")
-                                    .tooltip("Numbered list: Upper alpha")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::UpperAlpha,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                Button::new("ol-lr")
-                                    .ghost()
-                                    .label("i.")
-                                    .tooltip("Numbered list: Lower roman")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::LowerRoman,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                Button::new("ol-ur")
-                                    .ghost()
-                                    .label("I.")
-                                    .tooltip("Numbered list: Upper roman")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::UpperRoman,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                Button::new("todo")
-                                    .ghost()
-                                    .label("☐")
+                                PlateToolbarIconButton::new("todo", PlateIconName::ListTodo)
                                     .tooltip("To-do list")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
@@ -1048,10 +1045,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("quote")
-                                    .ghost()
-                                    .label("❝")
+                                PlateToolbarButton::new("quote")
                                     .tooltip("Quote")
+                                    .child("❝")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(BlockKind::Quote, window, cx);
@@ -1061,10 +1057,9 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                Button::new("divider")
-                                    .ghost()
-                                    .label("—")
+                                PlateToolbarButton::new("divider")
                                     .tooltip("Divider")
+                                    .child("—")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.insert_divider(window, cx);
@@ -1073,102 +1068,471 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     })),
                             )
-                            .child(div().w(px(12.)))
+                            .child(PlateToolbarSeparator)
                             .child(
-                                Button::new("color-clear")
-                                    .ghost()
-                                    .label("Tx")
-                                    .tooltip("Text color: Clear")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(None, window, cx);
-                                        });
-                                    })),
+                                PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
+                                    .tooltip("Text color")
+                                    .value(self.editor.read(cx).active_text_color())
+                                    .on_change({
+                                        let editor = self.editor.clone();
+                                        move |color, window, cx| {
+                                            editor.update(cx, |editor, cx| {
+                                                editor.set_text_color(color, window, cx);
+                                            });
+                                            let handle = editor.read(cx).focus_handle();
+                                            window.focus(&handle);
+                                        }
+                                    }),
                             )
                             .child(
-                                Button::new("color-red")
-                                    .ghost()
-                                    .label("R")
-                                    .tooltip("Text color: Red")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = red;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(Some(color), window, cx);
+                                PlateToolbarColorPicker::new(
+                                    "highlight-color",
+                                    PlateIconName::PaintBucket,
+                                )
+                                .tooltip("Highlight color")
+                                .value(self.editor.read(cx).active_highlight_color())
+                                .on_change({
+                                    let editor = self.editor.clone();
+                                    move |color, window, cx| {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.set_highlight_color(color, window, cx);
                                         });
-                                    })),
+                                        let handle = editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    }
+                                }),
                             )
-                            .child(
-                                Button::new("color-green")
-                                    .ghost()
-                                    .label("G")
-                                    .tooltip("Text color: Green")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = green;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("color-blue")
-                                    .ghost()
-                                    .label("B")
-                                    .tooltip("Text color: Blue")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = blue;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(div().w(px(12.)))
-                            .child(
-                                Button::new("hl-clear")
-                                    .ghost()
-                                    .label("HL")
-                                    .tooltip("Highlight: Clear")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(None, window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("hl-yellow")
-                                    .ghost()
-                                    .label("Y")
-                                    .tooltip("Highlight: Yellow")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = yellow_light;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("hl-cyan")
-                                    .ghost()
-                                    .label("C")
-                                    .tooltip("Highlight: Cyan")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = cyan_light;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                Button::new("hl-magenta")
-                                    .ghost()
-                                    .label("M")
-                                    .tooltip("Highlight: Magenta")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = magenta_light;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            ),
+                            .when(false, |this| {
+                                this.child(PlateToolbarSeparator)
+                            .child({
+                                let editor = self.editor.clone();
+                                let theme_name = cx.theme().theme_name().clone();
+
+                                Popover::new("richtext-themes-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-themes-menu-trigger",
+                                        )
+                                        .tooltip("Themes")
+                                        .min_width(px(140.))
+                                        .child(theme_name)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+	                                        let themes = ThemeRegistry::global(cx).sorted_themes();
+	                                        let current_name = cx.theme().theme_name().clone();
+	                                        let is_dark = cx.theme().mode.is_dark();
+
+	                                        let editor_for_items = editor.clone();
+	                                        let popover_for_items = popover.clone();
+
+	                                        #[derive(Clone)]
+	                                        enum ThemeMenuAction {
+	                                            SwitchTheme(SharedString),
+	                                            SwitchMode(ThemeMode),
+	                                        }
+
+	                                        let make_item = move |id: SharedString,
+	                                                              label: SharedString,
+	                                                              selected: bool,
+	                                                              action: ThemeMenuAction| {
+	                                            let popover = popover_for_items.clone();
+	                                            let editor = editor_for_items.clone();
+
+	                                            div()
+	                                                .id(id)
+                                                .flex()
+                                                .items_center()
+                                                .h(px(32.))
+                                                .w_full()
+                                                .px(px(8.))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .rounded(px(4.))
+                                                .bg(theme.transparent)
+                                                .text_color(theme.popover_foreground)
+                                                .cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .active(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .when(selected, |this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w(px(0.))
+                                                        .child(label),
+                                                )
+                                                .when(selected, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child("✓"),
+                                                    )
+	                                                })
+	                                                .on_mouse_down(
+	                                                    MouseButton::Left,
+	                                                    move |_, window, cx| {
+	                                                        window.prevent_default();
+	                                                        match action.clone() {
+	                                                            ThemeMenuAction::SwitchTheme(
+	                                                                theme_name,
+	                                                            ) => {
+	                                                                if let Some(theme_config) =
+	                                                                    ThemeRegistry::global(cx)
+	                                                                        .themes()
+	                                                                        .get(&theme_name)
+	                                                                        .cloned()
+	                                                                {
+	                                                                    Theme::global_mut(cx)
+	                                                                        .apply_config(
+	                                                                            &theme_config,
+	                                                                        );
+	                                                                }
+	                                                                cx.refresh_windows();
+	                                                            }
+	                                                            ThemeMenuAction::SwitchMode(
+	                                                                mode,
+	                                                            ) => {
+	                                                                Theme::change(mode, None, cx);
+	                                                                cx.refresh_windows();
+	                                                            }
+	                                                        }
+
+	                                                        let handle =
+	                                                            editor.read(cx).focus_handle();
+	                                                        window.focus(&handle);
+	                                                        popover.update(cx, |state, cx| {
+                                                            state.dismiss(window, cx);
+                                                        });
+                                                    },
+                                                )
+                                        };
+
+                                        let mut menu = div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .w(px(240.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Themes"),
+                                            );
+
+                                        if themes.is_empty() {
+                                            menu = menu.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .h(px(32.))
+                                                    .px(px(8.))
+                                                    .rounded(px(4.))
+                                                    .text_size(px(12.))
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("No themes found"),
+                                            );
+                                        } else {
+	                                            for (index, theme_config) in themes.into_iter().enumerate()
+	                                            {
+	                                                let name = theme_config.name.clone();
+	                                                let selected = current_name == name;
+	                                                menu = menu.child(make_item(
+	                                                    format!("richtext-theme-{}", index).into(),
+	                                                    name.clone(),
+	                                                    selected,
+	                                                    ThemeMenuAction::SwitchTheme(name.clone()),
+	                                                ));
+	                                            }
+	                                        }
+
+                                        menu = menu
+                                            .child(
+                                                div()
+                                                    .h(px(1.))
+                                                    .bg(theme.border)
+                                                    .my(px(4.)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Appearance"),
+                                            )
+	                                            .child(make_item(
+	                                                "richtext-theme-mode-light".into(),
+	                                                "Light".into(),
+	                                                !is_dark,
+	                                                ThemeMenuAction::SwitchMode(ThemeMode::Light),
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-theme-mode-dark".into(),
+	                                                "Dark".into(),
+	                                                is_dark,
+	                                                ThemeMenuAction::SwitchMode(ThemeMode::Dark),
+	                                            ));
+
+                                        menu
+                                    })
+                            })
+                            .child({
+                                let editor = self.editor.clone();
+                                Popover::new("richtext-settings-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarIconButton::new(
+                                            "richtext-settings-menu-trigger",
+                                            IconName::Settings2,
+                                        )
+                                        .tooltip("Settings")
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+                                        let font_size = cx.theme().font_size.as_f32() as i32;
+                                        let radius = cx.theme().radius.as_f32() as i32;
+                                        let scroll_show = cx.theme().scrollbar_show;
+
+                                        let editor_for_items = editor.clone();
+                                        let popover_for_items = popover.clone();
+
+                                        let make_item = move |id: SharedString,
+                                                              label: SharedString,
+                                                              selected: bool,
+                                                              on_click: Box<
+                                            dyn Fn(&mut Window, &mut App) + 'static,
+                                        >| {
+                                            let popover = popover_for_items.clone();
+                                            let editor = editor_for_items.clone();
+
+                                            div()
+                                                .id(id)
+                                                .flex()
+                                                .items_center()
+                                                .h(px(32.))
+                                                .w_full()
+                                                .px(px(8.))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .rounded(px(4.))
+                                                .bg(theme.transparent)
+                                                .text_color(theme.popover_foreground)
+                                                .cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .active(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .when(selected, |this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w(px(0.))
+                                                        .child(label),
+                                                )
+                                                .when(selected, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child("✓"),
+                                                    )
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |_, window, cx| {
+                                                        window.prevent_default();
+                                                        (on_click)(window, cx);
+
+                                                        let handle =
+                                                            editor.read(cx).focus_handle();
+                                                        window.focus(&handle);
+                                                        popover.update(cx, |state, cx| {
+                                                            state.dismiss(window, cx);
+                                                        });
+                                                    },
+                                                )
+                                        };
+
+                                        div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .w(px(240.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Font Size"),
+                                            )
+                                            .child(make_item(
+                                                "richtext-settings-font-large".into(),
+                                                "Large".into(),
+                                                font_size == 18,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).font_size = px(18.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-font-medium".into(),
+                                                "Medium (default)".into(),
+                                                font_size == 16,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).font_size = px(16.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-font-small".into(),
+                                                "Small".into(),
+                                                font_size == 14,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).font_size = px(14.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .h(px(1.))
+                                                    .bg(theme.border)
+                                                    .my(px(4.)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Border Radius"),
+                                            )
+                                            .child(make_item(
+                                                "richtext-settings-radius-8".into(),
+                                                "8px".into(),
+                                                radius == 8,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(8.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-radius-6".into(),
+                                                "6px (default)".into(),
+                                                radius == 6,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(6.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-radius-4".into(),
+                                                "4px".into(),
+                                                radius == 4,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(4.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-radius-0".into(),
+                                                "0px".into(),
+                                                radius == 0,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(0.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .h(px(1.))
+                                                    .bg(theme.border)
+                                                    .my(px(4.)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Scrollbar"),
+                                            )
+                                            .child(make_item(
+                                                "richtext-settings-scroll-scrolling".into(),
+                                                "Scrolling to show".into(),
+                                                scroll_show == ScrollbarShow::Scrolling,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).scrollbar_show =
+                                                        ScrollbarShow::Scrolling;
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-scroll-hover".into(),
+                                                "Hover to show".into(),
+                                                scroll_show == ScrollbarShow::Hover,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).scrollbar_show =
+                                                        ScrollbarShow::Hover;
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-scroll-always".into(),
+                                                "Always show".into(),
+                                                scroll_show == ScrollbarShow::Always,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).scrollbar_show =
+                                                        ScrollbarShow::Always;
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                    })
+                            })
+                            })
                     ),
             )
             .child(

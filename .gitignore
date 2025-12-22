@@ -1,3 +1,7 @@
 /target
 **/target
 .DS_Store
+/.idea/.gitignore
+/.idea/gpui-component-extras.iml
+/.idea/modules.xml
+/.idea/vcs.xml
