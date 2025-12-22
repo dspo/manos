@@ -1,0 +1,220 @@
+{
+  "schema": "slate",
+  "version": 1,
+  "document": [
+    {
+      "type": "heading",
+      "level": 1,
+      "align": "center",
+      "children": [
+        {
+          "text": "A Plate.js style Richtext Editor on GPUI",
+          "bold": true
+        }
+      ]
+    },
+    {
+      "type": "blockquote",
+      "children": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "text": "This document demonstrates "
+            },
+            {
+              "text": "headings",
+              "bold": true
+            },
+            {
+              "text": ", "
+            },
+            {
+              "text": "inline marks",
+              "italic": true
+            },
+            {
+              "text": ", lists, quotes, dividers and to-do items."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "heading",
+      "level": 2,
+      "children": [
+        {
+          "text": "Headings",
+          "bold": true
+        },
+        {
+          "text": " 2"
+        }
+      ]
+    },
+    {
+      "type": "heading",
+      "level": 3,
+      "children": [
+        {
+          "text": "Heading 3"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [
+        {
+          "text": "Bold",
+          "bold": true
+        },
+        {
+          "text": " / "
+        },
+        {
+          "text": "Italic",
+          "italic": true
+        },
+        {
+          "text": " / "
+        },
+        {
+          "text": "Underline",
+          "underline": true
+        },
+        {
+          "text": " / "
+        },
+        {
+          "text": "Strikethrough",
+          "strikethrough": true
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "textSize": "small",
+      "children": [
+        {
+          "text": "Colors: "
+        },
+        {
+          "text": "Red",
+          "color": "#ef4444ff"
+        },
+        {
+          "text": ", "
+        },
+        {
+          "text": "Blue",
+          "color": "#3b82f6ff"
+        },
+        {
+          "text": ".  Highlight: "
+        },
+        {
+          "text": "Yellow",
+          "backgroundColor": "#fef08aff"
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "type": "bulleted-list",
+      "children": [
+        {
+          "type": "list-item",
+          "children": [
+            {
+              "text": "Bulleted List item with "
+            },
+            {
+              "text": "bold",
+              "bold": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "numbered-list",
+      "listStyle": "decimal",
+      "children": [
+        {
+          "type": "list-item",
+          "children": [
+            {
+              "text": "Decimal List item"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "numbered-list",
+      "listStyle": "lower-alpha",
+      "children": [
+        {
+          "type": "list-item",
+          "children": [
+            {
+              "text": "Lower alpha (a, b, c)"
+            }
+          ]
+        },
+        {
+          "type": "list-item",
+          "children": [
+            {
+              "text": "Still lower alpha"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "todo-list-item",
+      "checked": false,
+      "children": [
+        {
+          "text": "Unchecked task"
+        }
+      ]
+    },
+    {
+      "type": "todo-list-item",
+      "checked": true,
+      "children": [
+        {
+          "text": "Checked task"
+        }
+      ]
+    },
+    {
+      "type": "divider",
+      "children": []
+    },
+    {
+      "type": "paragraph",
+      "textSize": "large",
+      "align": "right",
+      "children": [
+        {
+          "text": "Powered by "
+        },
+        {
+          "type": "link",
+          "url": "https://github.com/dspo/manos",
+          "children": [
+            {
+              "text": "Manos Editor"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

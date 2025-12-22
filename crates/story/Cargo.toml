@@ -1,5 +1,5 @@
 [package]
-name = "gpui-component-extras-story"
+name = "gpui-manos-components-story"
 version = "0.1.0"
 publish = false
 edition.workspace = true
@@ -8,6 +8,6 @@ edition.workspace = true
 anyhow.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
-gpui-component-extras.workspace = true
-gpui-rich-text.workspace = true
+gpui-manos-components.workspace = true
+gpui-manos-plate.workspace = true
 serde_json.workspace = true

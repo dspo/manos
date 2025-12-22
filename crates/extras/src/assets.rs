@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
-/// Asset source for `gpui-component-extras`.
+/// Asset source for `gpui-manos-components`.
 ///
 /// Currently only includes the SVG icon set used by `plate_toolbar`.
 pub struct ExtrasAssetSource;

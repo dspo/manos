@@ -1,5 +1,5 @@
 [package]
-name = "gpui-rich-text"
+name = "gpui-manos-plate"
 version = "0.1.0"
 publish = false
 edition.workspace = true

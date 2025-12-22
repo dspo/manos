@@ -7,11 +7,11 @@ use gpui_component::WindowExt as _;
 use gpui_component::input::InputState;
 use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
-use gpui_component_extras::plate_toolbar::{
+use gpui_manos_components::plate_toolbar::{
     PlateIconName, PlateToolbarColorPicker, PlateToolbarDropdownButton, PlateToolbarIconButton,
     PlateToolbarSeparator, PlateToolbarSplitButton, PlateToolbarStepper,
 };
-use gpui_rich_text::BlockAlign;
+use gpui_manos_plate::BlockAlign;
 
 pub struct PlateToolbarButtonsStory {
     bold: bool,

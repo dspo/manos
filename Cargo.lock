@@ -2228,26 +2228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-component-extras"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui-component",
-]
-
-[[package]]
-name = "gpui-component-extras-story"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gpui",
- "gpui-component",
- "gpui-component-extras",
- "gpui-rich-text",
- "serde_json",
-]
-
-[[package]]
 name = "gpui-component-macros"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2271,7 +2251,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-rich-text"
+name = "gpui-manos-components"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+]
+
+[[package]]
+name = "gpui-manos-components-story"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui-component",
+ "gpui-manos-components",
+ "gpui-manos-plate",
+ "serde_json",
+]
+
+[[package]]
+name = "gpui-manos-plate"
 version = "0.1.0"
 dependencies = [
  "gpui",

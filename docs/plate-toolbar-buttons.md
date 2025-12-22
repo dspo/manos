@@ -18,8 +18,8 @@
 
 对外 API：
 
-- 资源：`gpui_component_extras::assets::ExtrasAssetSource`
-- Toolbar：`gpui_component_extras::plate_toolbar::*`
+- 资源：`gpui_manos_components::assets::ExtrasAssetSource`
+- Toolbar：`gpui_manos_components::plate_toolbar::*`
 
 ## 关键点 1：让 SVG 能显示（资产源）
 
@@ -29,7 +29,7 @@ GPUI 的 `svg().path("...")` 会从 `App` 的 `AssetSource` 里加载文件内�
 
 ```rust
 use gpui::*;
-use gpui_component_extras::assets::ExtrasAssetSource;
+use gpui_manos_components::assets::ExtrasAssetSource;
 
 fn main() {
     let app = Application::new().with_assets(ExtrasAssetSource::new());
@@ -55,7 +55,7 @@ fn main() {
 使用方式：
 
 ```rust
-use gpui_component_extras::plate_toolbar::PlateIconName;
+use gpui_manos_components::plate_toolbar::PlateIconName;
 use gpui_component::Icon;
 
 let icon = Icon::new(PlateIconName::Undo2);
@@ -109,7 +109,7 @@ let icon = Icon::new(PlateIconName::Undo2);
 `PlateToolbarColorPicker` 是一个可复用组件，可用于字体颜色/高亮色：
 
 ```rust
-use gpui_component_extras::plate_toolbar::{PlateIconName, PlateToolbarColorPicker};
+use gpui_manos_components::plate_toolbar::{PlateIconName, PlateToolbarColorPicker};
 
 PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
     .tooltip("Text color")
@@ -126,7 +126,7 @@ PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
 ## 代码示例：组合一个 Toolbar Group
 
 ```rust
-use gpui_component_extras::plate_toolbar::*;
+use gpui_manos_components::plate_toolbar::*;
 
 div()
     .flex()

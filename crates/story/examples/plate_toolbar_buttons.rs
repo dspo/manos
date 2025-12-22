@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::Root;
-use gpui_component_extras::assets::ExtrasAssetSource;
-use gpui_component_extras_story::plate_toolbar_buttons::PlateToolbarButtonsStory;
+use gpui_manos_components::assets::ExtrasAssetSource;
+use gpui_manos_components_story::plate_toolbar_buttons::PlateToolbarButtonsStory;
 
 fn main() {
     let app = Application::new().with_assets(ExtrasAssetSource::new());

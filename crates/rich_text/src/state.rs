@@ -1045,6 +1045,27 @@ impl RichTextState {
         self.scroll_cursor_into_view(window, cx);
     }
 
+    pub fn active_block_kind(&self) -> Option<BlockKind> {
+        let (start_row, end_row) = self.selected_rows();
+        let first = self.document.blocks.get(start_row)?;
+        let normalize = |kind: BlockKind| match kind {
+            BlockKind::Todo { .. } => BlockKind::Todo { checked: false },
+            kind => kind,
+        };
+        let kind = normalize(first.format.kind);
+
+        for row in start_row..=end_row {
+            let Some(block) = self.document.blocks.get(row) else {
+                continue;
+            };
+            if normalize(block.format.kind) != kind {
+                return None;
+            }
+        }
+
+        Some(kind)
+    }
+
     pub fn toggle_list(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
@@ -1063,6 +1084,79 @@ impl RichTextState {
                 };
             }
         }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn active_ordered_list_style(&self) -> Option<OrderedListStyle> {
+        let (start_row, end_row) = self.selected_rows();
+        let first = self.document.blocks.get(start_row)?;
+        if first.format.kind != BlockKind::OrderedListItem {
+            return None;
+        }
+
+        let style = first.format.ordered_list_style;
+        for row in start_row..=end_row {
+            let Some(block) = self.document.blocks.get(row) else {
+                continue;
+            };
+            if block.format.kind != BlockKind::OrderedListItem
+                || block.format.ordered_list_style != style
+            {
+                return None;
+            }
+        }
+
+        Some(style)
+    }
+
+    pub fn set_ordered_list_style(
+        &mut self,
+        style: OrderedListStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.kind = BlockKind::OrderedListItem;
+                block.format.ordered_list_style = style;
+            }
+        }
+
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn toggle_ordered_list_any(
+        &mut self,
+        style: OrderedListStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+
+        let all_ordered = (start_row..=end_row).all(|row| {
+            self.document
+                .blocks
+                .get(row)
+                .is_some_and(|b| b.format.kind == BlockKind::OrderedListItem)
+        });
+
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                if all_ordered {
+                    block.format.kind = BlockKind::Paragraph;
+                } else {
+                    block.format.kind = BlockKind::OrderedListItem;
+                    block.format.ordered_list_style = style;
+                }
+            }
+        }
+
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
     }

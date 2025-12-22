@@ -995,6 +995,16 @@ impl RenderOnce for PlateToolbarColorPicker {
                         popover_for_apply.update(cx, |state, cx| state.dismiss(window, cx));
                     });
 
+                let swatch_size_px: f32 = 24.;
+                let swatch_gap_px: f32 = 4.;
+                let total_swatches = swatches.len().saturating_add(1).max(1);
+                let columns = (total_swatches as f32).sqrt().ceil() as usize;
+                let columns = columns.clamp(1, 10);
+                let swatch_grid_width = px(
+                    columns as f32 * swatch_size_px
+                        + (columns.saturating_sub(1) as f32) * swatch_gap_px,
+                );
+
                 div()
                     .p(px(4.))
                     .bg(theme.popover)
@@ -1007,7 +1017,8 @@ impl RenderOnce for PlateToolbarColorPicker {
                         div()
                             .flex()
                             .flex_wrap()
-                            .gap(px(4.))
+                            .w(swatch_grid_width)
+                            .gap(px(swatch_gap_px))
                             .child(make_swatch(
                                 SharedString::from(format!("{:?}:clear", popover_entity_id)),
                                 None,

@@ -1,15 +1,15 @@
 use gpui::*;
 use gpui_component::Root;
-use gpui_component_extras::assets::ExtrasAssetSource;
+use gpui_manos_components::assets::ExtrasAssetSource;
 
-use gpui_component_extras_story::richtext::RichTextExample;
+use gpui_manos_components_story::richtext::RichTextExample;
 
 fn main() {
     let app = Application::new().with_assets(ExtrasAssetSource::new());
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        gpui_rich_text::init(cx);
+        gpui_manos_plate::init(cx);
         cx.activate(true);
 
         cx.spawn(async move |cx| {

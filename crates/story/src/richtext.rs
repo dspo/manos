@@ -9,351 +9,20 @@ use gpui_component::WindowExt as _;
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
-use gpui_component_extras::plate_toolbar::{
+use gpui_manos_components::plate_toolbar::{
     PlateIconName, PlateToolbarButton, PlateToolbarColorPicker, PlateToolbarDropdownButton,
-    PlateToolbarIconButton, PlateToolbarSeparator,
+    PlateToolbarIconButton, PlateToolbarRounding, PlateToolbarSeparator,
 };
-use gpui_rich_text::{
-    BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, InlineStyle,
-    OrderedListStyle, RichTextDocument, RichTextEditor, RichTextState, RichTextTheme,
-    RichTextValue, SlateNode, TextNode,
+use gpui_manos_plate::{
+    BlockAlign, BlockKind, BlockTextSize, OrderedListStyle, RichTextDocument, RichTextEditor,
+    RichTextState, RichTextTheme, RichTextValue, SlateNode,
 };
 
-fn demo_richtext_value(theme: &gpui_component::Theme) -> RichTextValue {
-    fn run(text: impl Into<String>, style: InlineStyle) -> InlineNode {
-        InlineNode::Text(TextNode {
-            text: text.into(),
-            style,
-        })
-    }
-
-    fn block(kind: BlockKind, size: BlockTextSize, runs: Vec<InlineNode>) -> BlockNode {
-        let mut block = BlockNode {
-            format: BlockFormat {
-                kind,
-                size,
-                ..Default::default()
-            },
-            inlines: runs,
-        };
-        block.normalize();
-        block
-    }
-
-    let normal = InlineStyle::default();
-    let bold = InlineStyle {
-        bold: true,
-        ..InlineStyle::default()
-    };
-    let italic = InlineStyle {
-        italic: true,
-        ..InlineStyle::default()
-    };
-    let underline = InlineStyle {
-        underline: true,
-        ..InlineStyle::default()
-    };
-    let strike = InlineStyle {
-        strikethrough: true,
-        ..InlineStyle::default()
-    };
-    let red = InlineStyle {
-        fg: Some(theme.red),
-        ..InlineStyle::default()
-    };
-    let blue = InlineStyle {
-        fg: Some(theme.blue),
-        ..InlineStyle::default()
-    };
-    let highlight = InlineStyle {
-        bg: Some(theme.yellow_light),
-        ..InlineStyle::default()
-    };
-    let link = InlineStyle {
-        fg: Some(theme.blue),
-        link: Some("https://github.com/zed-industries/zed".to_string()),
-        ..InlineStyle::default()
-    };
-
-    let mut blocks = Vec::new();
-
-    blocks.push(block(
-        BlockKind::Heading { level: 1 },
-        BlockTextSize::Normal,
-        vec![run("GPUI Rich Text Editor", bold.clone())],
-    ));
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![
-            run("This document demonstrates ", normal.clone()),
-            run("headings", bold.clone()),
-            run(", ", normal.clone()),
-            run("inline marks", italic.clone()),
-            run(", lists, quotes, dividers and ", normal.clone()),
-            run("to-do items", underline.clone()),
-            run(".", normal.clone()),
-        ],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Headings", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 3 },
-        BlockTextSize::Normal,
-        vec![run("Heading 3", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 4 },
-        BlockTextSize::Normal,
-        vec![run("Heading 4", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 5 },
-        BlockTextSize::Normal,
-        vec![run("Heading 5", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Heading { level: 6 },
-        BlockTextSize::Normal,
-        vec![run("Heading 6", normal.clone())],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Inline Marks", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![
-            run("Bold", bold.clone()),
-            run(" / ", normal.clone()),
-            run("Italic", italic.clone()),
-            run(" / ", normal.clone()),
-            run("Underline", underline.clone()),
-            run(" / ", normal.clone()),
-            run("Strikethrough", strike.clone()),
-        ],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![
-            run("Colors: ", normal.clone()),
-            run("Red", red.clone()),
-            run(", ", normal.clone()),
-            run("Blue", blue.clone()),
-            run(".  Highlight: ", normal.clone()),
-            run("Yellow", highlight.clone()),
-            run(".", normal.clone()),
-        ],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![
-            run("Link (Cmd/Ctrl-click to open): ", normal.clone()),
-            run("Zed Editor", link.clone()),
-        ],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Alignment", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![run("Left aligned paragraph (default).", normal.clone())],
-    ));
-
-    let mut center = block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![run("Center aligned paragraph.", normal.clone())],
-    );
-    center.format.align = BlockAlign::Center;
-    blocks.push(center);
-
-    let mut right = block(
-        BlockKind::Paragraph,
-        BlockTextSize::Normal,
-        vec![run("Right aligned paragraph.", normal.clone())],
-    );
-    right.format.align = BlockAlign::Right;
-    blocks.push(right);
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Lists", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::UnorderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Bulleted item", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::UnorderedListItem,
-        BlockTextSize::Normal,
-        vec![
-            run("Bulleted item with ", normal.clone()),
-            run("bold", bold.clone()),
-        ],
-    ));
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Numbered list styles:", normal.clone())],
-    ));
-
-    let mut ol_decimal_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Decimal (1, 2, 3)", normal.clone())],
-    );
-    ol_decimal_1.format.ordered_list_style = OrderedListStyle::Decimal;
-    blocks.push(ol_decimal_1);
-    let mut ol_decimal_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still decimal", normal.clone())],
-    );
-    ol_decimal_2.format.ordered_list_style = OrderedListStyle::Decimal;
-    blocks.push(ol_decimal_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Lower alpha:", normal.clone())],
-    ));
-    let mut ol_la_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Lower alpha (a, b, c)", normal.clone())],
-    );
-    ol_la_1.format.ordered_list_style = OrderedListStyle::LowerAlpha;
-    blocks.push(ol_la_1);
-    let mut ol_la_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still lower alpha", normal.clone())],
-    );
-    ol_la_2.format.ordered_list_style = OrderedListStyle::LowerAlpha;
-    blocks.push(ol_la_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Upper alpha:", normal.clone())],
-    ));
-    let mut ol_ua_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Upper alpha (A, B, C)", normal.clone())],
-    );
-    ol_ua_1.format.ordered_list_style = OrderedListStyle::UpperAlpha;
-    blocks.push(ol_ua_1);
-    let mut ol_ua_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still upper alpha", normal.clone())],
-    );
-    ol_ua_2.format.ordered_list_style = OrderedListStyle::UpperAlpha;
-    blocks.push(ol_ua_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Lower roman:", normal.clone())],
-    ));
-    let mut ol_lr_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Lower roman (i, ii, iii)", normal.clone())],
-    );
-    ol_lr_1.format.ordered_list_style = OrderedListStyle::LowerRoman;
-    blocks.push(ol_lr_1);
-    let mut ol_lr_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still lower roman", normal.clone())],
-    );
-    ol_lr_2.format.ordered_list_style = OrderedListStyle::LowerRoman;
-    blocks.push(ol_lr_2);
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Small,
-        vec![run("Upper roman:", normal.clone())],
-    ));
-    let mut ol_ur_1 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Upper roman (I, II, III)", normal.clone())],
-    );
-    ol_ur_1.format.ordered_list_style = OrderedListStyle::UpperRoman;
-    blocks.push(ol_ur_1);
-    let mut ol_ur_2 = block(
-        BlockKind::OrderedListItem,
-        BlockTextSize::Normal,
-        vec![run("Still upper roman", normal.clone())],
-    );
-    ol_ur_2.format.ordered_list_style = OrderedListStyle::UpperRoman;
-    blocks.push(ol_ur_2);
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("To-do List", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Todo { checked: false },
-        BlockTextSize::Normal,
-        vec![run("Unchecked task", normal.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Todo { checked: true },
-        BlockTextSize::Normal,
-        vec![run("Checked task", normal.clone())],
-    ));
-
-    blocks.push(block(
-        BlockKind::Heading { level: 2 },
-        BlockTextSize::Normal,
-        vec![run("Quote", bold.clone())],
-    ));
-    blocks.push(block(
-        BlockKind::Quote,
-        BlockTextSize::Normal,
-        vec![run(
-            "Blockquotes are perfect for highlighting important information.",
-            normal.clone(),
-        )],
-    ));
-    blocks.push(block(
-        BlockKind::Quote,
-        BlockTextSize::Normal,
-        vec![run("They can span multiple paragraphs.", normal.clone())],
-    ));
-
-    blocks.push(block(BlockKind::Divider, BlockTextSize::Normal, vec![]));
-
-    blocks.push(block(
-        BlockKind::Paragraph,
-        BlockTextSize::Large,
-        vec![run("Divider above.", normal.clone())],
-    ));
-
-    RichTextValue::from_document(&RichTextDocument { blocks })
+fn demo_richtext_value(_theme: &gpui_component::Theme) -> RichTextValue {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../richtext.example.json");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| include_str!("../../../richtext.example.json").to_string());
+    RichTextExample::parse_richtext_value(&content).0
 }
 
 pub struct RichTextExample {
@@ -685,100 +354,312 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(PlateToolbarSeparator)
-                            .child(
-                                PlateToolbarButton::new("h1")
-                                    .tooltip("Heading 1")
-                                    .child("H1")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 1 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("h2")
-                                    .tooltip("Heading 2")
-                                    .child("H2")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 2 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("h3")
-                                    .tooltip("Heading 3")
-                                    .child("H3")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 3 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("h4")
-                                    .tooltip("Heading 4")
-                                    .child("H4")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 4 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("h5")
-                                    .tooltip("Heading 5")
-                                    .child("H5")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 5 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("h6")
-                                    .tooltip("Heading 6")
-                                    .child("H6")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(
-                                                BlockKind::Heading { level: 6 },
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("p")
-                                    .tooltip("Paragraph")
-                                    .child("P")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_kind(BlockKind::Paragraph, window, cx);
-                                        });
-                                    })),
-                            )
+                            .child({
+                                let editor = self.editor.clone();
+                                let active_kind = editor.read(cx).active_block_kind();
+                                let trigger_label: SharedString = match active_kind {
+                                    Some(BlockKind::Heading { level }) => {
+                                        format!("Heading {level}").into()
+                                    }
+                                    Some(BlockKind::Paragraph) => "Text".into(),
+                                    Some(BlockKind::Quote) => "Quote".into(),
+                                    Some(BlockKind::UnorderedListItem) => "Bulleted list".into(),
+                                    Some(BlockKind::OrderedListItem) => "Numbered list".into(),
+                                    Some(BlockKind::Todo { .. }) => "To-do list".into(),
+                                    Some(BlockKind::Divider) => "Divider".into(),
+                                    None => "Turn into".into(),
+                                };
+
+                                Popover::new("richtext-turn-into-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-turn-into-menu-trigger",
+                                        )
+                                        .tooltip("Turn into")
+                                        .min_width(px(125.))
+                                        .child(trigger_label)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+	                                        let active_kind = editor.read(cx).active_block_kind();
+	                                        let editor_for_items = editor.clone();
+	                                        let popover_for_items = popover.clone();
+
+	                                        #[derive(Clone, Copy)]
+	                                        enum TurnIntoAction {
+	                                            SetKind(BlockKind),
+	                                            SetOrderedListFromSelection,
+	                                        }
+
+	                                        let make_item = move |id: &'static str,
+	                                                              prefix: &'static str,
+	                                                              label: &'static str,
+	                                                              action: TurnIntoAction,
+	                                                              selected: bool,
+	                                                              disabled: bool| {
+	                                            let editor = editor_for_items.clone();
+	                                            let popover = popover_for_items.clone();
+
+	                                            div()
+	                                                .id(id)
+	                                                .flex()
+	                                                .items_center()
+	                                                .justify_between()
+	                                                .h(px(32.))
+	                                                .px(px(8.))
+	                                                .rounded(px(4.))
+	                                                .bg(theme.transparent)
+	                                                .text_color(theme.popover_foreground)
+	                                                .when(disabled, |this| {
+	                                                    this.opacity(0.5).cursor_not_allowed()
+	                                                })
+	                                                .when(!disabled, |this| {
+	                                                    this.cursor_pointer()
+	                                                        .hover(|this| {
+	                                                            this.bg(theme.accent).text_color(
+	                                                                theme.accent_foreground,
+	                                                            )
+	                                                        })
+	                                                        .active(|this| {
+	                                                            this.bg(theme.accent).text_color(
+	                                                                theme.accent_foreground,
+	                                                            )
+	                                                        })
+	                                                })
+	                                                .when(!disabled && selected, |this| {
+	                                                    this.bg(theme.accent)
+	                                                        .text_color(theme.accent_foreground)
+	                                                })
+	                                                .child(
+	                                                    div()
+	                                                        .flex()
+	                                                        .items_center()
+	                                                        .gap(px(8.))
+                                                        .child(
+                                                            div()
+                                                                .w(px(20.))
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .child(prefix),
+                                                        )
+                                                        .child(label),
+                                                )
+                                                .when(selected, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+	                                                            .child("✓"),
+	                                                    )
+	                                                })
+	                                                .when(!disabled, |this| {
+	                                                    this.on_mouse_down(
+	                                                        MouseButton::Left,
+	                                                        move |_, window, cx| {
+	                                                            window.prevent_default();
+
+	                                                            match action {
+	                                                                TurnIntoAction::SetKind(kind) => {
+	                                                                    editor.update(cx, |editor, cx| {
+	                                                                        editor.set_block_kind(
+	                                                                            kind, window, cx,
+	                                                                        );
+	                                                                    });
+	                                                                }
+	                                                                TurnIntoAction::SetOrderedListFromSelection => {
+	                                                                    let style = editor
+	                                                                        .read(cx)
+	                                                                        .active_ordered_list_style()
+	                                                                        .unwrap_or(
+	                                                                            OrderedListStyle::Decimal,
+	                                                                        );
+	                                                                    editor.update(cx, |editor, cx| {
+	                                                                        editor.set_ordered_list_style(
+	                                                                            style, window, cx,
+	                                                                        );
+	                                                                    });
+	                                                                }
+	                                                            }
+
+	                                                            let handle =
+	                                                                editor.read(cx).focus_handle();
+	                                                            window.focus(&handle);
+	                                                            popover.update(cx, |state, cx| {
+	                                                                state.dismiss(window, cx);
+	                                                            });
+	                                                        },
+	                                                    )
+	                                                })
+	                                        };
+
+                                        div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Turn into"),
+                                            )
+	                                            .child(make_item(
+	                                                "richtext-turn-into-text",
+	                                                "P",
+	                                                "Text",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                matches!(active_kind, Some(BlockKind::Paragraph)),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h1",
+	                                                "H1",
+	                                                "Heading 1",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 1 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 1 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h2",
+	                                                "H2",
+	                                                "Heading 2",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 2 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 2 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h3",
+	                                                "H3",
+	                                                "Heading 3",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 3 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 3 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h4",
+	                                                "H4",
+	                                                "Heading 4",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 4 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 4 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h5",
+	                                                "H5",
+	                                                "Heading 5",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 5 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 5 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-h6",
+	                                                "H6",
+	                                                "Heading 6",
+	                                                TurnIntoAction::SetKind(BlockKind::Heading { level: 6 }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Heading { level: 6 })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(div().h(px(1.)).bg(theme.border).my(px(4.)))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-ul",
+	                                                "•",
+	                                                "Bulleted list",
+	                                                TurnIntoAction::SetKind(
+	                                                    BlockKind::UnorderedListItem,
+	                                                ),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::UnorderedListItem)
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-ol",
+	                                                "1.",
+	                                                "Numbered list",
+	                                                TurnIntoAction::SetOrderedListFromSelection,
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::OrderedListItem)
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-todo",
+	                                                "☐",
+	                                                "To-do list",
+	                                                TurnIntoAction::SetKind(BlockKind::Todo {
+	                                                    checked: false,
+	                                                }),
+	                                                matches!(
+	                                                    active_kind,
+	                                                    Some(BlockKind::Todo { .. })
+	                                                ),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-toggle",
+	                                                "▸",
+	                                                "Toggle list",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                false,
+	                                                true,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-code",
+	                                                "</>",
+	                                                "Code",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                false,
+	                                                true,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-quote",
+	                                                "❝",
+	                                                "Quote",
+	                                                TurnIntoAction::SetKind(BlockKind::Quote),
+	                                                matches!(active_kind, Some(BlockKind::Quote)),
+	                                                false,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-columns",
+	                                                "|||",
+	                                                "3 columns",
+	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
+	                                                false,
+	                                                true,
+	                                            ))
+	                                    })
+	                            })
                             .child(PlateToolbarSeparator)
                             .child(
                                 PlateToolbarButton::new("size-sm")
@@ -953,83 +834,157 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(
-                                PlateToolbarIconButton::new("ol-dec", PlateIconName::ListOrdered)
-                                    .tooltip("Numbered list: Decimal")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::Decimal,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("ol-la")
-                                    .tooltip("Numbered list: Lower alpha")
-                                    .child("a.")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::LowerAlpha,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("ol-ua")
-                                    .tooltip("Numbered list: Upper alpha")
-                                    .child("A.")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::UpperAlpha,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("ol-lr")
-                                    .tooltip("Numbered list: Lower roman")
-                                    .child("i.")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::LowerRoman,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("ol-ur")
-                                    .tooltip("Numbered list: Upper roman")
-                                    .child("I.")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.toggle_ordered_list(
-                                                OrderedListStyle::UpperRoman,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(0.))
+                                    .child({
+                                        let editor = self.editor.clone();
+                                        let ordered_list_active = matches!(
+                                            editor.read(cx).active_block_kind(),
+                                            Some(BlockKind::OrderedListItem)
+                                        );
+
+                                        PlateToolbarButton::new("ordered-list")
+                                            .rounding(PlateToolbarRounding::Left)
+                                            .tooltip("Numbered list")
+                                            .selected(ordered_list_active)
+                                            .child(PlateIconName::ListOrdered)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let style = this
+                                                    .editor
+                                                    .read(cx)
+                                                    .active_ordered_list_style()
+                                                    .unwrap_or(OrderedListStyle::Decimal);
+                                                this.editor.update(cx, |editor, cx| {
+                                                    editor.toggle_ordered_list_any(style, window, cx);
+                                                });
+                                                let handle = this.editor.read(cx).focus_handle();
+                                                window.focus(&handle);
+                                            }))
+                                    })
+                                    .child({
+                                        let editor = self.editor.clone();
+                                        let ordered_list_active = matches!(
+                                            editor.read(cx).active_block_kind(),
+                                            Some(BlockKind::OrderedListItem)
+                                        );
+
+                                        Popover::new("ordered-list-style-menu")
+                                            .appearance(false)
+                                            .trigger(
+                                                PlateToolbarButton::new("ordered-list-style-trigger")
+                                                    .rounding(PlateToolbarRounding::Right)
+                                                    .min_width(px(16.))
+                                                    .padding_x(px(0.))
+                                                    .selected(ordered_list_active)
+                                                    .default_text_color(theme.muted_foreground)
+                                                    .child(
+                                                        gpui_component::Icon::new(
+                                                            PlateIconName::ChevronDown,
+                                                        )
+                                                        .size_3p5(),
+                                                    )
+                                                    .on_click(|_, _, _| {}),
+                                            )
+                                            .content(move |_, _window, cx| {
+                                                let theme = cx.theme();
+                                                let popover = cx.entity();
+
+                                                let active_style = editor
+                                                    .read(cx)
+                                                    .active_ordered_list_style()
+                                                    .unwrap_or(OrderedListStyle::Decimal);
+
+                                                let editor_for_items = editor.clone();
+                                                let popover_for_items = popover.clone();
+
+                                                let make_item = move |id: &'static str,
+                                                                      label: &'static str,
+                                                                      style: OrderedListStyle| {
+                                                    let editor = editor_for_items.clone();
+                                                    let popover = popover_for_items.clone();
+                                                    let selected = active_style == style;
+
+                                                    div()
+                                                        .id(id)
+                                                        .flex()
+                                                        .items_center()
+                                                        .h(px(32.))
+                                                        .px(px(8.))
+                                                        .rounded(px(4.))
+                                                        .bg(theme.transparent)
+                                                        .text_color(theme.popover_foreground)
+                                                        .cursor_pointer()
+                                                        .hover(|this| {
+                                                            this.bg(theme.accent)
+                                                                .text_color(theme.accent_foreground)
+                                                        })
+                                                        .active(|this| {
+                                                            this.bg(theme.accent)
+                                                                .text_color(theme.accent_foreground)
+                                                        })
+                                                        .when(selected, |this| {
+                                                            this.bg(theme.accent)
+                                                                .text_color(theme.accent_foreground)
+                                                        })
+                                                        .child(label)
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_, window, cx| {
+                                                                window.prevent_default();
+                                                                editor.update(cx, |editor, cx| {
+                                                                    editor.set_ordered_list_style(
+                                                                        style, window, cx,
+                                                                    );
+                                                                });
+                                                                let handle =
+                                                                    editor.read(cx).focus_handle();
+                                                                window.focus(&handle);
+                                                                popover.update(cx, |state, cx| {
+                                                                    state.dismiss(window, cx);
+                                                                });
+                                                            },
+                                                        )
+                                                };
+
+                                                div()
+                                                    .p(px(4.))
+                                                    .bg(theme.popover)
+                                                    .border_1()
+                                                    .border_color(theme.border)
+                                                    .rounded(theme.radius)
+                                                    .shadow_md()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(2.))
+                                                    .child(make_item(
+                                                        "ordered-list-style-decimal",
+                                                        "Decimal (1, 2, 3)",
+                                                        OrderedListStyle::Decimal,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-lower-alpha",
+                                                        "Lower Alpha (a, b, c)",
+                                                        OrderedListStyle::LowerAlpha,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-upper-alpha",
+                                                        "Upper Alpha (A, B, C)",
+                                                        OrderedListStyle::UpperAlpha,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-lower-roman",
+                                                        "Lower Roman (i, ii, iii)",
+                                                        OrderedListStyle::LowerRoman,
+                                                    ))
+                                                    .child(make_item(
+                                                        "ordered-list-style-upper-roman",
+                                                        "Upper Roman (I, II, III)",
+                                                        OrderedListStyle::UpperRoman,
+                                                    ))
+                                            })
+                                    }),
                             )
                             .child(
                                 PlateToolbarIconButton::new("todo", PlateIconName::ListTodo)
