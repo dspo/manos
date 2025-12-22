@@ -8,14 +8,13 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        gpui_rich_text::init(cx);
         cx.activate(true);
 
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
                     titlebar: Some(TitlebarOptions {
-                        title: Some("GPUI Component Extras".into()),
+                        title: Some("DnD Tree".into()),
                         appears_transparent: false,
                         traffic_light_position: None,
                     }),

@@ -8,5 +8,7 @@ edition.workspace = true
 anyhow.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-dnd-list.workspace = true
+gpui-dnd-tree.workspace = true
 gpui-rich-text.workspace = true
 serde_json.workspace = true

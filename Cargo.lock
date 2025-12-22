@@ -2234,6 +2234,8 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-component",
+ "gpui-dnd-list",
+ "gpui-dnd-tree",
  "gpui-rich-text",
  "serde_json",
 ]
@@ -2247,6 +2249,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "gpui-dnd-list"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+]
+
+[[package]]
+name = "gpui-dnd-tree"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
 ]
 
 [[package]]
