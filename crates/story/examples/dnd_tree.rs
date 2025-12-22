@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::Root;
 
-use gpui_component_extras_story::dnd_tree::DndTreeExample;
+use gpui_manos_components_story::dnd_tree::DndTreeExample;
 
 fn main() {
     let app = Application::new();

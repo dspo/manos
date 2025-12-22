@@ -1,11 +1,9 @@
 use gpui::*;
 use gpui_component::{Root, TitleBar};
 use gpui_manos_components::assets::ExtrasAssetSource;
-
 use gpui_manos_components_story::app_menus;
 use gpui_manos_components_story::richtext::RichTextExample;
 use gpui_manos_components_story::themes;
-use gpui_component_extras_story::dnd_tree::DndTreeExample;
 
 fn main() {
     let app = Application::new().with_assets(ExtrasAssetSource::new());
@@ -26,7 +24,6 @@ fn main() {
                     window.set_window_title("Manos Components");
                     let app_menu_bar = app_menus::init("Manos Components", window, cx);
                     let view = RichTextExample::view(app_menu_bar, window, cx);
-                    let view = DndTreeExample::view(window, cx);
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )?;
