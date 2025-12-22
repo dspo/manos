@@ -2,13 +2,16 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme as _;
-use gpui_component::Root;
-use gpui_component::Selectable as _;
-use gpui_component::WindowExt as _;
-use gpui_component::input::{Input, InputState};
-use gpui_component::notification::Notification;
-use gpui_component::popover::Popover;
+use gpui_component::{
+    ActiveTheme as _, IconName, PixelsExt as _, Root, Selectable as _, Sizable as _, Theme,
+    ThemeMode, ThemeRegistry, TitleBar, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    input::{Input, InputState},
+    menu::AppMenuBar,
+    notification::Notification,
+    popover::Popover,
+    scroll::ScrollbarShow,
+};
 use gpui_manos_components::plate_toolbar::{
     PlateIconName, PlateToolbarButton, PlateToolbarColorPicker, PlateToolbarDropdownButton,
     PlateToolbarIconButton, PlateToolbarRounding, PlateToolbarSeparator,
@@ -18,6 +21,8 @@ use gpui_manos_plate::{
     RichTextState, RichTextTheme, RichTextValue, SlateNode,
 };
 
+use crate::app_menus::{About, Open, Save, SaveAs};
+
 fn demo_richtext_value(_theme: &gpui_component::Theme) -> RichTextValue {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../richtext.example.json");
     let content = std::fs::read_to_string(&path)
@@ -26,13 +31,18 @@ fn demo_richtext_value(_theme: &gpui_component::Theme) -> RichTextValue {
 }
 
 pub struct RichTextExample {
+    app_menu_bar: Entity<AppMenuBar>,
     editor: Entity<RichTextState>,
     file_path: Option<PathBuf>,
     link_input: Entity<InputState>,
 }
 
 impl RichTextExample {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        app_menu_bar: Entity<AppMenuBar>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let theme = cx.theme().clone();
         let rich_text_theme = RichTextTheme {
             background: theme.background,
@@ -55,14 +65,19 @@ impl RichTextExample {
             state
         });
         Self {
+            app_menu_bar,
             editor,
             file_path: None,
             link_input,
         }
     }
 
-    pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| Self::new(window, cx))
+    pub fn view(
+        app_menu_bar: Entity<AppMenuBar>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        cx.new(|cx| Self::new(app_menu_bar, window, cx))
     }
 
     fn parse_richtext_value(content: &str) -> (RichTextValue, Option<String>) {
@@ -235,57 +250,71 @@ impl Render for RichTextExample {
             .flex()
             .flex_col()
             .bg(theme.muted)
+            .on_action(cx.listener(|this, _: &Open, window, cx| {
+                this.open_from_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Save, window, cx| {
+                this.save_to_file(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveAs, window, cx| {
+                this.save_as(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &About, window, cx| {
+                window.push_notification(
+                    Notification::new()
+                        .message("Manos Rich Text Editor")
+                        .autohide(true),
+                    cx,
+                );
+            }))
+            .child(
+                TitleBar::new()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(self.app_menu_bar.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .px(px(8.))
+                            .gap(px(4.))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                Button::new("github")
+                                    .icon(IconName::GitHub)
+                                    .small()
+                                    .ghost()
+                                    .on_click(|_, _, cx| {
+                                        cx.open_url("https://github.com/dspo/manos");
+                                    }),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .w_full()
                     .flex_none()
                     .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .p(px(8.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap(px(4.))
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Rich Text"),
-                            )
-                            .child(div().w(px(12.)))
-                            .child(
-                                PlateToolbarButton::new("open")
-                                    .tooltip("Open from JSON file")
-                                    .child("Open")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_from_file(window, cx);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("save")
-                                    .tooltip("Save to JSON file")
-                                    .child("Save")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_to_file(window, cx);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("save-as")
-                                    .tooltip("Save to a new JSON file")
-                                    .child("Save As")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_as(window, cx);
-                                    })),
-                            )
-                            .child(PlateToolbarSeparator)
-                            .child(
-                                PlateToolbarIconButton::new("bold", PlateIconName::Bold)
-                                    .selected(self.editor.read(cx).bold_mark_active())
-                                    .tooltip("Bold")
+                    .border_b_1()
+	                    .border_color(theme.border)
+	                    .p(px(8.))
+	                    .child(
+	                        div()
+	                            .flex()
+	                            .w_full()
+	                            .flex_row()
+	                            .flex_wrap()
+	                            .justify_center()
+	                            .gap(px(4.))
+	                            .items_center()
+	                            .child(
+	                                PlateToolbarIconButton::new("bold", PlateIconName::Bold)
+	                                    .selected(self.editor.read(cx).bold_mark_active())
+	                                    .tooltip("Bold")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_bold_mark(window, cx);
@@ -359,7 +388,7 @@ impl Render for RichTextExample {
                                 let active_kind = editor.read(cx).active_block_kind();
                                 let trigger_label: SharedString = match active_kind {
                                     Some(BlockKind::Heading { level }) => {
-                                        format!("Heading {level}").into()
+                                        format!("Heading\u{00A0}{level}").into()
                                     }
                                     Some(BlockKind::Paragraph) => "Text".into(),
                                     Some(BlockKind::Quote) => "Quote".into(),
@@ -377,7 +406,7 @@ impl Render for RichTextExample {
                                             "richtext-turn-into-menu-trigger",
                                         )
                                         .tooltip("Turn into")
-                                        .min_width(px(125.))
+                                        .min_width(px(140.))
                                         .child(trigger_label)
                                         .on_click(|_, _, _| {}),
                                     )
@@ -404,18 +433,21 @@ impl Render for RichTextExample {
 	                                            let editor = editor_for_items.clone();
 	                                            let popover = popover_for_items.clone();
 
-	                                            div()
-	                                                .id(id)
-	                                                .flex()
-	                                                .items_center()
-	                                                .justify_between()
-	                                                .h(px(32.))
-	                                                .px(px(8.))
-	                                                .rounded(px(4.))
-	                                                .bg(theme.transparent)
-	                                                .text_color(theme.popover_foreground)
-	                                                .when(disabled, |this| {
-	                                                    this.opacity(0.5).cursor_not_allowed()
+		                                            div()
+		                                                .id(id)
+		                                                .flex()
+		                                                .items_center()
+		                                                .h(px(32.))
+		                                                .w_full()
+		                                                .min_w(px(180.))
+		                                                .px(px(8.))
+		                                                .text_size(px(12.))
+		                                                .font_weight(FontWeight::MEDIUM)
+		                                                .rounded(px(4.))
+		                                                .bg(theme.transparent)
+		                                                .text_color(theme.popover_foreground)
+		                                                .when(disabled, |this| {
+		                                                    this.opacity(0.5).cursor_not_allowed()
 	                                                })
 	                                                .when(!disabled, |this| {
 	                                                    this.cursor_pointer()
@@ -430,27 +462,37 @@ impl Render for RichTextExample {
 	                                                            )
 	                                                        })
 	                                                })
-	                                                .when(!disabled && selected, |this| {
-	                                                    this.bg(theme.accent)
-	                                                        .text_color(theme.accent_foreground)
-	                                                })
-	                                                .child(
-	                                                    div()
-	                                                        .flex()
-	                                                        .items_center()
-	                                                        .gap(px(8.))
-                                                        .child(
-                                                            div()
-                                                                .w(px(20.))
-                                                                .font_weight(FontWeight::SEMIBOLD)
-                                                                .child(prefix),
-                                                        )
-                                                        .child(label),
-                                                )
-                                                .when(selected, |this| {
-                                                    this.child(
-                                                        div()
-                                                            .text_size(px(12.))
+		                                                .when(!disabled && selected, |this| {
+		                                                    this.bg(theme.accent)
+		                                                        .text_color(theme.accent_foreground)
+		                                                })
+		                                                .child(
+		                                                    div()
+		                                                        .flex()
+		                                                        .flex_1()
+		                                                        .min_w(px(0.))
+		                                                        .items_center()
+		                                                        .gap(px(8.))
+		                                                        .child(
+		                                                            div()
+		                                                                .flex_none()
+		                                                                .w(px(32.))
+		                                                                .text_center()
+		                                                                .text_size(px(12.))
+		                                                                .font_weight(FontWeight::SEMIBOLD)
+		                                                                .child(prefix),
+		                                                        )
+		                                                        .child(
+		                                                            div()
+		                                                                .flex_1()
+		                                                                .min_w(px(0.))
+		                                                                .child(label),
+		                                                        ),
+		                                                )
+		                                                .when(selected, |this| {
+		                                                    this.child(
+		                                                        div()
+		                                                            .text_size(px(12.))
                                                             .font_weight(FontWeight::SEMIBOLD)
 	                                                            .child("✓"),
 	                                                    )
@@ -495,18 +537,19 @@ impl Render for RichTextExample {
 	                                                })
 	                                        };
 
-                                        div()
-                                            .p(px(4.))
-                                            .bg(theme.popover)
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .rounded(theme.radius)
-                                            .shadow_md()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(2.))
-                                            .child(
-                                                div()
+	                                        div()
+	                                            .p(px(4.))
+	                                            .bg(theme.popover)
+	                                            .border_1()
+	                                            .border_color(theme.border)
+	                                            .rounded(theme.radius)
+	                                            .shadow_md()
+	                                            .w(px(220.))
+	                                            .flex()
+	                                            .flex_col()
+	                                            .gap(px(2.))
+	                                            .child(
+	                                                div()
                                                     .px(px(8.))
                                                     .py(px(6.))
                                                     .text_size(px(10.))
@@ -899,23 +942,26 @@ impl Render for RichTextExample {
                                                 let editor_for_items = editor.clone();
                                                 let popover_for_items = popover.clone();
 
-                                                let make_item = move |id: &'static str,
-                                                                      label: &'static str,
-                                                                      style: OrderedListStyle| {
+	                                                let make_item = move |id: &'static str,
+	                                                                      label: &'static str,
+	                                                                      style: OrderedListStyle| {
                                                     let editor = editor_for_items.clone();
                                                     let popover = popover_for_items.clone();
                                                     let selected = active_style == style;
 
-                                                    div()
-                                                        .id(id)
-                                                        .flex()
-                                                        .items_center()
-                                                        .h(px(32.))
-                                                        .px(px(8.))
-                                                        .rounded(px(4.))
-                                                        .bg(theme.transparent)
-                                                        .text_color(theme.popover_foreground)
-                                                        .cursor_pointer()
+	                                                    div()
+	                                                        .id(id)
+	                                                        .flex()
+	                                                        .items_center()
+	                                                        .h(px(32.))
+	                                                        .w_full()
+	                                                        .px(px(8.))
+	                                                        .text_size(px(12.))
+	                                                        .font_weight(FontWeight::MEDIUM)
+	                                                        .rounded(px(4.))
+	                                                        .bg(theme.transparent)
+	                                                        .text_color(theme.popover_foreground)
+	                                                        .cursor_pointer()
                                                         .hover(|this| {
                                                             this.bg(theme.accent)
                                                                 .text_color(theme.accent_foreground)
@@ -948,18 +994,19 @@ impl Render for RichTextExample {
                                                         )
                                                 };
 
-                                                div()
-                                                    .p(px(4.))
-                                                    .bg(theme.popover)
-                                                    .border_1()
-                                                    .border_color(theme.border)
-                                                    .rounded(theme.radius)
-                                                    .shadow_md()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(2.))
-                                                    .child(make_item(
-                                                        "ordered-list-style-decimal",
+	                                                div()
+	                                                    .p(px(4.))
+	                                                    .bg(theme.popover)
+	                                                    .border_1()
+	                                                    .border_color(theme.border)
+	                                                    .rounded(theme.radius)
+	                                                    .shadow_md()
+	                                                    .w(px(240.))
+	                                                    .flex()
+	                                                    .flex_col()
+	                                                    .gap(px(2.))
+	                                                    .child(make_item(
+	                                                        "ordered-list-style-decimal",
                                                         "Decimal (1, 2, 3)",
                                                         OrderedListStyle::Decimal,
                                                     ))
@@ -1054,7 +1101,438 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     }
                                 }),
-                            ),
+                            )
+                            .when(false, |this| {
+                                this.child(PlateToolbarSeparator)
+                            .child({
+                                let editor = self.editor.clone();
+                                let theme_name = cx.theme().theme_name().clone();
+
+                                Popover::new("richtext-themes-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-themes-menu-trigger",
+                                        )
+                                        .tooltip("Themes")
+                                        .min_width(px(140.))
+                                        .child(theme_name)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+	                                        let themes = ThemeRegistry::global(cx).sorted_themes();
+	                                        let current_name = cx.theme().theme_name().clone();
+	                                        let is_dark = cx.theme().mode.is_dark();
+
+	                                        let editor_for_items = editor.clone();
+	                                        let popover_for_items = popover.clone();
+
+	                                        #[derive(Clone)]
+	                                        enum ThemeMenuAction {
+	                                            SwitchTheme(SharedString),
+	                                            SwitchMode(ThemeMode),
+	                                        }
+
+	                                        let make_item = move |id: SharedString,
+	                                                              label: SharedString,
+	                                                              selected: bool,
+	                                                              action: ThemeMenuAction| {
+	                                            let popover = popover_for_items.clone();
+	                                            let editor = editor_for_items.clone();
+
+	                                            div()
+	                                                .id(id)
+                                                .flex()
+                                                .items_center()
+                                                .h(px(32.))
+                                                .w_full()
+                                                .px(px(8.))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .rounded(px(4.))
+                                                .bg(theme.transparent)
+                                                .text_color(theme.popover_foreground)
+                                                .cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .active(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .when(selected, |this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w(px(0.))
+                                                        .child(label),
+                                                )
+                                                .when(selected, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child("✓"),
+                                                    )
+	                                                })
+	                                                .on_mouse_down(
+	                                                    MouseButton::Left,
+	                                                    move |_, window, cx| {
+	                                                        window.prevent_default();
+	                                                        match action.clone() {
+	                                                            ThemeMenuAction::SwitchTheme(
+	                                                                theme_name,
+	                                                            ) => {
+	                                                                if let Some(theme_config) =
+	                                                                    ThemeRegistry::global(cx)
+	                                                                        .themes()
+	                                                                        .get(&theme_name)
+	                                                                        .cloned()
+	                                                                {
+	                                                                    Theme::global_mut(cx)
+	                                                                        .apply_config(
+	                                                                            &theme_config,
+	                                                                        );
+	                                                                }
+	                                                                cx.refresh_windows();
+	                                                            }
+	                                                            ThemeMenuAction::SwitchMode(
+	                                                                mode,
+	                                                            ) => {
+	                                                                Theme::change(mode, None, cx);
+	                                                                cx.refresh_windows();
+	                                                            }
+	                                                        }
+
+	                                                        let handle =
+	                                                            editor.read(cx).focus_handle();
+	                                                        window.focus(&handle);
+	                                                        popover.update(cx, |state, cx| {
+                                                            state.dismiss(window, cx);
+                                                        });
+                                                    },
+                                                )
+                                        };
+
+                                        let mut menu = div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .w(px(240.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Themes"),
+                                            );
+
+                                        if themes.is_empty() {
+                                            menu = menu.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .h(px(32.))
+                                                    .px(px(8.))
+                                                    .rounded(px(4.))
+                                                    .text_size(px(12.))
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("No themes found"),
+                                            );
+                                        } else {
+	                                            for (index, theme_config) in themes.into_iter().enumerate()
+	                                            {
+	                                                let name = theme_config.name.clone();
+	                                                let selected = current_name == name;
+	                                                menu = menu.child(make_item(
+	                                                    format!("richtext-theme-{}", index).into(),
+	                                                    name.clone(),
+	                                                    selected,
+	                                                    ThemeMenuAction::SwitchTheme(name.clone()),
+	                                                ));
+	                                            }
+	                                        }
+
+                                        menu = menu
+                                            .child(
+                                                div()
+                                                    .h(px(1.))
+                                                    .bg(theme.border)
+                                                    .my(px(4.)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Appearance"),
+                                            )
+	                                            .child(make_item(
+	                                                "richtext-theme-mode-light".into(),
+	                                                "Light".into(),
+	                                                !is_dark,
+	                                                ThemeMenuAction::SwitchMode(ThemeMode::Light),
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-theme-mode-dark".into(),
+	                                                "Dark".into(),
+	                                                is_dark,
+	                                                ThemeMenuAction::SwitchMode(ThemeMode::Dark),
+	                                            ));
+
+                                        menu
+                                    })
+                            })
+                            .child({
+                                let editor = self.editor.clone();
+                                Popover::new("richtext-settings-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarIconButton::new(
+                                            "richtext-settings-menu-trigger",
+                                            IconName::Settings2,
+                                        )
+                                        .tooltip("Settings")
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+                                        let font_size = cx.theme().font_size.as_f32() as i32;
+                                        let radius = cx.theme().radius.as_f32() as i32;
+                                        let scroll_show = cx.theme().scrollbar_show;
+
+                                        let editor_for_items = editor.clone();
+                                        let popover_for_items = popover.clone();
+
+                                        let make_item = move |id: SharedString,
+                                                              label: SharedString,
+                                                              selected: bool,
+                                                              on_click: Box<
+                                            dyn Fn(&mut Window, &mut App) + 'static,
+                                        >| {
+                                            let popover = popover_for_items.clone();
+                                            let editor = editor_for_items.clone();
+
+                                            div()
+                                                .id(id)
+                                                .flex()
+                                                .items_center()
+                                                .h(px(32.))
+                                                .w_full()
+                                                .px(px(8.))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .rounded(px(4.))
+                                                .bg(theme.transparent)
+                                                .text_color(theme.popover_foreground)
+                                                .cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .active(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .when(selected, |this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w(px(0.))
+                                                        .child(label),
+                                                )
+                                                .when(selected, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child("✓"),
+                                                    )
+                                                })
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    move |_, window, cx| {
+                                                        window.prevent_default();
+                                                        (on_click)(window, cx);
+
+                                                        let handle =
+                                                            editor.read(cx).focus_handle();
+                                                        window.focus(&handle);
+                                                        popover.update(cx, |state, cx| {
+                                                            state.dismiss(window, cx);
+                                                        });
+                                                    },
+                                                )
+                                        };
+
+                                        div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .w(px(240.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Font Size"),
+                                            )
+                                            .child(make_item(
+                                                "richtext-settings-font-large".into(),
+                                                "Large".into(),
+                                                font_size == 18,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).font_size = px(18.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-font-medium".into(),
+                                                "Medium (default)".into(),
+                                                font_size == 16,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).font_size = px(16.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-font-small".into(),
+                                                "Small".into(),
+                                                font_size == 14,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).font_size = px(14.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .h(px(1.))
+                                                    .bg(theme.border)
+                                                    .my(px(4.)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Border Radius"),
+                                            )
+                                            .child(make_item(
+                                                "richtext-settings-radius-8".into(),
+                                                "8px".into(),
+                                                radius == 8,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(8.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-radius-6".into(),
+                                                "6px (default)".into(),
+                                                radius == 6,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(6.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-radius-4".into(),
+                                                "4px".into(),
+                                                radius == 4,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(4.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-radius-0".into(),
+                                                "0px".into(),
+                                                radius == 0,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).radius = px(0.);
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .h(px(1.))
+                                                    .bg(theme.border)
+                                                    .my(px(4.)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(8.))
+                                                    .py(px(6.))
+                                                    .text_size(px(10.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Scrollbar"),
+                                            )
+                                            .child(make_item(
+                                                "richtext-settings-scroll-scrolling".into(),
+                                                "Scrolling to show".into(),
+                                                scroll_show == ScrollbarShow::Scrolling,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).scrollbar_show =
+                                                        ScrollbarShow::Scrolling;
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-scroll-hover".into(),
+                                                "Hover to show".into(),
+                                                scroll_show == ScrollbarShow::Hover,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).scrollbar_show =
+                                                        ScrollbarShow::Hover;
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                            .child(make_item(
+                                                "richtext-settings-scroll-always".into(),
+                                                "Always show".into(),
+                                                scroll_show == ScrollbarShow::Always,
+                                                Box::new(move |_, cx| {
+                                                    Theme::global_mut(cx).scrollbar_show =
+                                                        ScrollbarShow::Always;
+                                                    cx.refresh_windows();
+                                                }),
+                                            ))
+                                    })
+                            })
+                            })
                     ),
             )
             .child(

@@ -5,7 +5,7 @@
 This repository is intended to host additional GPUI components about a Richtext Editor built on top of `gpui` and
 `gpui-component`.
 
-![](richtext.example.png)
+![img.png](docs/richtext.example.png)
 
 ## Run
 
