@@ -8,8 +8,10 @@ use gpui_component::Selectable as _;
 use gpui_component::WindowExt as _;
 use gpui_component::input::{Input, InputState};
 use gpui_component::notification::Notification;
+use gpui_component::popover::Popover;
 use gpui_component_extras::plate_toolbar::{
-    PlateIconName, PlateToolbarButton, PlateToolbarIconButton, PlateToolbarSeparator,
+    PlateIconName, PlateToolbarButton, PlateToolbarColorPicker, PlateToolbarDropdownButton,
+    PlateToolbarIconButton, PlateToolbarSeparator,
 };
 use gpui_rich_text::{
     BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, InlineStyle,
@@ -557,12 +559,6 @@ impl RichTextExample {
 impl Render for RichTextExample {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let red = theme.red;
-        let green = theme.green;
-        let blue = theme.blue;
-        let yellow_light = theme.yellow_light;
-        let cyan_light = theme.cyan_light;
-        let magenta_light = theme.magenta_light;
 
         div()
             .size_full()
@@ -819,41 +815,127 @@ impl Render for RichTextExample {
                                     })),
                             )
                             .child(PlateToolbarSeparator)
-                            .child(
-                                PlateToolbarIconButton::new("align-left", PlateIconName::AlignLeft)
-                                    .tooltip("Align left")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_align(BlockAlign::Left, window, cx);
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("align-center")
-                                    .tooltip("Align center")
-                                    .child("C")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_align(BlockAlign::Center, window, cx);
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("align-right")
-                                    .tooltip("Align right")
-                                    .child("R")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_block_align(BlockAlign::Right, window, cx);
-                                        });
-                                        let handle = this.editor.read(cx).focus_handle();
-                                        window.focus(&handle);
-                                    })),
-                            )
+                            .child({
+                                let editor = self.editor.clone();
+                                let active_align = editor.read(cx).active_block_align();
+                                let trigger_icon = match active_align {
+                                    BlockAlign::Left => PlateIconName::AlignLeft,
+                                    BlockAlign::Center => PlateIconName::AlignCenter,
+                                    BlockAlign::Right => PlateIconName::AlignRight,
+                                };
+
+                                Popover::new("richtext-align-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-align-menu-trigger",
+                                        )
+                                        .tooltip("Align")
+                                        .child(trigger_icon)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+                                        let active_align = editor.read(cx).active_block_align();
+                                        let editor_for_items = editor.clone();
+                                        let popover_for_items = popover.clone();
+                                        let make_item =
+                                            move |id: &'static str,
+                                                  icon: PlateIconName,
+                                                  align: BlockAlign,
+                                                  disabled: bool| {
+                                                let editor = editor_for_items.clone();
+                                                let popover = popover_for_items.clone();
+
+                                                div()
+                                                    .id(id)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .h(px(32.))
+                                                    .w(px(32.))
+                                                    .rounded(px(4.))
+                                                    .bg(theme.transparent)
+                                                    .text_color(theme.popover_foreground)
+                                                    .when(disabled, |this| {
+                                                        this.opacity(0.5).cursor_not_allowed()
+                                                    })
+                                                    .when(!disabled, |this| {
+                                                        this.cursor_pointer()
+                                                            .hover(|this| {
+                                                                this.bg(theme.accent).text_color(
+                                                                    theme.accent_foreground,
+                                                                )
+                                                            })
+                                                            .active(|this| {
+                                                                this.bg(theme.accent).text_color(
+                                                                    theme.accent_foreground,
+                                                                )
+                                                            })
+                                                            .on_mouse_down(
+                                                                MouseButton::Left,
+                                                                move |_, window, cx| {
+                                                                    window.prevent_default();
+                                                                    editor.update(cx, |editor, cx| {
+                                                                        editor.set_block_align(
+                                                                            align, window, cx,
+                                                                        );
+                                                                    });
+                                                                    let handle = editor
+                                                                        .read(cx)
+                                                                        .focus_handle();
+                                                                    window.focus(&handle);
+                                                                    popover.update(cx, |state, cx| {
+                                                                        state.dismiss(window, cx);
+                                                                    });
+                                                                },
+                                                            )
+                                                    })
+                                                    .when(!disabled && active_align == align, |this| {
+                                                        this.bg(theme.accent)
+                                                            .text_color(theme.accent_foreground)
+                                                    })
+                                                    .child(gpui_component::Icon::new(icon))
+                                            };
+
+                                        div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(4.))
+                                            .child(make_item(
+                                                "richtext-align-left",
+                                                PlateIconName::AlignLeft,
+                                                BlockAlign::Left,
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-align-center",
+                                                PlateIconName::AlignCenter,
+                                                BlockAlign::Center,
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-align-right",
+                                                PlateIconName::AlignRight,
+                                                BlockAlign::Right,
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-align-justify",
+                                                PlateIconName::AlignJustify,
+                                                BlockAlign::Left,
+                                                true,
+                                            ))
+                                    })
+                            })
                             .child(PlateToolbarSeparator)
                             .child(
                                 PlateToolbarIconButton::new("ul", PlateIconName::List)
@@ -986,97 +1068,37 @@ impl Render for RichTextExample {
                             )
                             .child(PlateToolbarSeparator)
                             .child(
-                                PlateToolbarButton::new("color-clear")
-                                    .tooltip("Text color: Clear")
-                                    .child("Tx")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(None, window, cx);
-                                        });
-                                    })),
+                                PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
+                                    .tooltip("Text color")
+                                    .value(self.editor.read(cx).active_text_color())
+                                    .on_change({
+                                        let editor = self.editor.clone();
+                                        move |color, window, cx| {
+                                            editor.update(cx, |editor, cx| {
+                                                editor.set_text_color(color, window, cx);
+                                            });
+                                            let handle = editor.read(cx).focus_handle();
+                                            window.focus(&handle);
+                                        }
+                                    }),
                             )
                             .child(
-                                PlateToolbarButton::new("color-red")
-                                    .tooltip("Text color: Red")
-                                    .text_color(red)
-                                    .child("R")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = red;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(Some(color), window, cx);
+                                PlateToolbarColorPicker::new(
+                                    "highlight-color",
+                                    PlateIconName::PaintBucket,
+                                )
+                                .tooltip("Highlight color")
+                                .value(self.editor.read(cx).active_highlight_color())
+                                .on_change({
+                                    let editor = self.editor.clone();
+                                    move |color, window, cx| {
+                                        editor.update(cx, |editor, cx| {
+                                            editor.set_highlight_color(color, window, cx);
                                         });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("color-green")
-                                    .tooltip("Text color: Green")
-                                    .text_color(green)
-                                    .child("G")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = green;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("color-blue")
-                                    .tooltip("Text color: Blue")
-                                    .text_color(blue)
-                                    .child("B")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = blue;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_text_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(PlateToolbarSeparator)
-                            .child(
-                                PlateToolbarButton::new("hl-clear")
-                                    .tooltip("Highlight: Clear")
-                                    .child("HL")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(None, window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("hl-yellow")
-                                    .tooltip("Highlight: Yellow")
-                                    .text_color(yellow_light)
-                                    .child("Y")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = yellow_light;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("hl-cyan")
-                                    .tooltip("Highlight: Cyan")
-                                    .text_color(cyan_light)
-                                    .child("C")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = cyan_light;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(Some(color), window, cx);
-                                        });
-                                    })),
-                            )
-                            .child(
-                                PlateToolbarButton::new("hl-magenta")
-                                    .tooltip("Highlight: Magenta")
-                                    .text_color(magenta_light)
-                                    .child("M")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let color = magenta_light;
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor.set_highlight_color(Some(color), window, cx);
-                                        });
-                                    })),
+                                        let handle = editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    }
+                                }),
                             ),
                     ),
             )

@@ -85,6 +85,43 @@ let icon = Icon::new(PlateIconName::Undo2);
 - `PlateToolbarSplitButton`：主按钮 + 右侧小 Chevron（split button）
 - `PlateToolbarStepper`：Minus + 输入框 + Plus（字号步进器）
 - `PlateToolbarSeparator`：组间分隔线
+- `PlateToolbarColorPicker`：字体色/高亮色的选色器（Popover + 颜色网格 + Hex 输入）
+
+## 进阶：对齐下拉菜单与颜色选色器
+
+### 对齐下拉菜单（Align）
+
+`plate.js` 的 Align 是一个下拉菜单：触发按钮显示“当前对齐方式的图标 + Chevron”，点击后弹出对齐选项。
+
+本仓库的实现思路是：
+
+- 触发器用 `PlateToolbarDropdownButton`
+- 弹层用 `gpui_component::popover::Popover`
+- 菜单项用 `div()` 自己拼（hover/active/selected 走主题 token）
+
+参考实现：
+
+- `crates/story/src/richtext.rs`（`richtext-align-menu`）
+- `crates/story/src/plate_toolbar_buttons.rs`（`plate-toolbar-align-menu`）
+
+### 字体颜色（Text Color）
+
+`PlateToolbarColorPicker` 是一个可复用组件，可用于字体颜色/高亮色：
+
+```rust
+use gpui_component_extras::plate_toolbar::{PlateIconName, PlateToolbarColorPicker};
+
+PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
+    .tooltip("Text color")
+    .value(current_color)
+    .on_change(move |color, window, cx| {
+        // 把 color 应用到编辑器，并把焦点还给编辑器
+    })
+```
+
+参考实现：
+
+- `crates/story/src/richtext.rs`
 
 ## 代码示例：组合一个 Toolbar Group
 
@@ -107,4 +144,3 @@ div()
 更完整示例可直接参考：
 
 - `crates/story/src/plate_toolbar_buttons.rs`
-

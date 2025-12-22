@@ -15,8 +15,20 @@ impl ExtrasAssetSource {
 
 const ASSETS: &[(&str, &[u8])] = &[
     (
+        "icons/align-center.svg",
+        include_bytes!("../assets/icons/align-center.svg"),
+    ),
+    (
+        "icons/align-justify.svg",
+        include_bytes!("../assets/icons/align-justify.svg"),
+    ),
+    (
         "icons/align-left.svg",
         include_bytes!("../assets/icons/align-left.svg"),
+    ),
+    (
+        "icons/align-right.svg",
+        include_bytes!("../assets/icons/align-right.svg"),
     ),
     (
         "icons/arrow-down-to-line.svg",

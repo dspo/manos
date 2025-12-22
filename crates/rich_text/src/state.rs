@@ -920,6 +920,49 @@ impl RichTextState {
         enabled
     }
 
+    fn active_color_in_range(
+        &self,
+        range: Range<usize>,
+        get: impl Fn(&InlineStyle) -> Option<gpui::Hsla>,
+    ) -> Option<gpui::Hsla> {
+        if range.is_empty() {
+            return get(&self.active_style);
+        }
+
+        let mut value: Option<Option<gpui::Hsla>> = None;
+        let mut mixed = false;
+        self.for_each_block_range_in_selection(range, |row, local_range| {
+            if mixed {
+                return;
+            }
+
+            let mut cursor = 0usize;
+            for node in &self.document.blocks[row].inlines {
+                match node {
+                    InlineNode::Text(text) => {
+                        let end = cursor + text.text.len();
+                        let overlap_start = local_range.start.max(cursor);
+                        let overlap_end = local_range.end.min(end);
+                        if overlap_start < overlap_end {
+                            let next = get(&text.style);
+                            match value {
+                                None => value = Some(next),
+                                Some(prev) if prev == next => {}
+                                Some(_) => {
+                                    mixed = true;
+                                    return;
+                                }
+                            }
+                        }
+                        cursor = end;
+                    }
+                }
+            }
+        });
+
+        if mixed { None } else { value.flatten() }
+    }
+
     fn toggle_attr(
         &mut self,
         window: &mut Window,
@@ -964,6 +1007,14 @@ impl RichTextState {
 
     pub fn strikethrough_mark_active(&self) -> bool {
         self.is_attr_enabled(self.ordered_selection(), |s| s.strikethrough)
+    }
+
+    pub fn active_text_color(&self) -> Option<gpui::Hsla> {
+        self.active_color_in_range(self.ordered_selection(), |s| s.fg)
+    }
+
+    pub fn active_highlight_color(&self) -> Option<gpui::Hsla> {
+        self.active_color_in_range(self.ordered_selection(), |s| s.bg)
     }
 
     pub fn toggle_bold_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1170,6 +1221,26 @@ impl RichTextState {
         }
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn active_block_align(&self) -> BlockAlign {
+        let (start_row, end_row) = self.selected_rows();
+        let Some(first) = self.document.blocks.get(start_row) else {
+            return BlockAlign::default();
+        };
+
+        let mut align = first.format.align;
+        for row in start_row..=end_row {
+            let Some(block) = self.document.blocks.get(row) else {
+                continue;
+            };
+            if block.format.align != align {
+                align = BlockAlign::default();
+                break;
+            }
+        }
+
+        align
     }
 
     pub fn set_text_color(

@@ -4,20 +4,26 @@ use gpui::InteractiveElement as _;
 use gpui::StatefulInteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ClickEvent, ElementId, Hsla, IntoElement, MouseButton, ParentElement, RenderOnce,
-    SharedString, StyleRefinement, Styled, Window, div, px,
+    App, AppContext as _, ClickEvent, ElementId, Hsla, IntoElement, MouseButton, ParentElement,
+    RenderOnce, SharedString, StyleRefinement, Styled, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
+use gpui_component::Colorize as _;
 use gpui_component::Disableable;
 use gpui_component::Selectable;
+use gpui_component::Sizable as _;
 use gpui_component::StyledExt as _;
 use gpui_component::input::{Input, InputState};
+use gpui_component::popover::Popover;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconNamed};
 
 #[derive(IntoElement, Clone, Copy, Debug)]
 pub enum PlateIconName {
+    AlignCenter,
+    AlignJustify,
     AlignLeft,
+    AlignRight,
     ArrowDownToLine,
     ArrowUpToLine,
     AudioLines,
@@ -57,7 +63,10 @@ pub enum PlateIconName {
 impl IconNamed for PlateIconName {
     fn path(self) -> SharedString {
         match self {
+            Self::AlignCenter => "icons/align-center.svg",
+            Self::AlignJustify => "icons/align-justify.svg",
             Self::AlignLeft => "icons/align-left.svg",
+            Self::AlignRight => "icons/align-right.svg",
             Self::ArrowDownToLine => "icons/arrow-down-to-line.svg",
             Self::ArrowUpToLine => "icons/arrow-up-to-line.svg",
             Self::AudioLines => "icons/audio-lines.svg",
@@ -721,5 +730,308 @@ impl RenderOnce for PlateToolbarStepper {
                     ),
             )
             .child(plus)
+    }
+}
+
+fn default_toolbar_color_swatches() -> Vec<Hsla> {
+    let grayscale = [0.0, 0.13, 0.26, 0.4, 0.55, 0.67, 0.78, 0.87, 0.93, 1.0];
+    let hues = [
+        0.0,   // red
+        30.0,  // orange
+        55.0,  // yellow
+        120.0, // green
+        180.0, // cyan
+        210.0, // blue
+        270.0, // purple
+        320.0, // pink
+    ];
+    let lightness = [0.35, 0.45, 0.55, 0.65, 0.75];
+
+    let mut colors = Vec::new();
+    for l in grayscale {
+        colors.push(gpui::hsla(0.0, 0.0, l, 1.0));
+    }
+    for hue in hues {
+        for l in lightness {
+            colors.push(gpui::hsla(hue / 360.0, 0.85, l, 1.0));
+        }
+    }
+    colors
+}
+
+#[derive(Default)]
+struct PlateToolbarColorPickerState {
+    input: Option<gpui::Entity<InputState>>,
+}
+
+#[derive(IntoElement)]
+pub struct PlateToolbarColorPicker {
+    id: ElementId,
+    style: StyleRefinement,
+    tooltip: Option<SharedString>,
+    disabled: bool,
+    value: Option<Hsla>,
+    icon: Icon,
+    swatches: Option<Rc<Vec<Hsla>>>,
+    on_change: Option<Rc<dyn Fn(Option<Hsla>, &mut Window, &mut App)>>,
+}
+
+impl PlateToolbarColorPicker {
+    pub fn new(id: impl Into<ElementId>, icon: impl IconNamed) -> Self {
+        Self {
+            id: id.into(),
+            style: StyleRefinement::default(),
+            tooltip: None,
+            disabled: false,
+            value: None,
+            icon: Icon::new(icon),
+            swatches: None,
+            on_change: None,
+        }
+    }
+
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    pub fn value(mut self, value: Option<Hsla>) -> Self {
+        self.value = value;
+        self
+    }
+
+    pub fn swatches(mut self, swatches: Vec<Hsla>) -> Self {
+        self.swatches = Some(Rc::new(swatches));
+        self
+    }
+
+    pub fn on_change(
+        mut self,
+        on_change: impl Fn(Option<Hsla>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_change = Some(Rc::new(on_change));
+        self
+    }
+}
+
+impl Styled for PlateToolbarColorPicker {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl Disableable for PlateToolbarColorPicker {
+    fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl RenderOnce for PlateToolbarColorPicker {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let value = self.value;
+        let selected_hex = value.map(|color| color.to_hex());
+
+        let input_state_id = ElementId::NamedChild(Box::new(self.id.clone()), "input-state".into());
+        let input_state = window.use_keyed_state(input_state_id, cx, |window, cx| {
+            PlateToolbarColorPickerState {
+                input: Some(cx.new(|cx| {
+                    let mut state = InputState::new(window, cx);
+                    state.set_placeholder("#RRGGBB", window, cx);
+                    state
+                })),
+            }
+        });
+        let input = input_state
+            .read(cx)
+            .input
+            .as_ref()
+            .expect("input state should exist")
+            .clone();
+
+        let trigger_id = ElementId::NamedChild(Box::new(self.id.clone()), "trigger".into());
+        let popover_id = ElementId::NamedChild(Box::new(self.id.clone()), "popover".into());
+
+        let mut indicator = theme.border;
+        indicator.a *= 0.8;
+        let indicator = value.unwrap_or(indicator);
+
+        let mut trigger = PlateToolbarButton::new(trigger_id)
+            .disabled(self.disabled)
+            .relative()
+            .child(self.icon)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(6.))
+                    .right(px(6.))
+                    .bottom(px(6.))
+                    .h(px(2.))
+                    .rounded(px(999.))
+                    .bg(indicator),
+            )
+            // The popover toggles on the wrapper; use a no-op click to keep toolbar behavior.
+            .on_click(|_, _, _| {});
+
+        if let Some(tooltip) = self.tooltip {
+            trigger = trigger.tooltip(tooltip);
+        }
+        trigger = trigger.refine_style(&self.style);
+
+        let swatches = self
+            .swatches
+            .unwrap_or_else(|| Rc::new(default_toolbar_color_swatches()));
+        let on_change = self.on_change;
+        let disabled = self.disabled;
+
+        Popover::new(popover_id)
+            .appearance(false)
+            .trigger(trigger)
+            .content(move |_, _window, cx| {
+                let theme = cx.theme();
+                let popover = cx.entity();
+                let popover_entity_id = popover.entity_id();
+
+                let popover_for_swatches = popover.clone();
+                let input_for_swatches = input.clone();
+                let on_change_for_swatches = on_change.clone();
+                let selected_hex_for_swatches = selected_hex.clone();
+
+                let make_swatch =
+                    move |id: SharedString, color: Option<Hsla>| -> gpui::AnyElement {
+                        let popover = popover_for_swatches.clone();
+                        let input = input_for_swatches.clone();
+                        let on_change = on_change_for_swatches.clone();
+                        let selected_hex = selected_hex_for_swatches.clone();
+
+                        let (bg, label) = match color {
+                            Some(color) => (color, None),
+                            None => (theme.background, Some("×")),
+                        };
+
+                        let mut swatch = div()
+                            .id(id)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(24.))
+                            .w(px(24.))
+                            .rounded(px(999.))
+                            .bg(bg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .when_some(label, |this, label| {
+                                this.text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.muted_foreground)
+                                    .child(label)
+                            });
+
+                        if let (Some(selected_hex), Some(color)) = (&selected_hex, color) {
+                            if *selected_hex == color.to_hex() {
+                                swatch = swatch.border_2().border_color(theme.ring);
+                            }
+                        }
+
+                        if disabled {
+                            return swatch.opacity(0.5).cursor_not_allowed().into_any_element();
+                        }
+
+                        swatch
+                            .cursor_pointer()
+                            .hover(|this| this.shadow_md())
+                            .active(|this| this.shadow_md())
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                window.prevent_default();
+
+                                if let Some(on_change) = on_change.as_ref() {
+                                    (on_change)(color, window, cx);
+                                }
+
+                                input.update(cx, |state, cx| {
+                                    let next = color.map(|c| c.to_hex()).unwrap_or_default();
+                                    state.set_value(next, window, cx);
+                                });
+
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            })
+                            .into_any_element()
+                    };
+
+                let apply_id = SharedString::from(format!("{:?}:apply", popover_entity_id));
+                let popover_for_apply = popover.clone();
+                let input_for_apply = input.clone();
+                let on_change_for_apply = on_change.clone();
+                let apply_button = div()
+                    .id(apply_id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(32.))
+                    .w(px(32.))
+                    .rounded(px(6.))
+                    .bg(theme.transparent)
+                    .text_color(theme.popover_foreground)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                    .active(|this| this.bg(theme.accent).text_color(theme.accent_foreground))
+                    .child(Icon::new(PlateIconName::Plus))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        window.prevent_default();
+                        let val = input_for_apply.read(cx).value().to_string();
+                        let Ok(color) = Hsla::parse_hex(&val) else {
+                            return;
+                        };
+
+                        if let Some(on_change) = on_change_for_apply.as_ref() {
+                            (on_change)(Some(color), window, cx);
+                        }
+
+                        input_for_apply.update(cx, |state, cx| {
+                            state.set_value(color.to_hex(), window, cx);
+                        });
+
+                        popover_for_apply.update(cx, |state, cx| state.dismiss(window, cx));
+                    });
+
+                div()
+                    .p(px(4.))
+                    .bg(theme.popover)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .shadow_md()
+                    .text_color(theme.popover_foreground)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(4.))
+                            .child(make_swatch(
+                                SharedString::from(format!("{:?}:clear", popover_entity_id)),
+                                None,
+                            ))
+                            .children(swatches.iter().copied().enumerate().map(|(ix, color)| {
+                                make_swatch(
+                                    SharedString::from(format!(
+                                        "{:?}:swatch:{}",
+                                        popover_entity_id, ix
+                                    )),
+                                    Some(color),
+                                )
+                            })),
+                    )
+                    .child(div().h(px(1.)).bg(theme.border).my(px(4.)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(4.))
+                            .child(Input::new(&input).small().w(px(120.)))
+                            .child(apply_button),
+                    )
+            })
     }
 }

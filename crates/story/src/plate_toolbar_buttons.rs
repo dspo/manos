@@ -6,16 +6,21 @@ use gpui_component::Selectable as _;
 use gpui_component::WindowExt as _;
 use gpui_component::input::InputState;
 use gpui_component::notification::Notification;
+use gpui_component::popover::Popover;
 use gpui_component_extras::plate_toolbar::{
-    PlateIconName, PlateToolbarDropdownButton, PlateToolbarIconButton, PlateToolbarSeparator,
-    PlateToolbarSplitButton, PlateToolbarStepper,
+    PlateIconName, PlateToolbarColorPicker, PlateToolbarDropdownButton, PlateToolbarIconButton,
+    PlateToolbarSeparator, PlateToolbarSplitButton, PlateToolbarStepper,
 };
+use gpui_rich_text::BlockAlign;
 
 pub struct PlateToolbarButtonsStory {
     bold: bool,
     italic: bool,
     underline: bool,
     strikethrough: bool,
+    align: BlockAlign,
+    text_color: Option<Hsla>,
+    highlight_color: Option<Hsla>,
     list_collapsed: bool,
     font_size: i32,
     font_size_input: Entity<InputState>,
@@ -35,6 +40,9 @@ impl PlateToolbarButtonsStory {
             italic: false,
             underline: false,
             strikethrough: false,
+            align: BlockAlign::Left,
+            text_color: None,
+            highlight_color: None,
             list_collapsed: true,
             font_size,
             font_size_input,
@@ -61,6 +69,7 @@ impl PlateToolbarButtonsStory {
 impl Render for PlateToolbarButtonsStory {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let this = cx.entity();
 
         let toolbar = div()
             .flex()
@@ -208,20 +217,40 @@ impl Render for PlateToolbarButtonsStory {
                             })),
                     )
                     .child(
-                        PlateToolbarDropdownButton::new("baseline")
-                            .tooltip("Text style (dropdown trigger)")
-                            .child(PlateIconName::Baseline)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.notify("Text style (dropdown trigger)", window, cx);
-                            })),
+                        PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
+                            .tooltip("Text color")
+                            .value(self.text_color)
+                            .on_change({
+                                let this = this.clone();
+                                move |color, window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.text_color = color;
+                                        cx.notify();
+                                    });
+                                    window.push_notification(
+                                        Notification::new().message("Text color changed"),
+                                        cx,
+                                    );
+                                }
+                            }),
                     )
                     .child(
-                        PlateToolbarDropdownButton::new("paint-bucket")
-                            .tooltip("Colors (dropdown trigger)")
-                            .child(PlateIconName::PaintBucket)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.notify("Colors (dropdown trigger)", window, cx);
-                            })),
+                        PlateToolbarColorPicker::new("highlight-color", PlateIconName::PaintBucket)
+                            .tooltip("Highlight color")
+                            .value(self.highlight_color)
+                            .on_change({
+                                let this = this.clone();
+                                move |color, window, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.highlight_color = color;
+                                        cx.notify();
+                                    });
+                                    window.push_notification(
+                                        Notification::new().message("Highlight color changed"),
+                                        cx,
+                                    );
+                                }
+                            }),
                     ),
             )
             .child(PlateToolbarSeparator)
@@ -229,14 +258,115 @@ impl Render for PlateToolbarButtonsStory {
                 div()
                     .flex()
                     .items_center()
-                    .child(
-                        PlateToolbarDropdownButton::new("align")
-                            .tooltip("Align (dropdown trigger)")
-                            .child(PlateIconName::AlignLeft)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.notify("Align (dropdown trigger)", window, cx);
-                            })),
-                    )
+                    .child({
+                        let active_align = self.align;
+                        let trigger_icon = match active_align {
+                            BlockAlign::Left => PlateIconName::AlignLeft,
+                            BlockAlign::Center => PlateIconName::AlignCenter,
+                            BlockAlign::Right => PlateIconName::AlignRight,
+                        };
+
+                        Popover::new("plate-toolbar-align-menu")
+                            .appearance(false)
+                            .trigger(
+                                PlateToolbarDropdownButton::new("plate-toolbar-align-trigger")
+                                    .tooltip("Align")
+                                    .child(trigger_icon)
+                                    .on_click(|_, _, _| {}),
+                            )
+                            .content(move |_, _window, cx| {
+                                let theme = cx.theme();
+                                let popover = cx.entity();
+
+                                let story_for_items = this.clone();
+                                let make_item =
+                                    move |id: &'static str,
+                                          icon: PlateIconName,
+                                          align: BlockAlign,
+                                          disabled: bool| {
+                                        let popover = popover.clone();
+                                        let story = story_for_items.clone();
+
+                                        div()
+                                            .id(id)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .h(px(32.))
+                                            .w(px(32.))
+                                            .rounded(px(4.))
+                                            .bg(theme.transparent)
+                                            .text_color(theme.popover_foreground)
+                                            .when(disabled, |this| {
+                                                this.opacity(0.5).cursor_not_allowed()
+                                            })
+                                            .when(!disabled, |el| {
+                                                el.cursor_pointer()
+                                                    .hover(|this| {
+                                                        this.bg(theme.accent)
+                                                            .text_color(theme.accent_foreground)
+                                                    })
+                                                    .active(|this| {
+                                                        this.bg(theme.accent)
+                                                            .text_color(theme.accent_foreground)
+                                                    })
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, window, cx| {
+                                                            window.prevent_default();
+                                                            story.update(cx, |this, cx| {
+                                                                this.align = align;
+                                                                cx.notify();
+                                                            });
+                                                            popover.update(cx, |state, cx| {
+                                                                state.dismiss(window, cx);
+                                                            });
+                                                        },
+                                                    )
+                                            })
+                                            .when(!disabled && active_align == align, |this| {
+                                                this.bg(theme.accent)
+                                                    .text_color(theme.accent_foreground)
+                                            })
+                                            .child(gpui_component::Icon::new(icon))
+                                    };
+
+                                div()
+                                    .p(px(4.))
+                                    .bg(theme.popover)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .rounded(theme.radius)
+                                    .shadow_md()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.))
+                                    .child(make_item(
+                                        "plate-toolbar-align-left",
+                                        PlateIconName::AlignLeft,
+                                        BlockAlign::Left,
+                                        false,
+                                    ))
+                                    .child(make_item(
+                                        "plate-toolbar-align-center",
+                                        PlateIconName::AlignCenter,
+                                        BlockAlign::Center,
+                                        false,
+                                    ))
+                                    .child(make_item(
+                                        "plate-toolbar-align-right",
+                                        PlateIconName::AlignRight,
+                                        BlockAlign::Right,
+                                        false,
+                                    ))
+                                    .child(make_item(
+                                        "plate-toolbar-align-justify",
+                                        PlateIconName::AlignJustify,
+                                        BlockAlign::Left,
+                                        true,
+                                    ))
+                            })
+                    })
                     .child(
                         PlateToolbarSplitButton::new("list-ordered", PlateIconName::ListOrdered)
                             .tooltip("Ordered list")
