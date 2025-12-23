@@ -1,17 +1,31 @@
-use std::ops::Range;
-
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, Element, ElementId, ElementInputHandler, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledText, Window, div, point, px, size,
+    AnyElement, App, Bounds, CursorStyle, Element, ElementId, ElementInputHandler, FontStyle,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, StyledText, UnderlineStyle,
+    Window, div, point, px, size,
 };
 
 use crate::rope_ext::RopeExt as _;
 
 use super::state::{LineLayoutCache, RichTextState};
-use crate::document::{BlockAlign, BlockKind, BlockTextSize, OrderedListStyle};
+use crate::document::{BlockAlign, BlockKind, BlockTextSize, InlineNode, OrderedListStyle};
+
+fn monospace_font_family() -> SharedString {
+    #[cfg(target_os = "macos")]
+    {
+        "Menlo".into()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Consolas".into()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "monospace".into()
+    }
+}
 
 pub(crate) struct RichTextInputHandlerElement {
     state: gpui::Entity<RichTextState>,
@@ -151,17 +165,17 @@ impl Element for RichTextInputHandlerElement {
                 if event.pressed_button != Some(MouseButton::Left) {
                     return;
                 }
-                let selecting = state.read(cx).selecting;
-                if !selecting {
-                    return;
-                }
-                if let Some(offset) = state.read(cx).offset_for_point(event.position) {
-                    state.update(cx, |this, cx| {
+                state.update(cx, |this, cx| {
+                    this.update_column_resize(event.position.x, cx);
+                    if !this.selecting {
+                        return;
+                    }
+                    if let Some(offset) = this.offset_for_point(event.position) {
                         this.selection.end = offset;
                         cx.notify();
                         this.scroll_cursor_into_view(window, cx);
-                    });
-                }
+                    }
+                });
             }
         });
 
@@ -173,6 +187,7 @@ impl Element for RichTextInputHandlerElement {
                 }
                 state.update(cx, |this, cx| {
                     this.selecting = false;
+                    this.stop_column_resize(cx);
                     this.scroll_cursor_into_view(window, cx);
                 });
             }
@@ -184,7 +199,6 @@ pub(crate) struct RichTextLineElement {
     state: gpui::Entity<RichTextState>,
     row: usize,
     text: SharedString,
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
 }
 
@@ -194,8 +208,142 @@ impl RichTextLineElement {
             state,
             row,
             text: SharedString::default(),
-            highlights: Vec::new(),
             styled_text: StyledText::new(SharedString::default()),
+        }
+    }
+
+    fn paint_inline_code_background(
+        state: &RichTextState,
+        row: usize,
+        line_text_len: usize,
+        bounds: Bounds<Pixels>,
+        text_layout: &gpui::TextLayout,
+        window: &mut Window,
+    ) {
+        let Some(block) = state.document.blocks.get(row) else {
+            return;
+        };
+
+        if line_text_len == 0 {
+            return;
+        }
+
+        let mut code_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut cursor = 0usize;
+        for node in &block.inlines {
+            let InlineNode::Text(text) = node;
+            let len = text.text.len();
+            if len == 0 {
+                continue;
+            }
+
+            let start = cursor;
+            let end = cursor.saturating_add(len).min(line_text_len);
+            cursor = end;
+
+            if start >= end {
+                continue;
+            }
+
+            if text.style.code && text.style.bg.is_none() {
+                code_ranges.push(start..end);
+            }
+        }
+
+        if code_ranges.is_empty() {
+            return;
+        }
+
+        // Merge adjacent code ranges so we paint contiguous backgrounds as one pill per wrap-line.
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(code_ranges.len());
+        for range in code_ranges {
+            if let Some(last) = merged.last_mut()
+                && last.end == range.start
+            {
+                last.end = range.end;
+            } else {
+                merged.push(range);
+            }
+        }
+
+        let line_height = text_layout.line_height();
+        let Some(wrapped) = text_layout.line_layout_for_index(0) else {
+            return;
+        };
+
+        // Collect wrap boundary byte indices (start indices of subsequent wrap lines).
+        let mut wrap_indices: Vec<usize> = Vec::with_capacity(wrapped.wrap_boundaries.len());
+        let mut last_ix = 0usize;
+        for boundary in wrapped.wrap_boundaries.iter() {
+            let Some(run) = wrapped.unwrapped_layout.runs.get(boundary.run_ix) else {
+                continue;
+            };
+            let Some(glyph) = run.glyphs.get(boundary.glyph_ix) else {
+                continue;
+            };
+            let ix = glyph.index.min(line_text_len);
+            if ix > last_ix && ix < line_text_len {
+                wrap_indices.push(ix);
+                last_ix = ix;
+            }
+        }
+
+        let align_width = bounds.size.width;
+        let align = block.format.align;
+
+        let background_color = state.theme.code_background;
+        let pad_x = px(4.);
+        let pad_y = px(1.5);
+        let radius = px(4.);
+
+        let mut seg_start = 0usize;
+        for (wrap_line_ix, seg_end) in wrap_indices
+            .into_iter()
+            .chain(std::iter::once(line_text_len))
+            .enumerate()
+        {
+            let seg_start_x = wrapped.unwrapped_layout.x_for_index(seg_start);
+            let seg_end_x = wrapped.unwrapped_layout.x_for_index(seg_end);
+            let line_width = seg_end_x - seg_start_x;
+            let dx = match align {
+                BlockAlign::Left => px(0.),
+                BlockAlign::Center => (align_width - line_width) / 2.0,
+                BlockAlign::Right => align_width - line_width,
+            };
+
+            let line_top = bounds.top() + line_height * wrap_line_ix as f32;
+            let top = line_top + pad_y;
+            let bottom = line_top + line_height - pad_y;
+            if bottom <= top {
+                continue;
+            }
+
+            for range in &merged {
+                let start = range.start.max(seg_start);
+                let end = range.end.min(seg_end);
+                if start >= end {
+                    continue;
+                }
+
+                let start_x = wrapped.unwrapped_layout.x_for_index(start) - seg_start_x;
+                let end_x = wrapped.unwrapped_layout.x_for_index(end) - seg_start_x;
+                let left = bounds.left() + dx + start_x - pad_x;
+                let right = bounds.left() + dx + end_x + pad_x;
+                if right <= left {
+                    continue;
+                }
+
+                window.paint_quad(gpui::quad(
+                    Bounds::from_corners(point(left, top), point(right, bottom)),
+                    radius,
+                    background_color,
+                    gpui::Edges::default(),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                ));
+            }
+
+            seg_start = seg_end;
         }
     }
 
@@ -291,11 +439,10 @@ impl Element for RichTextLineElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.read(cx);
         let text: SharedString = state.text.slice_line(self.row).to_string().into();
-        let highlights = state.highlight_styles_for_line(self.row, window.text_style().color);
         self.text = text.clone();
-        self.highlights = highlights.clone();
 
-        let text_style = window.text_style();
+        let base_text_style = window.text_style();
+        let base_color = base_text_style.color;
         let render_text: SharedString = if text.is_empty() {
             // Ensure empty lines still have stable layout bounds so hit-testing/caret placement
             // work correctly (especially for list items where the prefix is rendered separately).
@@ -305,16 +452,130 @@ impl Element for RichTextLineElement {
         };
 
         let mut runs = Vec::new();
-        let mut ix = 0;
-        for (range, highlight) in highlights.iter() {
-            if ix < range.start {
-                runs.push(text_style.clone().to_run(range.start - ix));
+
+        if text.is_empty() {
+            runs.push(base_text_style.to_run(render_text.len().max(1)));
+        } else if let Some(block) = state.document.blocks.get(self.row) {
+            let line_range = state.line_range(self.row);
+            let marked = state
+                .ime_marked_range
+                .map(|range| range.start..range.end)
+                .map(|marked| marked.start.max(line_range.start)..marked.end.min(line_range.end))
+                .filter(|marked| marked.start < marked.end)
+                .map(|marked| (marked.start - line_range.start)..(marked.end - line_range.start));
+
+            let mut cursor = 0usize;
+            for node in &block.inlines {
+                let InlineNode::Text(text) = node;
+                let len = text.text.len();
+                if len == 0 {
+                    continue;
+                }
+
+                let mut style = base_text_style.clone();
+
+                if text.style.bold {
+                    style.font_weight = FontWeight::BOLD;
+                }
+                if text.style.italic {
+                    style.font_style = FontStyle::Italic;
+                }
+
+                if text.style.code {
+                    style.font_family = monospace_font_family();
+                }
+
+                if let Some(bg) = text.style.bg {
+                    style.background_color = Some(bg);
+                }
+
+                // Underline and links.
+                if text.style.underline {
+                    style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: text.style.fg,
+                        wavy: false,
+                    });
+                }
+                if text.style.link.is_some() {
+                    let link_color = text.style.fg.unwrap_or(state.theme.link);
+                    style.color = link_color;
+                    if let Some(underline) = style.underline.as_mut() {
+                        if underline.color.is_none() {
+                            underline.color = Some(link_color);
+                        }
+                    } else {
+                        style.underline = Some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(link_color),
+                            wavy: false,
+                        });
+                    }
+                }
+
+                if text.style.strikethrough {
+                    style.strikethrough = Some(StrikethroughStyle {
+                        thickness: px(1.),
+                        color: text.style.fg,
+                        ..Default::default()
+                    });
+                }
+
+                if let Some(color) = text.style.fg {
+                    style.color = color;
+                    if let Some(underline) = style.underline.as_mut() {
+                        if underline.color.is_none() {
+                            underline.color = Some(color);
+                        }
+                    }
+                }
+
+                let seg_start = cursor;
+                let seg_end = cursor + len;
+                cursor = seg_end;
+
+                let Some(marked) = marked.clone() else {
+                    runs.push(style.to_run(len));
+                    continue;
+                };
+
+                if seg_end <= marked.start || seg_start >= marked.end {
+                    runs.push(style.to_run(len));
+                    continue;
+                }
+
+                let before_len = marked.start.saturating_sub(seg_start);
+                let mark_len = seg_end
+                    .min(marked.end)
+                    .saturating_sub(marked.start.max(seg_start));
+                let after_len = seg_end.saturating_sub(marked.end.max(seg_start));
+
+                if before_len > 0 {
+                    runs.push(style.clone().to_run(before_len));
+                }
+
+                if mark_len > 0 {
+                    let mut marked_style = style.clone();
+                    marked_style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(base_color),
+                        wavy: false,
+                    });
+                    runs.push(marked_style.to_run(mark_len));
+                }
+
+                if after_len > 0 {
+                    runs.push(style.to_run(after_len));
+                }
             }
-            runs.push(text_style.clone().highlight(*highlight).to_run(range.len()));
-            ix = range.end;
+
+            if cursor < render_text.len() {
+                runs.push(base_text_style.to_run(render_text.len() - cursor));
+            }
         }
-        if ix < render_text.len() {
-            runs.push(text_style.to_run(render_text.len() - ix));
+
+        if runs.is_empty() {
+            runs.push(base_text_style.to_run(render_text.len().max(1)));
         }
 
         self.styled_text = StyledText::new(render_text).with_runs(runs);
@@ -365,15 +626,20 @@ impl Element for RichTextLineElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.styled_text
-            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
-
         let hitbox = prepaint;
         window.set_cursor_style(CursorStyle::IBeam, hitbox);
 
         let text_layout = self.styled_text.layout().clone();
         let (selection_local, caret_column, theme) = {
             let state = self.state.read(cx);
+            Self::paint_inline_code_background(
+                &state,
+                self.row,
+                self.text.len(),
+                bounds,
+                &text_layout,
+                window,
+            );
             let selection = state.ordered_selection();
             let line_range = state.line_range(self.row);
 
@@ -391,6 +657,9 @@ impl Element for RichTextLineElement {
 
             (selection_local, caret_column, state.theme)
         };
+
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
         if let Some(selection_local) = selection_local {
             let (start_pos, end_pos, line_height) = {
@@ -676,6 +945,122 @@ impl Element for TodoCheckboxElement {
     }
 }
 
+pub(crate) struct ToggleChevronElement {
+    state: gpui::Entity<RichTextState>,
+    row: usize,
+    collapsed: bool,
+    styled_text: StyledText,
+}
+
+impl ToggleChevronElement {
+    pub(crate) fn new(state: gpui::Entity<RichTextState>, row: usize, collapsed: bool) -> Self {
+        let glyph: SharedString = if collapsed {
+            "▸".into()
+        } else {
+            "▾".into()
+        };
+        Self {
+            state,
+            row,
+            collapsed,
+            styled_text: StyledText::new(glyph),
+        }
+    }
+}
+
+impl IntoElement for ToggleChevronElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ToggleChevronElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_element_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let glyph: SharedString = if self.collapsed {
+            "▸".into()
+        } else {
+            "▾".into()
+        };
+        let text_style = window.text_style();
+        let run_len = glyph.len().max(1);
+        self.styled_text = StyledText::new(glyph).with_runs(vec![text_style.to_run(run_len)]);
+        let (layout_id, _) =
+            self.styled_text
+                .request_layout(global_element_id, inspector_id, window, cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.styled_text
+            .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+
+        let hitbox = prepaint.clone();
+        window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+
+        window.on_mouse_event({
+            let state = self.state.clone();
+            let row = self.row;
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble() || event.button != MouseButton::Left {
+                    return;
+                }
+                if !hitbox.is_hovered(window) {
+                    return;
+                }
+
+                let focus_handle = { state.read(cx).focus_handle.clone() };
+                window.focus(&focus_handle);
+
+                state.update(cx, |this, cx| {
+                    this.toggle_toggle_collapsed(row, window, cx);
+                });
+            }
+        });
+    }
+}
+
 impl Render for RichTextState {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let state = cx.entity().clone();
@@ -685,6 +1070,7 @@ impl Render for RichTextState {
 
         let mut ordered_counter = 1usize;
         let mut ordered_style: Option<OrderedListStyle> = None;
+        let mut ordered_indent: Option<u8> = None;
         let blocks = self
             .document
             .blocks
@@ -692,62 +1078,24 @@ impl Render for RichTextState {
             .map(|block| block.format)
             .collect::<Vec<_>>();
 
+        if self.layout_cache.len() != blocks.len() {
+            self.layout_cache.resize_with(blocks.len(), || None);
+        }
+        for cache in &mut self.layout_cache {
+            *cache = None;
+        }
+
+        let indent_width = 18.0f32;
+        let mut hidden_indent_stack: Vec<u8> = Vec::new();
+
         let mut rendered_blocks: Vec<AnyElement> = Vec::with_capacity(blocks.len());
         let mut row = 0usize;
 
-        while row < blocks.len() {
-            let block = blocks[row];
-
-            if matches!(block.kind, BlockKind::Quote) {
-                ordered_counter = 1;
-                ordered_style = None;
-                let mut quote_lines: Vec<AnyElement> = Vec::new();
-
-                while row < blocks.len() && matches!(blocks[row].kind, BlockKind::Quote) {
-                    let quote_block = blocks[row];
-                    let line = RichTextLineElement::new(state.clone(), row).into_any_element();
-                    let mut content = div().child(line);
-
-                    content = match quote_block.size {
-                        BlockTextSize::Small => {
-                            content.text_size(px(f32::from(base_text_size) * 0.875))
-                        }
-                        BlockTextSize::Normal => content,
-                        BlockTextSize::Large => {
-                            content.text_size(px(f32::from(base_text_size) * 1.125))
-                        }
-                    };
-
-                    content = match quote_block.align {
-                        BlockAlign::Left => content.text_left(),
-                        BlockAlign::Center => content.text_center(),
-                        BlockAlign::Right => content.text_right(),
-                    };
-
-                    quote_lines.push(
-                        content
-                            .text_color(theme.muted_foreground)
-                            .italic()
-                            .into_any_element(),
-                    );
-                    row += 1;
-                }
-
-                rendered_blocks.push(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(12.))
-                        .px(px(8.))
-                        .py(px(2.))
-                        .child(div().w(px(3.)).bg(theme.border).rounded(px(2.)))
-                        .child(div().flex_1().flex_col().gap(px(4.)).children(quote_lines))
-                        .into_any_element(),
-                );
-
-                continue;
-            }
-
+        let render_block = |row: usize,
+                            block: crate::document::BlockFormat,
+                            ordered_counter: &mut usize,
+                            ordered_style: &mut Option<OrderedListStyle>,
+                            ordered_indent: &mut Option<u8>| {
             let line: AnyElement = match block.kind {
                 BlockKind::Divider => {
                     DividerLineElement::new(state.clone(), row, theme.border).into_any_element()
@@ -792,15 +1140,19 @@ impl Render for RichTextState {
                 BlockAlign::Right => content.text_right(),
             };
 
-            let block_el: AnyElement = match block.kind {
+            let mut reset_list_state = || {
+                *ordered_counter = 1;
+                *ordered_style = None;
+                *ordered_indent = None;
+            };
+
+            let mut block_el: AnyElement = match block.kind {
                 BlockKind::Divider => {
-                    ordered_counter = 1;
-                    ordered_style = None;
+                    reset_list_state();
                     div().w_full().py(px(6.)).child(content).into_any_element()
                 }
                 BlockKind::UnorderedListItem => {
-                    ordered_counter = 1;
-                    ordered_style = None;
+                    reset_list_state();
                     div()
                         .flex()
                         .flex_row()
@@ -812,13 +1164,14 @@ impl Render for RichTextState {
                 }
                 BlockKind::OrderedListItem => {
                     let style = block.ordered_list_style;
-                    if ordered_style != Some(style) {
-                        ordered_counter = 1;
-                        ordered_style = Some(style);
+                    if *ordered_style != Some(style) || *ordered_indent != Some(block.indent) {
+                        *ordered_counter = 1;
+                        *ordered_style = Some(style);
+                        *ordered_indent = Some(block.indent);
                     }
                     let prefix =
-                        format!("{}.", format_ordered_list_counter(style, ordered_counter));
-                    ordered_counter += 1;
+                        format!("{}.", format_ordered_list_counter(style, *ordered_counter));
+                    *ordered_counter += 1;
                     div()
                         .flex()
                         .flex_row()
@@ -829,8 +1182,7 @@ impl Render for RichTextState {
                         .into_any_element()
                 }
                 BlockKind::Todo { checked } => {
-                    ordered_counter = 1;
-                    ordered_style = None;
+                    reset_list_state();
                     div()
                         .flex()
                         .flex_row()
@@ -844,14 +1196,229 @@ impl Render for RichTextState {
                         .child(content.flex_1())
                         .into_any_element()
                 }
+                BlockKind::Toggle { collapsed } => {
+                    reset_list_state();
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .text_color(muted_foreground)
+                                .child(ToggleChevronElement::new(state.clone(), row, collapsed)),
+                        )
+                        .child(content.flex_1())
+                        .into_any_element()
+                }
                 _ => {
-                    ordered_counter = 1;
-                    ordered_style = None;
+                    reset_list_state();
                     content.into_any_element()
                 }
             };
 
-            rendered_blocks.push(block_el);
+            if block.indent > 0 {
+                let padding = px(indent_width * block.indent as f32);
+                block_el = div().pl(padding).child(block_el).into_any_element();
+            }
+
+            block_el
+        };
+
+        'document: while row < blocks.len() {
+            let block = blocks[row];
+
+            while let Some(&indent) = hidden_indent_stack.last() {
+                if block.indent > indent {
+                    row += 1;
+                    continue 'document;
+                }
+                hidden_indent_stack.pop();
+            }
+
+            if let Some(cols) = block.columns {
+                let group_id = cols.group;
+                let count = cols.count.max(2);
+
+                let mut group_end = row;
+                while group_end < blocks.len()
+                    && blocks[group_end].columns.map(|c| c.group) == Some(group_id)
+                {
+                    group_end += 1;
+                }
+
+                let mut column_children: Vec<Vec<AnyElement>> =
+                    (0..count).map(|_| Vec::new()).collect();
+
+                let mut scan_row = row;
+                'group: while scan_row < group_end {
+                    let scan_block = blocks[scan_row];
+
+                    while let Some(&indent) = hidden_indent_stack.last() {
+                        if scan_block.indent > indent {
+                            scan_row += 1;
+                            continue 'group;
+                        }
+                        hidden_indent_stack.pop();
+                    }
+
+                    let el = render_block(
+                        scan_row,
+                        scan_block,
+                        &mut ordered_counter,
+                        &mut ordered_style,
+                        &mut ordered_indent,
+                    );
+
+                    if let Some(cols) = scan_block.columns {
+                        if let Some(col) = column_children.get_mut(cols.column as usize) {
+                            col.push(el);
+                        } else {
+                            rendered_blocks.push(el);
+                        }
+                    }
+
+                    if matches!(scan_block.kind, BlockKind::Toggle { collapsed: true }) {
+                        hidden_indent_stack.push(scan_block.indent);
+                    }
+
+                    scan_row += 1;
+                }
+
+                let weights = self.column_weights_for_group(group_id, count);
+
+                let mut columns_row = div().flex().flex_row().w_full();
+                for (ix, children) in column_children.into_iter().enumerate() {
+                    let weight = weights.get(ix).copied().unwrap_or(1.0);
+
+                    let mut column = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .flex_1()
+                        .children(children);
+                    column.style().flex_grow = Some(weight);
+                    columns_row = columns_row.child(column);
+
+                    if ix + 1 < count as usize {
+                        let handle_ix = ix;
+                        columns_row = columns_row.child(
+                            div()
+                                .flex_none()
+                                .w(px(12.))
+                                .cursor_col_resize()
+                                .on_mouse_down(MouseButton::Left, {
+                                    let state = state.clone();
+                                    move |event, window, cx| {
+                                        cx.stop_propagation();
+                                        let focus_handle = { state.read(cx).focus_handle.clone() };
+                                        window.focus(&focus_handle);
+                                        state.update(cx, |this, cx| {
+                                            this.start_column_resize(
+                                                group_id,
+                                                count,
+                                                handle_ix,
+                                                event.position.x,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                })
+                                .child(
+                                    div().flex().items_center().justify_center().h_full().child(
+                                        div().w(px(2.)).h_full().bg(theme.border).rounded(px(1.)),
+                                    ),
+                                ),
+                        );
+                    }
+                }
+
+                rendered_blocks.push(columns_row.into_any_element());
+
+                row = group_end;
+                continue 'document;
+            }
+
+            if matches!(block.kind, BlockKind::Quote) {
+                ordered_counter = 1;
+                ordered_style = None;
+                ordered_indent = None;
+
+                let quote_indent = block.indent;
+                let mut quote_lines: Vec<AnyElement> = Vec::new();
+
+                while row < blocks.len()
+                    && matches!(blocks[row].kind, BlockKind::Quote)
+                    && blocks[row].columns.is_none()
+                {
+                    let quote_block = blocks[row];
+                    let line = RichTextLineElement::new(state.clone(), row).into_any_element();
+                    let mut content = div().child(line);
+
+                    content = match quote_block.size {
+                        BlockTextSize::Small => {
+                            content.text_size(px(f32::from(base_text_size) * 0.875))
+                        }
+                        BlockTextSize::Normal => content,
+                        BlockTextSize::Large => {
+                            content.text_size(px(f32::from(base_text_size) * 1.125))
+                        }
+                    };
+
+                    content = match quote_block.align {
+                        BlockAlign::Left => content.text_left(),
+                        BlockAlign::Center => content.text_center(),
+                        BlockAlign::Right => content.text_right(),
+                    };
+
+                    quote_lines.push(
+                        content
+                            .text_color(theme.muted_foreground)
+                            .italic()
+                            .into_any_element(),
+                    );
+                    row += 1;
+                }
+
+                let quote_container = div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(12.))
+                    .px(px(8.))
+                    .py(px(2.))
+                    .child(div().w(px(3.)).bg(theme.border).rounded(px(2.)))
+                    .child(div().flex_1().flex_col().gap(px(4.)).children(quote_lines))
+                    .into_any_element();
+
+                if quote_indent > 0 {
+                    rendered_blocks.push(
+                        div()
+                            .pl(px(indent_width * quote_indent as f32))
+                            .child(quote_container)
+                            .into_any_element(),
+                    );
+                } else {
+                    rendered_blocks.push(quote_container);
+                }
+
+                continue 'document;
+            }
+
+            let el = render_block(
+                row,
+                block,
+                &mut ordered_counter,
+                &mut ordered_style,
+                &mut ordered_indent,
+            );
+            rendered_blocks.push(el);
+
+            if matches!(block.kind, BlockKind::Toggle { collapsed: true }) {
+                hidden_indent_stack.push(block.indent);
+            }
+
             row += 1;
         }
 

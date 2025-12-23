@@ -141,11 +141,11 @@ impl Render for PlateToolbarButtonsStory {
                     )
                     .child(
                         PlateToolbarDropdownButton::new("toggle-list")
-                            .tooltip("Toggle list (dropdown trigger)")
+                            .tooltip("Toggle (dropdown trigger)")
                             .min_width(px(125.))
-                            .child("Toggle list")
+                            .child("Toggle")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.notify("Toggle list (dropdown trigger)", window, cx);
+                                this.notify("Toggle (dropdown trigger)", window, cx);
                             })),
                     )
                     .child(
