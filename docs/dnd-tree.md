@@ -130,11 +130,14 @@
 
 ### 5.1 用 X 推导目标层级（depth）
 
-用鼠标的 x（相对列表左侧）推导“期望深度”：
+为了让“整行可拖拽”时也不会因为鼠标初始位置不同而导致层级跳变，组件用“拖拽起点 depth + 横向位移”推导期望深度：
 
 ```
-desired_depth = floor((x_in_list - indent_offset) / indent_width)
+delta_x = x_in_list - drag_start_x_in_list
+desired_depth = clamp(drag_start_depth + trunc(delta_x / indent_width), 0..)
 ```
+
+这里用 `trunc`（向 0 截断）而不是 `round`，确保必须横向跨过一个完整的 `indent_width` 才会改变层级，避免轻微左右抖动造成“预览层级偏一档”的错觉。
 
 并绘制插入线的起始 x：
 
@@ -149,21 +152,19 @@ line_x = indent_offset + desired_depth * indent_width
 
 从而对齐插入线与行内容的缩进。
 
-### 5.2 用“命中行”推导 before/after（Zed 风格）
+### 5.2 用“行上下半区”推导 before/after
 
-为了让命中更稳定、交互更像 Zed 的 tab 重排，`gpui-dnd-tree` **不再依赖 mouse y 去推导“落在行的上半还是下半”**，而是：
+为了让投放更直观（与多数 Web DnD Tree 一致），`gpui-dnd-tree` 在命中某行时会按 **行的上下半区** 推导 before/after：
 
-- 每一行都是 drop target：行上绑定 `on_drag_move` 更新 `drop_preview`，绑定 `on_drop` 完成落地
-- 当鼠标 hover 到某行时，组件把该行当作交互目标：
-  - 若拖拽源在目标行上方（向下移动）：插入点视为 **After hovered**
-  - 若拖拽源在目标行下方（向上移动）：插入点视为 **Before hovered**
+- 列表容器绑定 `on_drag_move`：根据 `y + scroll offset` 推导 `hovered_ix`
+- 再计算 `y_in_row = y_in_content - hovered_ix * item_height`
+  - `y_in_row < item_height / 2`：视为 **Before hovered**
+  - 否则：视为 **After hovered**
 
-实现上把它表达为 `gap_index`：
+实现上把它表达为 `gap_index`（插入点）：
 
-- `hovered_ix < dragged_ix`：`gap_index = hovered_ix`
-- `hovered_ix > dragged_ix`：`gap_index = hovered_ix + 1`
-
-同时，为了覆盖 `uniform_list` 末尾的“空白区域”（内容高度小于视口时，鼠标可能落不到任何一行的 hitbox），列表容器会在拖拽移动时补充更新预览为 **after last**，并由容器上的 `on_drop_after_last` 处理最终落地。
+- Before：`gap_index = hovered_ix`
+- After：`gap_index = hovered_ix + 1`
 
 ### 5.3 Inside（投放为子节点）的判定
 
@@ -172,12 +173,19 @@ line_x = indent_offset + desired_depth * indent_width
 - 按住 `Option(Alt)` 强制 inside
 - 或 `desired_depth > target.depth`（向右拖动表示“想变深层”）
 
+为了避免误触，本组件只会在 **After（下半区）** 场景下才会把投放视为 inside。
+
 同时还要求：
 
 - 目标节点 `can_accept_children == true`（可用 `DndTreeItem::accept_children(false)` 禁止接收子节点）
 - 目标不能是自身，且不能把节点拖进自己的子树（预览阶段会直接拒绝；落地阶段也会用 `subtree_contains` 二次防环）
 
-Inside 预览也会绘制插入线：`line_x = indent_offset + (target.depth + 1) * indent_width`，`line_y` 位于目标节点可见子树末尾（`subtree_end_ix(target_ix)`），从而用“左侧起点 + 线长”表达层级。
+Inside 预览会绘制插入线：
+
+- `line_x = indent_offset + (target.depth + 1) * indent_width`
+- `line_y = subtree_end_ix(target_ix) * item_height + scroll_y`（位于目标节点可见子树末尾，表达“作为子节点追加”）
+
+Inside 的落地语义为：**追加为最后一个子节点**（并自动展开目标节点）。
 
 ### 5.4 Gap + desired_depth → Before/After 目标（跨层级移动的关键）
 
@@ -188,9 +196,9 @@ Inside 预览也会绘制插入线：`line_x = indent_offset + (target.depth + 1
   - 如果边界行 `depth == desired_depth`：插到它 **Before**
   - 否则：插到 gap 之前最近的同 depth 行 **After**（相当于追加到该层最后）
 
-此外还支持一种“gap 内 inside”：
+此外还支持一种“gap 内 inside”（把节点塞进上一行作为子节点）：
 
-- 当 `desired_depth == prev.depth + 1` 且 `prev.can_accept_children()` 时，直接视为 **Inside(prev)**（常用于 drop 在两行之间/末尾时，把节点塞进上一行）
+- 当 `desired_depth == prev.depth + 1` 且 `prev.can_accept_children()` 时，直接视为 **Inside(prev)**（插入线落在 `prev` 的可见子树末尾）
 
 ### 5.5 After 的插入线必须落到“子树末尾”
 
@@ -202,6 +210,17 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 - `line_y = subtree_end_ix * item_height + scroll_y`
 
 否则当 target 是展开的目录节点时，插入线会错误地落在“目录行与第一个子节点之间”。
+
+### 5.6 水平手势：左右拖动快速升/降级
+
+当拖拽过程中 **光标仍在被拖拽节点所在行**，且横向位移满足：
+
+- `abs(delta_x) > 24px` 且 `abs(delta_x) > abs(delta_y)`
+
+则触发快捷层级调整：
+
+- **向左（delta_x < 0）提升层级**：若节点有父级，则预览/投放目标切换为 **After(parent)**，节点跳出当前父节点，成为父节点同级并紧跟在父节点之后。
+- **向右（delta_x > 0）降低层级**：若存在左侧兄弟，则预览/投放目标切换为 **Inside(left_sibling)**，节点成为左侧兄弟的子节点（追加为最后一个子节点），并自动展开该兄弟节点。
 
 ---
 

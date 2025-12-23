@@ -1,9 +1,9 @@
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, ElementId, Entity, EntityId, FocusHandle, Hsla,
-    InteractiveElement as _, IntoElement, ListSizingBehavior, Modifiers, ParentElement as _,
-    Pixels, Point, Render, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    App, AppContext as _, Context, CursorStyle, ElementId, Entity, EntityId, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, ListSizingBehavior, ParentElement as _, Pixels, Point,
+    Render, RenderOnce, ScrollStrategy, SharedString, StatefulInteractiveElement as _,
     StyleRefinement, Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px,
     uniform_list,
 };
@@ -12,6 +12,7 @@ use gpui_component::scroll::{Scrollbar, ScrollbarState};
 use gpui_component::{ActiveTheme as _, StyledExt as _};
 
 const CONTEXT: &str = "DndTree";
+const HORIZONTAL_GESTURE_THRESHOLD_PX: f32 = 24.0;
 
 /// Create a [`DndTree`].
 pub fn dnd_tree<R>(state: &Entity<DndTreeState>, render_item: R) -> DndTree
@@ -239,7 +240,8 @@ enum DropPreviewTarget {
 #[derive(Clone, Debug, PartialEq)]
 struct DropPreview {
     target: DropPreviewTarget,
-    target_ix: Option<usize>,
+    highlight_ix: Option<usize>,
+    highlight_target: Option<DndTreeDropTarget>,
     line_y: Option<Pixels>,
     line_x: Option<Pixels>,
 }
@@ -261,11 +263,15 @@ pub struct DndTreeState {
     indicator_style: DndTreeIndicatorStyle,
     scrollbar_state: ScrollbarState,
     scroll_handle: UniformListScrollHandle,
+    drag_handle_width: Option<Pixels>,
     selected_ix: Option<usize>,
     dragged_id: Option<SharedString>,
     dragged_ix: Option<usize>,
     drop_preview: Option<DropPreview>,
+    drag_start_mouse_position: Option<Point<Pixels>>,
     drag_origin_x: Option<Pixels>,
+    drag_start_x_in_list: Option<Pixels>,
+    drag_start_depth: Option<usize>,
     render_item:
         Rc<dyn Fn(usize, &DndTreeEntry, DndTreeRowState, &mut Window, &mut App) -> ListItem>,
 }
@@ -281,11 +287,15 @@ impl DndTreeState {
             indicator_style: DndTreeIndicatorStyle::default(),
             scrollbar_state: ScrollbarState::default(),
             scroll_handle: UniformListScrollHandle::default(),
+            drag_handle_width: None,
             selected_ix: None,
             dragged_id: None,
             dragged_ix: None,
             drop_preview: None,
+            drag_start_mouse_position: None,
             drag_origin_x: None,
+            drag_start_x_in_list: None,
+            drag_start_depth: None,
             render_item: Rc::new(|_, _, _, _, _| ListItem::new("dnd-tree-empty")),
         }
     }
@@ -303,6 +313,20 @@ impl DndTreeState {
     /// This is purely visual and does not affect the actual tree indentation.
     pub fn indent_offset(mut self, indent_offset: Pixels) -> Self {
         self.indent_offset = indent_offset;
+        self
+    }
+
+    /// Restrict drag start to a left-side handle area with the given width.
+    ///
+    /// This generally results in a better drag ghost alignment than whole-row dragging.
+    pub fn drag_handle_width(mut self, width: Pixels) -> Self {
+        self.drag_handle_width = Some(width);
+        self
+    }
+
+    /// Allow dragging from anywhere on the row.
+    pub fn drag_on_row(mut self) -> Self {
+        self.drag_handle_width = None;
         self
     }
 
@@ -342,7 +366,10 @@ impl DndTreeState {
         self.drop_preview = None;
         self.dragged_id = None;
         self.dragged_ix = None;
+        self.drag_start_mouse_position = None;
         self.drag_origin_x = None;
+        self.drag_start_x_in_list = None;
+        self.drag_start_depth = None;
         self.rebuild_entries();
         cx.notify();
     }
@@ -398,6 +425,138 @@ impl DndTreeState {
         self.rebuild_entries();
     }
 
+    fn on_key_down(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if cx.has_active_drag() {
+            return false;
+        }
+
+        if self.entries.is_empty() {
+            return false;
+        }
+
+        let mut selected_ix = self.selected_ix.unwrap_or(0).min(self.entries.len() - 1);
+
+        let select = |this: &mut Self, ix: usize, cx: &mut Context<Self>| {
+            let ix = ix.min(this.entries.len().saturating_sub(1));
+            this.selected_ix = Some(ix);
+            this.scroll_handle
+                .scroll_to_item(ix, ScrollStrategy::Center);
+            cx.notify();
+        };
+
+        match event.keystroke.key.as_str() {
+            "up" => {
+                if selected_ix > 0 {
+                    selected_ix -= 1;
+                }
+                select(self, selected_ix, cx);
+                true
+            }
+            "down" => {
+                if selected_ix + 1 < self.entries.len() {
+                    selected_ix += 1;
+                }
+                select(self, selected_ix, cx);
+                true
+            }
+            "home" => {
+                select(self, 0, cx);
+                true
+            }
+            "end" => {
+                select(self, self.entries.len().saturating_sub(1), cx);
+                true
+            }
+            "right" => {
+                let Some(entry) = self.entries.get(selected_ix) else {
+                    return false;
+                };
+                if entry.is_folder() && !entry.is_expanded() {
+                    let selected_id = entry.item().id.clone();
+                    self.toggle_expand(selected_ix);
+                    if let Some(ix) = self
+                        .entries
+                        .iter()
+                        .position(|entry| entry.item().id == selected_id)
+                    {
+                        select(self, ix, cx);
+                    } else {
+                        cx.notify();
+                    }
+                    return true;
+                }
+
+                if entry.is_folder() && entry.is_expanded() {
+                    let child_ix = selected_ix.saturating_add(1);
+                    if self
+                        .entries
+                        .get(child_ix)
+                        .is_some_and(|child| child.depth() == entry.depth() + 1)
+                    {
+                        select(self, child_ix, cx);
+                    }
+                    return true;
+                }
+
+                false
+            }
+            "left" => {
+                let Some(entry) = self.entries.get(selected_ix) else {
+                    return false;
+                };
+
+                if entry.is_folder() && entry.is_expanded() {
+                    let selected_id = entry.item().id.clone();
+                    self.toggle_expand(selected_ix);
+                    if let Some(ix) = self
+                        .entries
+                        .iter()
+                        .position(|entry| entry.item().id == selected_id)
+                    {
+                        select(self, ix, cx);
+                    } else {
+                        cx.notify();
+                    }
+                    return true;
+                }
+
+                if let Some(parent_id) = entry.parent_id()
+                    && let Some(parent_ix) = self
+                        .entries
+                        .iter()
+                        .position(|entry| entry.item().id == *parent_id)
+                {
+                    select(self, parent_ix, cx);
+                    return true;
+                }
+
+                false
+            }
+            "enter" | "space" => {
+                let Some(entry) = self.entries.get(selected_ix) else {
+                    return false;
+                };
+                if !entry.is_folder() {
+                    return false;
+                }
+
+                let selected_id = entry.item().id.clone();
+                self.toggle_expand(selected_ix);
+                self.selected_ix = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.item().id == selected_id);
+                if let Some(ix) = self.selected_ix {
+                    self.scroll_handle
+                        .scroll_to_item(ix, ScrollStrategy::Center);
+                }
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn on_entry_click(
         &mut self,
         ix: usize,
@@ -422,7 +581,12 @@ impl DndTreeState {
             .entries
             .iter()
             .position(|entry| entry.item().id == drag.item_id);
+        self.drag_start_mouse_position = Some(window.mouse_position());
         self.drag_origin_x = Some(window.mouse_position().x - cursor_offset.x);
+        self.drag_start_x_in_list = Some(cursor_offset.x);
+        self.drag_start_depth = self
+            .dragged_ix
+            .and_then(|ix| self.entries.get(ix).map(|entry| entry.depth()));
         self.drop_preview = None;
         self.selected_ix = self
             .entries
@@ -458,58 +622,175 @@ impl DndTreeState {
             return;
         }
 
-        if self.entries.is_empty() {
-            let origin_x = self.drag_origin_x.unwrap_or(list_bounds.origin.x);
-            let desired_depth = self.desired_depth(mouse_position.x - origin_x);
-            let new_preview = Some(DropPreview {
-                target: DropPreviewTarget::Root { index: 0 },
-                target_ix: None,
-                line_y: Some(px(0.)),
-                line_x: Some(self.indent_offset + self.indent_width * desired_depth),
-            });
-            if self.drop_preview != new_preview {
-                self.drop_preview = new_preview;
-                cx.notify();
-            }
-            return;
-        }
+        let origin_x = self.drag_origin_x.unwrap_or(list_bounds.origin.x);
+        let x_in_list = mouse_position.x - origin_x;
+        let desired_depth = self.desired_depth(x_in_list);
+        let (delta_x, delta_y) = self
+            .drag_start_mouse_position
+            .map(|start| (mouse_position.x - start.x, mouse_position.y - start.y))
+            .unwrap_or((Pixels::ZERO, Pixels::ZERO));
+        let delta_x_f32: f32 = delta_x.into();
+        let delta_y_f32: f32 = delta_y.into();
+        let is_horizontal_gesture = delta_x_f32.abs() > HORIZONTAL_GESTURE_THRESHOLD_PX
+            && delta_x_f32.abs() > delta_y_f32.abs();
 
-        // When the content height is smaller than the viewport, there is a trailing blank region
-        // inside `uniform_list` where no row receives `on_drag_move`. Update the preview there so
-        // users can still see an "after last" insertion line (and drop is handled by
-        // `on_drop_after_last`).
-        let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
-        let item_height = self
-            .scroll_handle
-            .0
-            .borrow()
-            .last_item_size
-            .map(|s| s.item.height)
-            .unwrap_or(px(28.));
-        let content_bottom = item_height * self.entries.len() + scroll_y;
-        let y_in_list = mouse_position.y - list_bounds.origin.y;
-        if y_in_list >= content_bottom {
-            let origin_x = self.drag_origin_x.unwrap_or(list_bounds.origin.x);
-            let x_in_list = mouse_position.x - origin_x;
-            let new_preview = self.compute_drop_preview_for_row_hover(
-                self.entries.len(),
-                x_in_list,
-                event.event.modifiers,
-            );
-            if self.drop_preview != new_preview {
-                self.drop_preview = new_preview;
-                cx.notify();
+        let new_preview = (|| {
+            if self.entries.is_empty() {
+                return Some(DropPreview {
+                    target: DropPreviewTarget::Root { index: 0 },
+                    highlight_ix: None,
+                    highlight_target: None,
+                    line_y: Some(px(0.)),
+                    line_x: Some(self.indent_offset + self.indent_width * desired_depth),
+                });
             }
+
+            let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
+            let item_height = self.row_height();
+            let y_in_content = mouse_position.y - list_bounds.origin.y - scroll_y;
+            let hovered_ix =
+                ((y_in_content / item_height).floor().max(0.0) as usize).min(self.entries.len());
+
+            if hovered_ix >= self.entries.len() {
+                return self.compute_drop_preview_for_gap(self.entries.len(), desired_depth);
+            }
+
+            let dragged_ix = self.dragged_ix?;
+            let subtree_end_ix = self.subtree_end_ix(dragged_ix);
+            if hovered_ix > dragged_ix && hovered_ix < subtree_end_ix {
+                return None;
+            }
+
+            if hovered_ix == dragged_ix {
+                if is_horizontal_gesture {
+                    return self.compute_horizontal_gesture_preview(dragged_ix, delta_x);
+                }
+                return None;
+            }
+
+            let entry = self.entries.get(hovered_ix)?;
+            let y_in_row = (y_in_content - item_height * hovered_ix).max(px(0.));
+            let drop_target = if y_in_row < item_height / 2.0 {
+                DndTreeDropTarget::Before
+            } else {
+                DndTreeDropTarget::After
+            };
+
+            let dragged_id = self.dragged_id.as_ref()?;
+            if drop_target == DndTreeDropTarget::After
+                && (event.event.modifiers.alt || desired_depth > entry.depth())
+                && entry.can_accept_children()
+                && *dragged_id != entry.item().id
+            {
+                return Some(DropPreview {
+                    target: DropPreviewTarget::Inside {
+                        target_id: entry.item().id.clone(),
+                    },
+                    highlight_ix: Some(hovered_ix),
+                    highlight_target: Some(DndTreeDropTarget::Inside),
+                    line_y: Some(item_height * self.subtree_end_ix(hovered_ix) + scroll_y),
+                    line_x: Some(self.indent_offset + self.indent_width * (entry.depth() + 1)),
+                });
+            }
+
+            let gap_index = match drop_target {
+                DndTreeDropTarget::Before => hovered_ix,
+                DndTreeDropTarget::After => hovered_ix.saturating_add(1),
+                DndTreeDropTarget::Inside => unreachable!("handled above"),
+            };
+
+            let mut preview = self.compute_drop_preview_for_gap(gap_index, desired_depth)?;
+            if preview.highlight_ix.is_none() {
+                preview.highlight_ix = Some(hovered_ix);
+                preview.highlight_target = Some(drop_target);
+            }
+            Some(preview)
+        })();
+
+        if self.drop_preview != new_preview {
+            self.drop_preview = new_preview;
+            cx.notify();
         }
     }
 
     fn desired_depth(&self, x_in_list: Pixels) -> usize {
-        if x_in_list <= self.indent_offset {
-            return 0;
+        let base_depth = self.drag_start_depth.unwrap_or(0) as i32;
+        let start_x = self.drag_start_x_in_list.unwrap_or(x_in_list);
+        let indent_width_f32: f32 = self.indent_width.into();
+        if !indent_width_f32.is_finite() || indent_width_f32 <= 0.0 {
+            return base_depth.max(0) as usize;
         }
-        ((x_in_list - self.indent_offset) / self.indent_width)
-            .floor()
-            .max(0.0) as usize
+
+        let delta_x = x_in_list - start_x;
+        // Snap depth changes only after crossing a full indent width, to avoid jittery
+        // "off-by-one" previews from small horizontal drift.
+        let delta_depth = (delta_x / self.indent_width).trunc() as i32;
+        (base_depth + delta_depth).max(0) as usize
+    }
+
+    fn compute_horizontal_gesture_preview(
+        &self,
+        dragged_ix: usize,
+        delta_x: Pixels,
+    ) -> Option<DropPreview> {
+        let dragged_entry = self.entries.get(dragged_ix)?;
+        let dragged_depth = dragged_entry.depth();
+
+        let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
+        let item_height = self.row_height();
+        let delta_x_f32: f32 = delta_x.into();
+
+        if delta_x_f32 < 0.0 {
+            let parent_id = dragged_entry.parent_id()?.clone();
+            let parent_ix = self
+                .entries
+                .iter()
+                .position(|entry| entry.item().id == parent_id)?;
+            let parent_depth = self.entries.get(parent_ix)?.depth();
+
+            return Some(DropPreview {
+                target: DropPreviewTarget::After {
+                    target_id: parent_id,
+                },
+                highlight_ix: Some(parent_ix),
+                highlight_target: Some(DndTreeDropTarget::After),
+                line_y: Some(item_height * self.subtree_end_ix(parent_ix) + scroll_y),
+                line_x: Some(self.indent_offset + self.indent_width * parent_depth),
+            });
+        }
+
+        if delta_x_f32 > 0.0 && dragged_ix > 0 {
+            let parent_id = dragged_entry.parent_id().cloned();
+            let mut ix = dragged_ix - 1;
+            loop {
+                let entry = self.entries.get(ix)?;
+                if entry.depth() < dragged_depth {
+                    break;
+                }
+                if entry.depth() == dragged_depth && entry.parent_id() == parent_id.as_ref() {
+                    if !entry.can_accept_children() {
+                        return None;
+                    }
+
+                    return Some(DropPreview {
+                        target: DropPreviewTarget::Inside {
+                            target_id: entry.item().id.clone(),
+                        },
+                        highlight_ix: Some(ix),
+                        highlight_target: Some(DndTreeDropTarget::Inside),
+                        line_y: Some(item_height * self.subtree_end_ix(ix) + scroll_y),
+                        line_x: Some(self.indent_offset + self.indent_width * (entry.depth() + 1)),
+                    });
+                }
+
+                if ix == 0 {
+                    break;
+                }
+                ix -= 1;
+            }
+        }
+
+        None
     }
 
     fn subtree_end_ix(&self, start_ix: usize) -> usize {
@@ -522,6 +803,28 @@ impl DndTreeState {
         ix
     }
 
+    fn row_height(&self) -> Pixels {
+        const FALLBACK: Pixels = px(28.);
+        let item_count = self.entries.len();
+        if item_count == 0 {
+            return FALLBACK;
+        }
+
+        let Some(last_size) = self.scroll_handle.0.borrow().last_item_size else {
+            return FALLBACK;
+        };
+
+        // `UniformListScrollHandle::last_item_size.item` is the viewport size, not the row height.
+        // Row height is uniform and can be derived from the total content height.
+        let height = last_size.contents.height * (1.0 / item_count as f32);
+        let height_f32: f32 = height.into();
+        if height_f32.is_finite() && height_f32 > 0.0 {
+            height
+        } else {
+            FALLBACK
+        }
+    }
+
     fn compute_drop_preview_for_gap(
         &self,
         gap_index: usize,
@@ -531,20 +834,15 @@ impl DndTreeState {
         if item_count == 0 {
             return Some(DropPreview {
                 target: DropPreviewTarget::Root { index: 0 },
-                target_ix: None,
+                highlight_ix: None,
+                highlight_target: None,
                 line_y: Some(px(0.)),
                 line_x: Some(self.indent_offset),
             });
         }
 
         let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
-        let item_height = self
-            .scroll_handle
-            .0
-            .borrow()
-            .last_item_size
-            .map(|s| s.item.height)
-            .unwrap_or(px(28.));
+        let item_height = self.row_height();
 
         let max_depth = if gap_index == 0 {
             0
@@ -574,7 +872,8 @@ impl DndTreeState {
                         target: DropPreviewTarget::Inside {
                             target_id: prev.item().id.clone(),
                         },
-                        target_ix: Some(gap_index - 1),
+                        highlight_ix: Some(gap_index - 1),
+                        highlight_target: Some(DndTreeDropTarget::Inside),
                         line_y: Some(item_height * self.subtree_end_ix(gap_index - 1) + scroll_y),
                         line_x: Some(self.indent_offset + self.indent_width * (prev.depth() + 1)),
                     });
@@ -608,7 +907,7 @@ impl DndTreeState {
 
         let subtree_end_ix = |start_ix: usize| self.subtree_end_ix(start_ix);
 
-        let (target, target_ix, line_y) = if gap_index == 0 {
+        let (target, _target_ix, line_y) = if gap_index == 0 {
             let first = self.entries.first()?;
             (
                 DropPreviewTarget::Before {
@@ -650,107 +949,11 @@ impl DndTreeState {
 
         Some(DropPreview {
             target,
-            target_ix: Some(target_ix),
+            highlight_ix: None,
+            highlight_target: None,
             line_y: Some(line_y),
             line_x: Some(self.indent_offset + self.indent_width * desired_depth),
         })
-    }
-
-    fn compute_drop_preview_for_row_hover(
-        &self,
-        hovered_ix: usize,
-        x_in_list: Pixels,
-        modifiers: Modifiers,
-    ) -> Option<DropPreview> {
-        let item_count = self.entries.len();
-        if item_count == 0 {
-            return Some(DropPreview {
-                target: DropPreviewTarget::Root { index: 0 },
-                target_ix: None,
-                line_y: Some(px(0.)),
-                line_x: Some(self.indent_offset),
-            });
-        }
-
-        let dragged_ix = self.dragged_ix?;
-        let dragged_id = self.dragged_id.as_ref()?;
-
-        if hovered_ix < item_count {
-            let subtree_end_ix = self.subtree_end_ix(dragged_ix);
-            if hovered_ix >= dragged_ix && hovered_ix < subtree_end_ix {
-                return None;
-            }
-
-            let entry = self.entries.get(hovered_ix)?;
-            let desired_depth = self.desired_depth(x_in_list);
-
-            if (modifiers.alt || desired_depth > entry.depth())
-                && entry.can_accept_children()
-                && *dragged_id != entry.item().id
-            {
-                let scroll_y = self.scroll_handle.0.borrow().base_handle.offset().y;
-                let item_height = self
-                    .scroll_handle
-                    .0
-                    .borrow()
-                    .last_item_size
-                    .map(|s| s.item.height)
-                    .unwrap_or(px(28.));
-                return Some(DropPreview {
-                    target: DropPreviewTarget::Inside {
-                        target_id: entry.item().id.clone(),
-                    },
-                    target_ix: Some(hovered_ix),
-                    line_y: Some(item_height * self.subtree_end_ix(hovered_ix) + scroll_y),
-                    line_x: Some(self.indent_offset + self.indent_width * (entry.depth() + 1)),
-                });
-            }
-
-            if hovered_ix == dragged_ix {
-                return None;
-            }
-
-            let gap_index = if hovered_ix < dragged_ix {
-                hovered_ix
-            } else {
-                hovered_ix.saturating_add(1)
-            };
-            return self.compute_drop_preview_for_gap(gap_index, desired_depth);
-        }
-
-        let desired_depth = self.desired_depth(x_in_list);
-        self.compute_drop_preview_for_gap(item_count, desired_depth)
-    }
-
-    fn on_row_drag_move(
-        &mut self,
-        row_ix: usize,
-        event: &gpui::DragMoveEvent<DndTreeDrag>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !cx.has_active_drag() {
-            return;
-        }
-
-        let drag = event.drag(cx);
-        if drag.tree_id != cx.entity_id() {
-            return;
-        }
-
-        let mouse_position = event.event.position;
-        if !event.bounds.contains(&mouse_position) {
-            return;
-        }
-
-        let origin_x = self.drag_origin_x.unwrap_or(event.bounds.origin.x);
-        let x_in_list = mouse_position.x - origin_x;
-        let new_preview =
-            self.compute_drop_preview_for_row_hover(row_ix, x_in_list, event.event.modifiers);
-        if self.drop_preview != new_preview {
-            self.drop_preview = new_preview;
-            cx.notify();
-        }
     }
 
     fn apply_drop_target(
@@ -763,7 +966,10 @@ impl DndTreeState {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
             self.drag_origin_x = None;
+            self.drag_start_x_in_list = None;
+            self.drag_start_depth = None;
             cx.notify();
             return;
         };
@@ -780,7 +986,10 @@ impl DndTreeState {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
             self.drag_origin_x = None;
+            self.drag_start_x_in_list = None;
+            self.drag_start_depth = None;
             cx.notify();
             return;
         };
@@ -797,7 +1006,10 @@ impl DndTreeState {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
             self.drag_origin_x = None;
+            self.drag_start_x_in_list = None;
+            self.drag_start_depth = None;
             cx.notify();
             return;
         }
@@ -822,7 +1034,10 @@ impl DndTreeState {
         self.drop_preview = None;
         self.dragged_id = None;
         self.dragged_ix = None;
+        self.drag_start_mouse_position = None;
         self.drag_origin_x = None;
+        self.drag_start_x_in_list = None;
+        self.drag_start_depth = None;
         cx.notify();
     }
 
@@ -833,24 +1048,22 @@ impl DndTreeState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let _ = (target_ix, window);
         if drag.tree_id != cx.entity_id() {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
             self.drag_origin_x = None;
+            self.drag_start_x_in_list = None;
+            self.drag_start_depth = None;
             cx.notify();
             return;
         }
 
-        let origin_x = self.drag_origin_x.unwrap_or(px(0.));
-        let x_in_list = window.mouse_position().x - origin_x;
-
-        let Some(preview) =
-            self.compute_drop_preview_for_row_hover(target_ix, x_in_list, window.modifiers())
-        else {
+        let Some(preview) = self.drop_preview.clone() else {
             return;
         };
-
         self.apply_drop_target(drag, preview.target, cx);
     }
 
@@ -860,30 +1073,29 @@ impl DndTreeState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let _ = window;
         if drag.tree_id != cx.entity_id() {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
             self.drag_origin_x = None;
+            self.drag_start_x_in_list = None;
+            self.drag_start_depth = None;
             cx.notify();
             return;
         }
 
-        let origin_x = self.drag_origin_x.unwrap_or(px(0.));
-        let x_in_list = window.mouse_position().x - origin_x;
-        let Some(preview) = self.compute_drop_preview_for_row_hover(
-            self.entries.len(),
-            x_in_list,
-            window.modifiers(),
-        ) else {
+        let Some(preview) = self.drop_preview.clone() else {
             return;
         };
 
         self.apply_drop_target(drag, preview.target, cx);
     }
 
-    // Note: actual drop handling is wired per-row (`on_drop_on_row`) and on the list container
-    // (`on_drop_after_last`). `drop_preview` is used only for rendering feedback.
+    // Note: Drop is handled per-row (`on_drop_on_row`) and on the list container
+    // (`on_drop_after_last`), and uses the current `drop_preview` to guarantee that the drop
+    // result matches the user's visual indicator.
 }
 
 impl Render for DndTreeState {
@@ -892,7 +1104,10 @@ impl Render for DndTreeState {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
             self.drag_origin_x = None;
+            self.drag_start_x_in_list = None;
+            self.drag_start_depth = None;
         }
 
         let render_item = Rc::clone(&self.render_item);
@@ -900,13 +1115,14 @@ impl Render for DndTreeState {
         let dragged_id = self.dragged_id.clone();
         let drop_preview = self.drop_preview.clone();
         let indicator_style = self.indicator_style;
+        let drag_handle_width = self.drag_handle_width;
 
         let line = drop_preview
             .as_ref()
             .and_then(|p| p.line_y.zip(p.line_x))
             .map(|(y, x)| {
                 let theme = cx.theme();
-                let color = indicator_style.color.unwrap_or(theme.drag_border);
+                let color = indicator_style.color.unwrap_or(theme.foreground);
                 let thickness = indicator_style.thickness.max(px(1.));
 
                 let mut line = div()
@@ -920,27 +1136,33 @@ impl Render for DndTreeState {
                 match indicator_style.cap {
                     DndTreeIndicatorCap::None => {}
                     DndTreeIndicatorCap::StartBar { width, height } => {
-                        let offset_y = (thickness - height) / 2.0;
+                        let cap_width = width.max(px(1.));
+                        let cap_height = height.max(px(1.));
+                        let offset_y = (thickness - cap_height) / 2.0;
+                        let cap_left = px(0.) - cap_width / 2.0;
                         line = line.child(
                             div()
                                 .absolute()
-                                .left_0()
+                                .left(cap_left)
                                 .top(offset_y)
-                                .w(width.max(px(1.)))
-                                .h(height.max(px(1.)))
+                                .w(cap_width)
+                                .h(cap_height)
                                 .bg(color),
                         );
                     }
                     DndTreeIndicatorCap::StartAndEndBars { width, height } => {
-                        let offset_y = (thickness - height) / 2.0;
+                        let cap_width = width.max(px(1.));
+                        let cap_height = height.max(px(1.));
+                        let offset_y = (thickness - cap_height) / 2.0;
+                        let cap_left = px(0.) - cap_width / 2.0;
                         line = line
                             .child(
                                 div()
                                     .absolute()
-                                    .left_0()
+                                    .left(cap_left)
                                     .top(offset_y)
-                                    .w(width.max(px(1.)))
-                                    .h(height.max(px(1.)))
+                                    .w(cap_width)
+                                    .h(cap_height)
                                     .bg(color),
                             )
                             .child(
@@ -948,8 +1170,8 @@ impl Render for DndTreeState {
                                     .absolute()
                                     .right_0()
                                     .top(offset_y)
-                                    .w(width.max(px(1.)))
-                                    .h(height.max(px(1.)))
+                                    .w(cap_width)
+                                    .h(cap_height)
                                     .bg(color),
                             );
                     }
@@ -975,21 +1197,10 @@ impl Render for DndTreeState {
                                     && cx.has_active_drag();
 
                             let drop_target = drop_preview.as_ref().and_then(|preview| {
-                                if preview.target_ix != Some(ix) {
+                                if preview.highlight_ix != Some(ix) {
                                     return None;
                                 }
-                                match preview.target {
-                                    DropPreviewTarget::Before { .. } => {
-                                        Some(DndTreeDropTarget::Before)
-                                    }
-                                    DropPreviewTarget::After { .. } => {
-                                        Some(DndTreeDropTarget::After)
-                                    }
-                                    DropPreviewTarget::Inside { .. } => {
-                                        Some(DndTreeDropTarget::Inside)
-                                    }
-                                    DropPreviewTarget::Root { .. } => None,
-                                }
+                                preview.highlight_target
                             });
 
                             let row_state = DndTreeRowState {
@@ -1009,19 +1220,9 @@ impl Render for DndTreeState {
                             let is_disabled = entry.item().is_disabled();
                             let row = div()
                                 .id(ix)
-                                .when(
-                                    matches!(
-                                        drop_target,
-                                        Some(DndTreeDropTarget::Before | DndTreeDropTarget::After)
-                                    ),
-                                    |this| this.bg(drop_target_bg),
-                                )
+                                .relative()
+                                .when_some(drop_target, |this, _| this.bg(drop_target_bg))
                                 .child(item.disabled(is_disabled).selected(selected))
-                                .on_drag_move::<DndTreeDrag>(cx.listener(
-                                    move |this, ev, window, cx| {
-                                        this.on_row_drag_move(ix, ev, window, cx);
-                                    },
-                                ))
                                 .on_drop::<DndTreeDrag>(cx.listener(
                                     move |this, drag, window, cx| {
                                         this.on_drop_on_row(drag, ix, window, cx);
@@ -1036,21 +1237,50 @@ impl Render for DndTreeState {
                                 })
                                 .when(!is_disabled, |this| {
                                     let state_entity = state_entity.clone();
-                                    this.on_drag(
-                                        drag_value,
-                                        move |drag, cursor_offset, window, cx| {
-                                            state_entity.update(cx, |state, cx| {
-                                                state.on_drag_start(
-                                                    drag,
-                                                    cursor_offset,
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                            let label = drag.label.clone();
-                                            cx.new(|_| DragGhost::new(label, cursor_offset))
-                                        },
-                                    )
+                                    match drag_handle_width {
+                                        Some(handle_width) => this.child(
+                                            div()
+                                                .id(("dnd-tree-handle", ix))
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .bottom_0()
+                                                .w(handle_width)
+                                                .cursor(CursorStyle::OpenHand)
+                                                .on_drag(
+                                                    drag_value,
+                                                    move |drag, cursor_offset, window, cx| {
+                                                        state_entity.update(cx, |state, cx| {
+                                                            state.on_drag_start(
+                                                                drag,
+                                                                cursor_offset,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                        let label = drag.label.clone();
+                                                        cx.new(|_| {
+                                                            DragGhost::new(label, cursor_offset)
+                                                        })
+                                                    },
+                                                ),
+                                        ),
+                                        None => this.on_drag(
+                                            drag_value,
+                                            move |drag, cursor_offset, window, cx| {
+                                                state_entity.update(cx, |state, cx| {
+                                                    state.on_drag_start(
+                                                        drag,
+                                                        cursor_offset,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                                let label = drag.label.clone();
+                                                cx.new(|_| DragGhost::new(label, cursor_offset))
+                                            },
+                                        ),
+                                    }
                                 });
 
                             items.push(row);
@@ -1117,6 +1347,7 @@ impl Styled for DndTree {
 impl RenderOnce for DndTree {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let focus_handle = self.state.read(cx).focus_handle.clone();
+        let state_entity = self.state.clone();
         self.state
             .update(cx, |state, _| state.render_item = self.render_item);
 
@@ -1124,6 +1355,13 @@ impl RenderOnce for DndTree {
             .id(self.id)
             .key_context(CONTEXT)
             .track_focus(&focus_handle)
+            .on_key_down(move |event, window, cx| {
+                let handled = state_entity.update(cx, |state, cx| state.on_key_down(event, cx));
+                if handled {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            })
             .size_full()
             .child(self.state)
             .refine_style(&self.style)

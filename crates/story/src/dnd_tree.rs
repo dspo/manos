@@ -19,6 +19,7 @@ impl DndTreeExample {
                 .indent_width(px(16.))
                 .indent_offset(px(10.))
                 .indicator_color(cx.theme().foreground)
+                .indicator_thickness(px(2.))
                 .indicator_cap(DndTreeIndicatorCap::StartAndEndBars {
                     width: px(2.),
                     height: px(10.),
@@ -52,7 +53,7 @@ impl Render for DndTreeExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("提示：拖拽节点；目标行会高亮并显示插入线（类似 Zed Tab：向下移动时插入到目标行之后，向上移动时插入到目标行之前）；左右决定层级（缩进）；向右拖动到更深层级或按住 Option(Alt) 可作为子节点投放；插入线样式可通过 `indicator_style / indicator_color / indicator_cap` 配置。"),
+                            .child("提示：拖拽节点；目标行会高亮并显示插入线（指针在目标行上半区=Before，下半区=After）；层级由“拖拽起点 depth + 左右位移”决定（向右加深、向左减少；Alt 可强制投放为子节点）；水平手势：光标保持在本行且横向位移 > 24px 且主导时，向左=提升一级（紧跟父节点之后），向右=降低一级（变为左侧兄弟的子节点并自动展开）；插入线样式可通过 `indicator_style / indicator_color / indicator_cap` 配置。"),
                     )
                     .child(
                         div()
