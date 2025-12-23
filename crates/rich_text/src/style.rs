@@ -6,6 +6,7 @@ pub struct InlineStyle {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    pub code: bool,
     pub fg: Option<Hsla>,
     pub bg: Option<Hsla>,
     pub link: Option<String>,

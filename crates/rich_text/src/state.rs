@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
 
 use gpui::{
     Action, App, Bounds, ClipboardItem, Context, EntityInputHandler, FocusHandle, FontStyle,
@@ -120,6 +120,14 @@ struct Snapshot {
     active_style: InlineStyle,
 }
 
+#[derive(Clone, Debug)]
+struct ColumnResize {
+    group: u64,
+    handle: usize,
+    start_x: Pixels,
+    start_weights: Vec<f32>,
+}
+
 #[derive(Clone)]
 pub(crate) struct LineLayoutCache {
     pub(crate) bounds: Bounds<Pixels>,
@@ -139,6 +147,7 @@ pub struct RichTextState {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) scroll_handle: ScrollHandle,
     pub(crate) theme: RichTextTheme,
+    read_only: bool,
 
     pub(crate) document: RichTextDocument,
     pub(crate) text: Rope,
@@ -155,6 +164,10 @@ pub struct RichTextState {
 
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
+    next_columns_group_id: u64,
+
+    column_widths: HashMap<u64, Vec<f32>>,
+    column_resize: Option<ColumnResize>,
 }
 
 impl RichTextState {
@@ -169,6 +182,7 @@ impl RichTextState {
             focus_handle,
             scroll_handle: ScrollHandle::new(),
             theme: RichTextTheme::default(),
+            read_only: false,
             document,
             text,
             active_style: InlineStyle::default(),
@@ -180,6 +194,9 @@ impl RichTextState {
             layout_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            next_columns_group_id: 1,
+            column_widths: HashMap::new(),
+            column_resize: None,
         }
     }
 
@@ -192,6 +209,23 @@ impl RichTextState {
         self.focus_handle.clone()
     }
 
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only == read_only {
+            return;
+        }
+        self.read_only = read_only;
+        if read_only {
+            self.ime_marked_range = None;
+            self.selecting = false;
+        }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
     pub fn default_richtext_value(mut self, value: RichTextValue) -> Self {
         self.document = value.into_document();
         self.text = Rope::from(self.document.to_plain_text().as_str());
@@ -199,6 +233,16 @@ impl RichTextState {
         self.ime_marked_range = None;
         self.active_style = InlineStyle::default();
         self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self.column_widths.clear();
+        self.column_resize = None;
+        self.next_columns_group_id = self
+            .document
+            .blocks
+            .iter()
+            .filter_map(|block| block.format.columns.map(|cols| cols.group))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         self
     }
 
@@ -210,6 +254,9 @@ impl RichTextState {
         self.ime_marked_range = None;
         self.active_style = InlineStyle::default();
         self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self.next_columns_group_id = 1;
+        self.column_widths.clear();
+        self.column_resize = None;
         self
     }
 
@@ -254,6 +301,8 @@ impl RichTextState {
         self.active_style = InlineStyle::default();
         self.ime_marked_range = None;
         self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self.column_widths.clear();
+        self.column_resize = None;
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
         self.preferred_x = None;
         cx.notify();
@@ -275,6 +324,16 @@ impl RichTextState {
         self.selecting = false;
         self.preferred_x = None;
         self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        self.column_widths.clear();
+        self.column_resize = None;
+        self.next_columns_group_id = self
+            .document
+            .blocks
+            .iter()
+            .filter_map(|block| block.format.columns.map(|cols| cols.group))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
 
         if !keep_undo {
@@ -284,6 +343,118 @@ impl RichTextState {
 
         cx.notify();
         self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub(crate) fn column_weights_for_group(&self, group: u64, count: u8) -> Vec<f32> {
+        let count = count.max(2) as usize;
+        self.column_widths
+            .get(&group)
+            .filter(|weights| weights.len() == count)
+            .cloned()
+            .unwrap_or_else(|| vec![1.0; count])
+    }
+
+    pub(crate) fn start_column_resize(
+        &mut self,
+        group: u64,
+        count: u8,
+        handle: usize,
+        start_x: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let count = count.clamp(2, 4) as usize;
+        if handle + 1 >= count {
+            return;
+        }
+
+        let weights = self
+            .column_widths
+            .entry(group)
+            .or_insert_with(|| vec![1.0; count]);
+
+        if weights.len() != count {
+            *weights = vec![1.0; count];
+        }
+
+        self.selecting = false;
+        self.column_resize = Some(ColumnResize {
+            group,
+            handle,
+            start_x,
+            start_weights: weights.clone(),
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn update_column_resize(&mut self, position_x: Pixels, cx: &mut Context<Self>) {
+        let Some(resize) = self.column_resize.clone() else {
+            return;
+        };
+
+        let count = resize.start_weights.len();
+        if count < 2 || resize.handle + 1 >= count {
+            return;
+        }
+
+        let viewport_width = self.viewport_bounds.size.width;
+        if viewport_width <= px(0.) {
+            return;
+        }
+
+        let gutter = px(12.);
+        let available = viewport_width - gutter * (count.saturating_sub(1) as f32);
+        if available <= px(0.) {
+            return;
+        }
+
+        let total_weight: f32 = resize.start_weights.iter().copied().sum();
+        if total_weight <= 0.0001 {
+            return;
+        }
+
+        let left_ix = resize.handle;
+        let right_ix = resize.handle + 1;
+
+        let left_width = available * (resize.start_weights[left_ix] / total_weight);
+        let right_width = available * (resize.start_weights[right_ix] / total_weight);
+
+        let min_width = px(80.);
+        let mut dx = position_x - resize.start_x;
+
+        let min_dx = min_width - left_width;
+        let max_dx = right_width - min_width;
+        if dx < min_dx {
+            dx = min_dx;
+        } else if dx > max_dx {
+            dx = max_dx;
+        }
+
+        let left_new = left_width + dx;
+        let right_new = right_width - dx;
+        if left_new < px(1.) || right_new < px(1.) {
+            return;
+        }
+
+        let left_weight = (left_new / available) * total_weight;
+        let right_weight = (right_new / available) * total_weight;
+
+        let weights = self
+            .column_widths
+            .entry(resize.group)
+            .or_insert_with(|| resize.start_weights.clone());
+        if weights.len() != count {
+            *weights = resize.start_weights.clone();
+        }
+        weights[left_ix] = left_weight.max(0.001);
+        weights[right_ix] = right_weight.max(0.001);
+
+        cx.notify();
+    }
+
+    pub(crate) fn stop_column_resize(&mut self, cx: &mut Context<Self>) {
+        if self.column_resize.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub(crate) fn cursor(&self) -> usize {
@@ -439,6 +610,9 @@ impl RichTextState {
         mark_ime: bool,
         new_selected_utf16: Option<Range<usize>>,
     ) {
+        if self.read_only {
+            return;
+        }
         if push_undo {
             self.push_undo_snapshot();
         }
@@ -1044,6 +1218,9 @@ impl RichTextState {
         get: impl Fn(&InlineStyle) -> bool + std::marker::Copy,
         set: impl Fn(&mut InlineStyle, bool) + std::marker::Copy,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = self.ordered_selection();
         if range.is_empty() {
             let enabled = get(&self.active_style);
@@ -1083,6 +1260,10 @@ impl RichTextState {
         self.is_attr_enabled(self.ordered_selection(), |s| s.strikethrough)
     }
 
+    pub fn code_mark_active(&self) -> bool {
+        self.is_attr_enabled(self.ordered_selection(), |s| s.code)
+    }
+
     pub fn active_text_color(&self) -> Option<gpui::Hsla> {
         self.active_color_in_range(self.ordered_selection(), |s| s.fg)
     }
@@ -1107,7 +1288,14 @@ impl RichTextState {
         self.toggle_attr(window, cx, |s| s.strikethrough, |s, v| s.strikethrough = v);
     }
 
+    pub fn toggle_code_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_attr(window, cx, |s| s.code, |s, v| s.code = v);
+    }
+
     pub fn set_block_kind(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         for row in start_row..=end_row {
@@ -1119,11 +1307,113 @@ impl RichTextState {
         self.scroll_cursor_into_view(window, cx);
     }
 
+    pub fn indent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        const MAX_INDENT: u8 = 8;
+
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.indent = block.format.indent.saturating_add(1).min(MAX_INDENT);
+            }
+        }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn outdent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+        for row in start_row..=end_row {
+            if let Some(block) = self.document.blocks.get_mut(row) {
+                block.format.indent = block.format.indent.saturating_sub(1);
+            }
+        }
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub fn set_columns(&mut self, count: u8, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+
+        let count = count.clamp(2, 4);
+        let Some(_) = self.document.blocks.first() else {
+            return;
+        };
+
+        let group = self.next_columns_group_id;
+        self.next_columns_group_id = self.next_columns_group_id.saturating_add(1);
+
+        self.push_undo_snapshot();
+        let (start_row, end_row) = self.selected_rows();
+        let mut present = vec![false; count as usize];
+
+        for (ix, row) in (start_row..=end_row).enumerate() {
+            let Some(block) = self.document.blocks.get_mut(row) else {
+                continue;
+            };
+
+            let column = (ix % count as usize) as u8;
+            block.format.columns = Some(crate::document::BlockColumns {
+                group,
+                count,
+                column,
+            });
+            present[column as usize] = true;
+        }
+
+        // Ensure each column has at least one block by inserting empty paragraphs.
+        let base_format = self
+            .document
+            .blocks
+            .get(start_row)
+            .map(|b| b.format)
+            .unwrap_or_default();
+
+        let mut insert_at = (end_row + 1).min(self.document.blocks.len());
+        for column in 0..count {
+            if present.get(column as usize).copied().unwrap_or(false) {
+                continue;
+            }
+
+            let mut format = base_format;
+            format.kind = BlockKind::Paragraph;
+            format.columns = Some(crate::document::BlockColumns {
+                group,
+                count,
+                column,
+            });
+
+            self.document
+                .blocks
+                .insert(insert_at, BlockNode::from_text(format, ""));
+            insert_at += 1;
+        }
+
+        // Rebuild the rope if we inserted blocks.
+        if insert_at != (end_row + 1).min(self.document.blocks.len()) {
+            self.text = Rope::from(self.document.to_plain_text().as_str());
+            self.layout_cache = vec![None; self.document.blocks.len().max(1)];
+        }
+
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
     pub fn active_block_kind(&self) -> Option<BlockKind> {
         let (start_row, end_row) = self.selected_rows();
         let first = self.document.blocks.get(start_row)?;
         let normalize = |kind: BlockKind| match kind {
             BlockKind::Todo { .. } => BlockKind::Todo { checked: false },
+            BlockKind::Toggle { .. } => BlockKind::Toggle { collapsed: false },
             kind => kind,
         };
         let kind = normalize(first.format.kind);
@@ -1140,7 +1430,22 @@ impl RichTextState {
         Some(kind)
     }
 
+    pub fn active_columns_count(&self) -> Option<u8> {
+        let (start_row, end_row) = self.selected_rows();
+        let first = self.document.blocks.get(start_row)?.format.columns?;
+        for row in start_row..=end_row {
+            let cols = self.document.blocks.get(row)?.format.columns?;
+            if cols.group != first.group || cols.count != first.count {
+                return None;
+            }
+        }
+        Some(first.count)
+    }
+
     pub fn toggle_list(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         let all_match = (start_row..=end_row).all(|row| {
@@ -1190,6 +1495,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
 
@@ -1210,6 +1518,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
 
@@ -1241,6 +1552,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
 
@@ -1266,6 +1580,9 @@ impl RichTextState {
     }
 
     pub fn toggle_todo_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         let all_todo = (start_row..=end_row).all(|row| {
@@ -1295,6 +1612,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let checked = match self.document.blocks.get(row).map(|b| b.format.kind) {
             Some(BlockKind::Todo { checked }) => checked,
             _ => return,
@@ -1310,7 +1630,33 @@ impl RichTextState {
         self.scroll_cursor_into_view(window, cx);
     }
 
+    pub(crate) fn toggle_toggle_collapsed(
+        &mut self,
+        row: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let collapsed = match self.document.blocks.get(row).map(|b| b.format.kind) {
+            Some(BlockKind::Toggle { collapsed }) => collapsed,
+            _ => return,
+        };
+
+        self.push_undo_snapshot();
+        let Some(block) = self.document.blocks.get_mut(row) else {
+            return;
+        };
+
+        block.format.kind = BlockKind::Toggle {
+            collapsed: !collapsed,
+        };
+        cx.notify();
+        self.scroll_cursor_into_view(window, cx);
+    }
+
     pub fn insert_divider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
 
         let cursor = self.cursor();
@@ -1363,6 +1709,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         for row in start_row..=end_row {
@@ -1380,6 +1729,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         self.push_undo_snapshot();
         let (start_row, end_row) = self.selected_rows();
         for row in start_row..=end_row {
@@ -1417,6 +1769,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = self.ordered_selection();
         if range.is_empty() {
             self.active_style.fg = color;
@@ -1444,6 +1799,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = self.ordered_selection();
         if range.is_empty() {
             self.active_style.bg = color;
@@ -1466,6 +1824,9 @@ impl RichTextState {
     }
 
     pub fn set_link(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let url = url.and_then(|s| {
             let trimmed = s.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -1535,6 +1896,9 @@ impl RichTextState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let url = url.and_then(|s| {
             let trimmed = s.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -1617,6 +1981,7 @@ impl RichTextState {
         (start_row, end_row)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn highlight_styles_for_line(
         &self,
         row: usize,
@@ -1818,11 +2183,20 @@ impl RichTextState {
     }
 
     pub(crate) fn offset_for_point(&self, point: Point<Pixels>) -> Option<usize> {
-        // Find the closest row by y distance.
-        let mut best: Option<(usize, Pixels)> = None;
+        // Find the closest row by 2D distance to its layout bounds. This improves hit-testing in
+        // multi-column layouts where multiple rows can share the same y positions.
+        let mut best: Option<(usize, f32)> = None;
         for (row, cache) in self.layout_cache.iter().enumerate() {
             let Some(cache) = cache.as_ref() else {
                 continue;
+            };
+
+            let dx = if point.x < cache.bounds.left() {
+                cache.bounds.left() - point.x
+            } else if point.x > cache.bounds.right() {
+                point.x - cache.bounds.right()
+            } else {
+                px(0.)
             };
             let dy = if point.y < cache.bounds.top() {
                 cache.bounds.top() - point.y
@@ -1832,8 +2206,9 @@ impl RichTextState {
                 px(0.)
             };
 
-            if best.is_none() || dy < best.unwrap().1 {
-                best = Some((row, dy));
+            let dist = f32::from(dx) * f32::from(dx) + f32::from(dy) * f32::from(dy);
+            if best.is_none() || dist < best.unwrap().1 {
+                best = Some((row, dist));
             }
         }
 
@@ -1861,6 +2236,9 @@ impl RichTextState {
     // --- Action handlers ---
 
     pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.has_selection() {
             let range = self.ordered_selection();
             self.replace_bytes_range(range, "", window, cx, true, false, None);
@@ -1905,6 +2283,7 @@ impl RichTextState {
                     | BlockKind::UnorderedListItem
                     | BlockKind::OrderedListItem
                     | BlockKind::Todo { .. }
+                    | BlockKind::Toggle { .. }
             ) {
                 self.push_undo_snapshot();
                 self.document.blocks[pos.row].format.kind = BlockKind::Paragraph;
@@ -1918,6 +2297,9 @@ impl RichTextState {
     }
 
     pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.has_selection() {
             let range = self.ordered_selection();
             self.replace_bytes_range(range, "", window, cx, true, false, None);
@@ -1934,6 +2316,9 @@ impl RichTextState {
     }
 
     pub(super) fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.has_selection() {
             let range = self.ordered_selection();
             self.replace_bytes_range(range, "", window, cx, true, false, None);
@@ -1974,12 +2359,18 @@ impl RichTextState {
                     | BlockKind::OrderedListItem
                     | BlockKind::Quote
                     | BlockKind::Todo { .. }
+                    | BlockKind::Toggle { .. }
             ) && self.document.blocks[row].is_text_empty()
             {
                 self.push_undo_snapshot();
                 self.document.blocks[row].format.kind = BlockKind::Paragraph;
                 cx.notify();
                 return;
+            }
+
+            // If the current toggle is collapsed, expand it so newly inserted children are visible.
+            if let BlockKind::Toggle { collapsed: true } = kind {
+                self.document.blocks[row].format.kind = BlockKind::Toggle { collapsed: false };
             }
         }
 
@@ -2134,6 +2525,9 @@ impl RichTextState {
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let range = self.ordered_selection();
         if range.is_empty() {
             return;
@@ -2144,6 +2538,9 @@ impl RichTextState {
     }
 
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
@@ -2154,6 +2551,9 @@ impl RichTextState {
     }
 
     pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(snapshot) = self.undo_stack.pop() else {
             return;
         };
@@ -2167,6 +2567,9 @@ impl RichTextState {
     }
 
     pub(super) fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         let Some(snapshot) = self.redo_stack.pop() else {
             return;
         };

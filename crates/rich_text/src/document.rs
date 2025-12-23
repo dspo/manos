@@ -38,7 +38,15 @@ pub enum BlockKind {
     UnorderedListItem,
     OrderedListItem,
     Todo { checked: bool },
+    Toggle { collapsed: bool },
     Divider,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockColumns {
+    pub group: u64,
+    pub count: u8,
+    pub column: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +55,8 @@ pub struct BlockFormat {
     pub size: BlockTextSize,
     pub ordered_list_style: OrderedListStyle,
     pub align: BlockAlign,
+    pub indent: u8,
+    pub columns: Option<BlockColumns>,
 }
 
 impl Default for BlockFormat {
@@ -56,6 +66,8 @@ impl Default for BlockFormat {
             size: BlockTextSize::Normal,
             ordered_list_style: OrderedListStyle::default(),
             align: BlockAlign::default(),
+            indent: 0,
+            columns: None,
         }
     }
 }
@@ -68,6 +80,16 @@ impl BlockFormat {
                 size: BlockTextSize::Normal,
                 ordered_list_style: self.ordered_list_style,
                 align: self.align,
+                indent: self.indent,
+                columns: self.columns,
+            },
+            BlockKind::Toggle { .. } => BlockFormat {
+                kind: BlockKind::Paragraph,
+                size: self.size,
+                ordered_list_style: self.ordered_list_style,
+                align: self.align,
+                indent: self.indent.saturating_add(1),
+                columns: self.columns,
             },
             BlockKind::Paragraph
             | BlockKind::Quote

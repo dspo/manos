@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, IconName, PixelsExt as _, Root, Selectable as _, Sizable as _, Theme,
-    ThemeMode, ThemeRegistry, TitleBar, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, PixelsExt as _, Root, Selectable as _,
+    Sizable as _, Theme, ThemeMode, ThemeRegistry, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
     menu::AppMenuBar,
@@ -52,6 +52,7 @@ impl RichTextExample {
             muted_foreground: theme.muted_foreground,
             link: theme.blue,
             selection: theme.selection,
+            code_background: theme.muted,
         };
 
         let editor = cx.new(|cx| {
@@ -243,6 +244,7 @@ impl RichTextExample {
 impl Render for RichTextExample {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let read_only = self.editor.read(cx).is_read_only();
 
         div()
             .size_full()
@@ -315,6 +317,7 @@ impl Render for RichTextExample {
 	                                PlateToolbarIconButton::new("bold", PlateIconName::Bold)
 	                                    .selected(self.editor.read(cx).bold_mark_active())
 	                                    .tooltip("Bold")
+                                        .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_bold_mark(window, cx);
@@ -327,6 +330,7 @@ impl Render for RichTextExample {
                                 PlateToolbarIconButton::new("italic", PlateIconName::Italic)
                                     .selected(self.editor.read(cx).italic_mark_active())
                                     .tooltip("Italic")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_italic_mark(window, cx);
@@ -339,6 +343,7 @@ impl Render for RichTextExample {
                                 PlateToolbarIconButton::new("underline", PlateIconName::Underline)
                                     .selected(self.editor.read(cx).underline_mark_active())
                                     .tooltip("Underline")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_underline_mark(window, cx);
@@ -351,9 +356,23 @@ impl Render for RichTextExample {
                                 PlateToolbarIconButton::new("strike", PlateIconName::Strikethrough)
                                     .selected(self.editor.read(cx).strikethrough_mark_active())
                                     .tooltip("Strikethrough")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_strikethrough_mark(window, cx);
+                                        });
+                                        let handle = this.editor.read(cx).focus_handle();
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                PlateToolbarIconButton::new("code", PlateIconName::CodeXml)
+                                    .selected(self.editor.read(cx).code_mark_active())
+                                    .tooltip("Code")
+                                    .disabled(read_only)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.toggle_code_mark(window, cx);
                                         });
                                         let handle = this.editor.read(cx).focus_handle();
                                         window.focus(&handle);
@@ -364,6 +383,7 @@ impl Render for RichTextExample {
                                 PlateToolbarIconButton::new("link", PlateIconName::Link)
                                     .selected(self.editor.read(cx).current_link_url().is_some())
                                     .tooltip("Set or edit link URL")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         let current = this.editor.read(cx).current_link_url();
                                         let initial = current.unwrap_or_default();
@@ -373,6 +393,7 @@ impl Render for RichTextExample {
                             .child(
                                 PlateToolbarIconButton::new("unlink", PlateIconName::Unlink)
                                     .tooltip("Remove link")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor
@@ -391,6 +412,7 @@ impl Render for RichTextExample {
                                         format!("Heading\u{00A0}{level}").into()
                                     }
                                     Some(BlockKind::Paragraph) => "Text".into(),
+                                    Some(BlockKind::Toggle { .. }) => "Toggle".into(),
                                     Some(BlockKind::Quote) => "Quote".into(),
                                     Some(BlockKind::UnorderedListItem) => "Bulleted list".into(),
                                     Some(BlockKind::OrderedListItem) => "Numbered list".into(),
@@ -415,6 +437,9 @@ impl Render for RichTextExample {
                                         let popover = cx.entity();
 
 	                                        let active_kind = editor.read(cx).active_block_kind();
+                                            let active_columns = editor.read(cx).active_columns_count();
+                                            let code_active = editor.read(cx).code_mark_active();
+                                            let read_only = editor.read(cx).is_read_only();
 	                                        let editor_for_items = editor.clone();
 	                                        let popover_for_items = popover.clone();
 
@@ -422,6 +447,8 @@ impl Render for RichTextExample {
 	                                        enum TurnIntoAction {
 	                                            SetKind(BlockKind),
 	                                            SetOrderedListFromSelection,
+                                                ToggleCodeMark,
+                                                SetColumns(u8),
 	                                        }
 
 	                                        let make_item = move |id: &'static str,
@@ -524,6 +551,16 @@ impl Render for RichTextExample {
 	                                                                        );
 	                                                                    });
 	                                                                }
+                                                                    TurnIntoAction::ToggleCodeMark => {
+                                                                        editor.update(cx, |editor, cx| {
+                                                                            editor.toggle_code_mark(window, cx);
+                                                                        });
+                                                                    }
+                                                                    TurnIntoAction::SetColumns(count) => {
+                                                                        editor.update(cx, |editor, cx| {
+                                                                            editor.set_columns(count, window, cx);
+                                                                        });
+                                                                    }
 	                                                            }
 
 	                                                            let handle =
@@ -672,18 +709,20 @@ impl Render for RichTextExample {
 	                                            .child(make_item(
 	                                                "richtext-turn-into-toggle",
 	                                                "▸",
-	                                                "Toggle list",
-	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
-	                                                false,
-	                                                true,
+	                                                "Toggle",
+	                                                TurnIntoAction::SetKind(BlockKind::Toggle {
+	                                                    collapsed: false,
+	                                                }),
+	                                                matches!(active_kind, Some(BlockKind::Toggle { .. })),
+	                                                read_only,
 	                                            ))
 	                                            .child(make_item(
 	                                                "richtext-turn-into-code",
 	                                                "</>",
 	                                                "Code",
-	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
-	                                                false,
-	                                                true,
+	                                                TurnIntoAction::ToggleCodeMark,
+	                                                code_active,
+	                                                read_only,
 	                                            ))
 	                                            .child(make_item(
 	                                                "richtext-turn-into-quote",
@@ -694,12 +733,28 @@ impl Render for RichTextExample {
 	                                                false,
 	                                            ))
 	                                            .child(make_item(
-	                                                "richtext-turn-into-columns",
+	                                                "richtext-turn-into-columns-2",
+	                                                "||",
+	                                                "2 columns",
+	                                                TurnIntoAction::SetColumns(2),
+	                                                active_columns == Some(2),
+	                                                read_only,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-columns-3",
 	                                                "|||",
 	                                                "3 columns",
-	                                                TurnIntoAction::SetKind(BlockKind::Paragraph),
-	                                                false,
-	                                                true,
+	                                                TurnIntoAction::SetColumns(3),
+	                                                active_columns == Some(3),
+	                                                read_only,
+	                                            ))
+	                                            .child(make_item(
+	                                                "richtext-turn-into-columns-4",
+	                                                "||||",
+	                                                "4 columns",
+	                                                TurnIntoAction::SetColumns(4),
+	                                                active_columns == Some(4),
+	                                                read_only,
 	                                            ))
 	                                    })
 	                            })
@@ -864,6 +919,7 @@ impl Render for RichTextExample {
                             .child(
                                 PlateToolbarIconButton::new("ul", PlateIconName::List)
                                     .tooltip("Bulleted list")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_list(
@@ -892,6 +948,7 @@ impl Render for RichTextExample {
                                             .rounding(PlateToolbarRounding::Left)
                                             .tooltip("Numbered list")
                                             .selected(ordered_list_active)
+                                            .disabled(read_only)
                                             .child(PlateIconName::ListOrdered)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 let style = this
@@ -922,6 +979,7 @@ impl Render for RichTextExample {
                                                     .padding_x(px(0.))
                                                     .selected(ordered_list_active)
                                                     .default_text_color(theme.muted_foreground)
+                                                    .disabled(read_only)
                                                     .child(
                                                         gpui_component::Icon::new(
                                                             PlateIconName::ChevronDown,
@@ -1036,6 +1094,7 @@ impl Render for RichTextExample {
                             .child(
                                 PlateToolbarIconButton::new("todo", PlateIconName::ListTodo)
                                     .tooltip("To-do list")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.toggle_todo_list(window, cx);
@@ -1048,6 +1107,7 @@ impl Render for RichTextExample {
                                 PlateToolbarButton::new("quote")
                                     .tooltip("Quote")
                                     .child("❝")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.set_block_kind(BlockKind::Quote, window, cx);
@@ -1060,6 +1120,7 @@ impl Render for RichTextExample {
                                 PlateToolbarButton::new("divider")
                                     .tooltip("Divider")
                                     .child("—")
+                                    .disabled(read_only)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| {
                                             editor.insert_divider(window, cx);
@@ -1068,11 +1129,42 @@ impl Render for RichTextExample {
                                         window.focus(&handle);
                                     })),
                             )
+                            .child(
+                                PlateToolbarIconButton::new(
+                                    "outdent",
+                                    PlateIconName::IndentDecrease,
+                                )
+                                .tooltip("Outdent")
+                                .disabled(read_only)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.editor.update(cx, |editor, cx| {
+                                        editor.outdent(window, cx);
+                                    });
+                                    let handle = this.editor.read(cx).focus_handle();
+                                    window.focus(&handle);
+                                })),
+                            )
+                            .child(
+                                PlateToolbarIconButton::new(
+                                    "indent",
+                                    PlateIconName::IndentIncrease,
+                                )
+                                .tooltip("Indent")
+                                .disabled(read_only)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.editor.update(cx, |editor, cx| {
+                                        editor.indent(window, cx);
+                                    });
+                                    let handle = this.editor.read(cx).focus_handle();
+                                    window.focus(&handle);
+                                })),
+                            )
                             .child(PlateToolbarSeparator)
                             .child(
                                 PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
                                     .tooltip("Text color")
                                     .value(self.editor.read(cx).active_text_color())
+                                    .disabled(read_only)
                                     .on_change({
                                         let editor = self.editor.clone();
                                         move |color, window, cx| {
@@ -1091,6 +1183,7 @@ impl Render for RichTextExample {
                                 )
                                 .tooltip("Highlight color")
                                 .value(self.editor.read(cx).active_highlight_color())
+                                .disabled(read_only)
                                 .on_change({
                                     let editor = self.editor.clone();
                                     move |color, window, cx| {
@@ -1102,6 +1195,112 @@ impl Render for RichTextExample {
                                     }
                                 }),
                             )
+                            .child(PlateToolbarSeparator)
+                            .child({
+                                let editor = self.editor.clone();
+                                let mode_label: SharedString = if read_only {
+                                    "Read only".into()
+                                } else {
+                                    "Editing".into()
+                                };
+
+                                Popover::new("richtext-mode-menu")
+                                    .appearance(false)
+                                    .trigger(
+                                        PlateToolbarDropdownButton::new(
+                                            "richtext-mode-menu-trigger",
+                                        )
+                                        .tooltip("Mode")
+                                        .min_width(px(120.))
+                                        .child(PlateIconName::Pen)
+                                        .child(mode_label)
+                                        .on_click(|_, _, _| {}),
+                                    )
+                                    .content(move |_, _window, cx| {
+                                        let theme = cx.theme();
+                                        let popover = cx.entity();
+
+                                        let current_read_only = editor.read(cx).is_read_only();
+                                        let editor_for_items = editor.clone();
+                                        let popover_for_items = popover.clone();
+
+                                        let make_item = move |id: &'static str,
+                                                              label: &'static str,
+                                                              read_only: bool| {
+                                            let editor = editor_for_items.clone();
+                                            let popover = popover_for_items.clone();
+                                            let selected = current_read_only == read_only;
+
+                                            div()
+                                                .id(id)
+                                                .flex()
+                                                .items_center()
+                                                .h(px(32.))
+                                                .w_full()
+                                                .px(px(8.))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .rounded(px(4.))
+                                                .bg(theme.transparent)
+                                                .text_color(theme.popover_foreground)
+                                                .cursor_pointer()
+                                                .hover(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .active(|this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .when(selected, |this| {
+                                                    this.bg(theme.accent)
+                                                        .text_color(theme.accent_foreground)
+                                                })
+                                                .child(div().flex_1().child(label))
+                                                .when(selected, |this| {
+                                                    this.child(
+                                                        div()
+                                                            .text_size(px(12.))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .child("✓"),
+                                                    )
+                                                })
+                                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                                    window.prevent_default();
+                                                    editor.update(cx, |editor, cx| {
+                                                        editor.set_read_only(read_only, window, cx);
+                                                    });
+                                                    let handle = editor.read(cx).focus_handle();
+                                                    window.focus(&handle);
+                                                    popover.update(cx, |state, cx| {
+                                                        state.dismiss(window, cx);
+                                                    });
+                                                })
+                                        };
+
+                                        div()
+                                            .p(px(4.))
+                                            .bg(theme.popover)
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded(theme.radius)
+                                            .shadow_md()
+                                            .w(px(180.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(make_item(
+                                                "richtext-mode-editing",
+                                                "Editing",
+                                                false,
+                                            ))
+                                            .child(make_item(
+                                                "richtext-mode-read-only",
+                                                "Read only",
+                                                true,
+                                            ))
+                                    })
+                            })
                             .when(false, |this| {
                                 this.child(PlateToolbarSeparator)
                             .child({

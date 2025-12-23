@@ -2,8 +2,8 @@ use gpui::{Hsla, Rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{
-    BlockAlign, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode, OrderedListStyle,
-    RichTextDocument, TextNode,
+    BlockAlign, BlockColumns, BlockFormat, BlockKind, BlockNode, BlockTextSize, InlineNode,
+    OrderedListStyle, RichTextDocument, TextNode,
 };
 use crate::style::InlineStyle;
 
@@ -143,6 +143,29 @@ pub struct SlateElement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indent: Option<u8>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collapsed: Option<bool>,
+
+    #[serde(
+        default,
+        rename = "columnGroup",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub column_group: Option<u64>,
+
+    #[serde(
+        default,
+        rename = "columnCount",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub column_count: Option<u8>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u8>,
+
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "href")]
     pub url: Option<String>,
 
@@ -168,6 +191,9 @@ pub struct SlateText {
     pub strikethrough: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<SlateColor>,
     #[serde(
         default,
@@ -185,14 +211,15 @@ pub enum SlateColor {
 }
 
 fn block_to_element(block: &BlockNode) -> SlateElement {
-    let (kind, level) = match block.format.kind {
-        BlockKind::Paragraph => ("paragraph".to_string(), None),
-        BlockKind::Heading { level } => ("heading".to_string(), Some(level)),
-        BlockKind::Quote => ("paragraph".to_string(), None),
-        BlockKind::UnorderedListItem => ("list-item".to_string(), None),
-        BlockKind::OrderedListItem => ("list-item".to_string(), None),
-        BlockKind::Todo { .. } => ("todo-list-item".to_string(), None),
-        BlockKind::Divider => ("divider".to_string(), None),
+    let (kind, level, collapsed) = match block.format.kind {
+        BlockKind::Paragraph => ("paragraph".to_string(), None, None),
+        BlockKind::Heading { level } => ("heading".to_string(), Some(level), None),
+        BlockKind::Quote => ("paragraph".to_string(), None, None),
+        BlockKind::UnorderedListItem => ("list-item".to_string(), None, None),
+        BlockKind::OrderedListItem => ("list-item".to_string(), None, None),
+        BlockKind::Todo { .. } => ("todo-list-item".to_string(), None, None),
+        BlockKind::Toggle { collapsed } => ("toggle".to_string(), None, collapsed.then_some(true)),
+        BlockKind::Divider => ("divider".to_string(), None, None),
     };
     let checked = match block.format.kind {
         BlockKind::Todo { checked } => Some(checked),
@@ -212,6 +239,12 @@ fn block_to_element(block: &BlockNode) -> SlateElement {
         _ => None,
     };
     let align = block_align_to_string(block.format.align);
+    let indent = (block.format.indent > 0).then_some(block.format.indent);
+
+    let (column_group, column_count, column) = match block.format.columns {
+        Some(cols) => (Some(cols.group), Some(cols.count), Some(cols.column)),
+        None => (None, None, None),
+    };
 
     SlateElement {
         kind,
@@ -221,6 +254,11 @@ fn block_to_element(block: &BlockNode) -> SlateElement {
         list_type,
         list_style,
         align,
+        indent,
+        collapsed,
+        column_group,
+        column_count,
+        column,
         children: if matches!(block.format.kind, BlockKind::Divider) {
             Vec::new()
         } else {
@@ -231,20 +269,40 @@ fn block_to_element(block: &BlockNode) -> SlateElement {
 }
 
 fn block_to_quote_paragraph(block: &BlockNode) -> SlateElement {
+    let indent = (block.format.indent > 0).then_some(block.format.indent);
+    let (column_group, column_count, column) = match block.format.columns {
+        Some(cols) => (Some(cols.group), Some(cols.count), Some(cols.column)),
+        None => (None, None, None),
+    };
+
     SlateElement {
         kind: "paragraph".to_string(),
         text_size: block_text_size_to_string(block.format.size),
         align: block_align_to_string(block.format.align),
+        indent,
+        column_group,
+        column_count,
+        column,
         children: inlines_to_slate_children(&block.inlines),
         ..Default::default()
     }
 }
 
 fn block_to_list_item(block: &BlockNode) -> SlateElement {
+    let indent = (block.format.indent > 0).then_some(block.format.indent);
+    let (column_group, column_count, column) = match block.format.columns {
+        Some(cols) => (Some(cols.group), Some(cols.count), Some(cols.column)),
+        None => (None, None, None),
+    };
+
     SlateElement {
         kind: "list-item".to_string(),
         text_size: block_text_size_to_string(block.format.size),
         align: block_align_to_string(block.format.align),
+        indent,
+        column_group,
+        column_count,
+        column,
         children: inlines_to_slate_children(&block.inlines),
         ..Default::default()
     }
@@ -309,6 +367,7 @@ fn text_node_to_slate(text: &TextNode) -> SlateText {
         italic: text.style.italic.then_some(true),
         underline: text.style.underline.then_some(true),
         strikethrough: text.style.strikethrough.then_some(true),
+        code: text.style.code.then_some(true),
         color: text.style.fg.map(|hsla| SlateColor::Rgba(Rgba::from(hsla))),
         background_color: text.style.bg.map(|hsla| SlateColor::Rgba(Rgba::from(hsla))),
     }
@@ -479,11 +538,15 @@ fn element_to_block(element: &SlateElement, force_kind: Option<BlockKind>) -> Bl
         OrderedListStyle::default()
     };
     let align = parse_block_align(element.align.as_deref());
+    let indent = element.indent.unwrap_or(0);
+    let columns = parse_columns(element);
     let format = BlockFormat {
         kind,
         size,
         ordered_list_style,
         align,
+        indent,
+        columns,
     };
 
     let mut inlines = Vec::new();
@@ -571,6 +634,9 @@ fn parse_block_kind(element: &SlateElement) -> BlockKind {
             level: element.level.unwrap_or(1).max(1),
         },
         "blockquote" | "quote" => BlockKind::Quote,
+        "toggle" => BlockKind::Toggle {
+            collapsed: element.collapsed.unwrap_or(false),
+        },
         "h1" => BlockKind::Heading { level: 1 },
         "h2" => BlockKind::Heading { level: 2 },
         "h3" => BlockKind::Heading { level: 3 },
@@ -588,6 +654,26 @@ fn parse_block_kind(element: &SlateElement) -> BlockKind {
         },
         _ => BlockKind::Paragraph,
     }
+}
+
+fn parse_columns(element: &SlateElement) -> Option<BlockColumns> {
+    let group = element.column_group?;
+    let count = element.column_count?;
+    let column = element.column?;
+
+    if count < 2 {
+        return None;
+    }
+
+    if column >= count {
+        return None;
+    }
+
+    Some(BlockColumns {
+        group,
+        count,
+        column,
+    })
 }
 
 fn block_text_size_to_string(size: BlockTextSize) -> Option<String> {
@@ -626,6 +712,7 @@ fn slate_text_to_text_node(text: &SlateText) -> TextNode {
             italic: text.italic.unwrap_or(false),
             underline: text.underline.unwrap_or(false),
             strikethrough: text.strikethrough.unwrap_or(false),
+            code: text.code.unwrap_or(false),
             fg,
             bg,
             link: None,

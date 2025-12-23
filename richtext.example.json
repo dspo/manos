@@ -20,23 +20,235 @@
           "type": "paragraph",
           "children": [
             {
-              "text": "This document demonstrates "
+              "text": "This document demonstrates headings, inline marks (including "
             },
             {
-              "text": "headings",
-              "bold": true
+              "text": "inline code",
+              "code": true
             },
             {
-              "text": ", "
-            },
-            {
-              "text": "inline marks",
-              "italic": true
-            },
-            {
-              "text": ", lists, quotes, dividers and to-do items."
+              "text": "), lists, quotes, dividers, to-do items, toggles, columns, and indentation."
             }
           ]
+        }
+      ]
+    },
+    {
+      "type": "heading",
+      "level": 2,
+      "children": [
+        {
+          "text": "Inline Code",
+          "bold": true
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [
+        {
+          "text": "Click the </> button to toggle "
+        },
+        {
+          "text": "inline code",
+          "code": true
+        },
+        {
+          "text": " on your selection."
+        }
+      ]
+    },
+    {
+      "type": "heading",
+      "level": 2,
+      "children": [
+        {
+          "text": "Toggle",
+          "bold": true
+        }
+      ]
+    },
+    {
+      "type": "toggle",
+      "children": [
+        {
+          "text": "Toggle block (click ▸ to collapse)"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "indent": 1,
+      "children": [
+        {
+          "text": "Child block 1 (indented)"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "indent": 1,
+      "children": [
+        {
+          "text": "Child block 2 with "
+        },
+        {
+          "text": "inline code",
+          "code": true
+        },
+        {
+          "text": "."
+        }
+      ]
+    },
+    {
+      "type": "toggle",
+      "collapsed": true,
+      "children": [
+        {
+          "text": "Collapsed toggle (starts hidden)"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "indent": 1,
+      "children": [
+        {
+          "text": "Hidden child (expand the toggle to see)"
+        }
+      ]
+    },
+    {
+      "type": "heading",
+      "level": 2,
+      "children": [
+        {
+          "text": "Columns",
+          "bold": true
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [
+        {
+          "text": "2 columns:"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 1,
+      "columnCount": 2,
+      "column": 0,
+      "children": [
+        {
+          "text": "Column 1: This is a longer paragraph that should wrap inside the column. It should NOT squeeze the other column just because this column has more content."
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 1,
+      "columnCount": 2,
+      "column": 1,
+      "children": [
+        {
+          "text": "Column 2: Drag the vertical divider between columns to resize widths. The column widths stay fixed unless you drag."
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [
+        {
+          "text": "3 columns:"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 2,
+      "columnCount": 3,
+      "column": 0,
+      "children": [
+        {
+          "text": "Col A (try resizing)"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 2,
+      "columnCount": 3,
+      "column": 1,
+      "children": [
+        {
+          "text": "Col B with a bit more content so it wraps nicely."
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 2,
+      "columnCount": 3,
+      "column": 2,
+      "children": [
+        {
+          "text": "Col C"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "children": [
+        {
+          "text": "4 columns:"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 3,
+      "columnCount": 4,
+      "column": 0,
+      "children": [
+        {
+          "text": "1st"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 3,
+      "columnCount": 4,
+      "column": 1,
+      "children": [
+        {
+          "text": "2nd"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 3,
+      "columnCount": 4,
+      "column": 2,
+      "children": [
+        {
+          "text": "3rd"
+        }
+      ]
+    },
+    {
+      "type": "paragraph",
+      "columnGroup": 3,
+      "columnCount": 4,
+      "column": 3,
+      "children": [
+        {
+          "text": "4th"
         }
       ]
     },
