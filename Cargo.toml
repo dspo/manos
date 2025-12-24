@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/extras", "crates/rich_text", "crates/story"]
+members = ["crates/extras", "crates/git-viewer", "crates/rich_text", "crates/story"]
 default-members = ["crates/story"]
 resolver = "2"
 
