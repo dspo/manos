@@ -2011,6 +2011,11 @@ dependencies = [
 [[package]]
 name = "git-viewer"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui-component",
+]
 
 [[package]]
 name = "glob"
