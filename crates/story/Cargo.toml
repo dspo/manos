@@ -12,4 +12,7 @@ gpui-manos-components.workspace = true
 gpui-manos-plate.workspace = true
 gpui-dnd-list.workspace = true
 gpui-dnd-tree.workspace = true
+gpui-manos-webview.workspace = true
+http.workspace = true
+serde.workspace = true
 serde_json.workspace = true
