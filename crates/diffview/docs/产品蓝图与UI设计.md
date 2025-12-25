@@ -8,13 +8,14 @@
 ## 阶段性进展（当前实现）
 - 可运行 demo app：`crates/git-viewer`（`cargo run -p git-viewer`）。
 - Git 集成方式：**调用系统 `git` 命令**（`std::process::Command`），当前未引入 `libgit2/gix` 等 Rust git 库（便于快速覆盖真实工作流与保持行为一致）。
+- 启动降级：启动时探测 `git` 是否可执行；缺失时提示并禁用仓库状态与 Git 操作（demo 仍可用）。
 - 文件列表：`git status --porcelain=v2 -z` 拉取；过滤 All/Conflicts/Staged/Unstaged/Untracked；点击文件进入 diff 或冲突视图。
 - 二方 diff：Split/Inline；Split 支持“对齐(单滚动)”与“分栏(真双/多 pane + 同步滚动)”两种布局；支持折叠上下文、展开全部、忽略空白、上一/下一 hunk。
 - 右侧标尺：diff hunk / 冲突块分布标记 + 点击跳转（基础版）。
 - 对比目标：支持 `HEAD↔工作区 / 暂存↔工作区 / HEAD↔暂存` 切换（为部分暂存/回滚语义服务）。
 - Git 操作：文件级 stage/unstage；**当前 hunk** 级 stage/unstage/revert（基于 patch 生成 + `git apply`/`git apply --cached`）。
 - 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；底部“合并结果”编辑器（编辑后点击“应用”刷新冲突检测）；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
-- 小窗口适配：工具条 `flex-wrap`，减少信息密度后在窄窗口仍可操作。
+- 小窗口适配：diff 工具条将“对比目标/视图&Git 操作”收纳到 Popover（`对比` / `更多`）；其它工具条用 `flex-wrap` 兜底，避免按钮被挤出不可点。
 
 ## 信息架构与流程
 - 根布局：左侧文件面板 + 顶部工具条 + 主视图 + 右侧标尺/辅助（可折叠） + 底部状态栏。
@@ -226,7 +227,9 @@
   - 1-5 万行文件 diff：滚动与跳转无明显卡顿；内存/CPU 不爆炸（主观体验 + 简单计时日志）。
 - 本步 TODO：
   - [ ] 性能与体验调优：防抖、缓存、基准样例
-  - [ ] TopToolbar/StatusBar 细节：一致的禁用态/提示
+  - [x] TopToolbar：溢出收纳（Popover，对比/更多）
+  - [x] 错误提示（基础）：`git` 缺失时提示并禁用相关操作
+  - [ ] TopToolbar/StatusBar 细节：统一禁用态/提示/快捷键（剩余）
   - [ ] ScrollRuler（优化）：交互与绘制性能
 
 ### 10) 进阶功能（可选）

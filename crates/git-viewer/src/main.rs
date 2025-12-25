@@ -4,12 +4,14 @@ use std::rc::Rc;
 
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, TitleBar, VirtualListScrollHandle, WindowExt as _,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
     notification::Notification,
+    popover::Popover,
     scroll::{Scrollbar, ScrollbarState},
     switch::Switch,
     v_virtual_list,
@@ -181,6 +183,7 @@ struct GitViewerApp {
     repo_root: PathBuf,
     files: Vec<FileEntry>,
     loading: bool,
+    git_available: bool,
     screen: AppScreen,
     diff_view: Option<DiffViewState>,
     conflict_view: Option<ConflictViewState>,
@@ -196,30 +199,40 @@ impl GitViewerApp {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let repo_root = detect_repo_root(&cwd);
         let repo_root_for_task = repo_root.clone();
+        let git_available = Command::new("git").arg("--version").output().is_ok();
 
-        cx.spawn_in(window, async move |_, window| {
-            let entries = fetch_git_status(&repo_root_for_task)
-                .map_err(|err| {
-                    eprintln!("git status failed: {err:?}");
-                    err
-                })
-                .unwrap_or_default();
+        if git_available {
+            cx.spawn_in(window, async move |_, window| {
+                let entries = fetch_git_status(&repo_root_for_task)
+                    .map_err(|err| {
+                        eprintln!("git status failed: {err:?}");
+                        err
+                    })
+                    .unwrap_or_default();
 
-            let _ = window.update(|_window, cx| {
-                this.update(cx, |this, _cx| {
-                    this.loading = false;
-                    this.files = entries;
-                })
-            });
+                let _ = window.update(|_window, cx| {
+                    this.update(cx, |this, _cx| {
+                        this.loading = false;
+                        this.files = entries;
+                    })
+                });
 
-            Some(())
-        })
-        .detach();
+                Some(())
+            })
+            .detach();
+        } else {
+            window.push_notification(
+                Notification::new()
+                    .message("未检测到 git 命令：已禁用仓库状态与 Git 操作（可打开 Demo）"),
+                cx,
+            );
+        }
 
         Self {
             repo_root,
             files: Vec::new(),
-            loading: true,
+            loading: git_available,
+            git_available,
             screen: AppScreen::StatusList,
             diff_view: None,
             conflict_view: None,
@@ -633,6 +646,26 @@ impl GitViewerApp {
 
         diff_view.rows.splice(row_index..=row_index, expanded);
         diff_view.recalc_hunk_rows();
+    }
+
+    fn expand_all_folds(&mut self) {
+        while self.diff_view.as_ref().is_some_and(|diff_view| {
+            diff_view
+                .rows
+                .iter()
+                .any(|row| matches!(row, DisplayRow::Fold { .. }))
+        }) {
+            let next_index = self
+                .diff_view
+                .as_ref()
+                .and_then(|diff_view| {
+                    diff_view.rows.iter().enumerate().find_map(|(index, row)| {
+                        matches!(row, DisplayRow::Fold { .. }).then_some(index)
+                    })
+                })
+                .unwrap_or(0);
+            self.expand_fold(next_index);
+        }
     }
 
     fn resolve_conflict(
@@ -1334,7 +1367,9 @@ impl GitViewerApp {
             .filter(|entry| matches_filter(entry, self.status_filter))
             .count();
 
-        let header: SharedString = if self.loading {
+        let header: SharedString = if !self.git_available {
+            "未检测到 git 命令：仅可运行 Diff/Conflict Demo（请安装 git 或配置 PATH）".into()
+        } else if self.loading {
             "正在加载 git 状态…".into()
         } else {
             format!("显示 {} / {} 个文件", filtered_count, counts.all).into()
@@ -1470,23 +1505,380 @@ impl GitViewerApp {
         let can_next_hunk = diff_view.current_hunk + 1 < diff_view.hunk_rows.len();
         let file_status = diff_view.status.as_deref().unwrap_or_default();
         let has_file_path = diff_view.path.is_some();
-        let can_stage = has_file_path
+        let git_available = self.git_available;
+        let can_stage = git_available
+            && has_file_path
             && (is_untracked_status(file_status)
                 || status_xy(file_status).is_some_and(|(_, y)| y != ' ' && y != '?' && y != '!'));
-        let can_unstage = has_file_path
+        let can_unstage = git_available
+            && has_file_path
             && status_xy(file_status).is_some_and(|(x, _)| x != ' ' && x != '?' && x != '!');
         let has_hunks = hunk_count > 0;
-        let can_stage_hunk = has_file_path
+        let can_stage_hunk = git_available
+            && has_file_path
             && has_hunks
             && !is_untracked_status(file_status)
             && compare_target == CompareTarget::IndexToWorktree;
         let can_revert_hunk = can_stage_hunk;
-        let can_unstage_hunk =
-            has_file_path && has_hunks && compare_target == CompareTarget::HeadToIndex;
+        let can_unstage_hunk = git_available
+            && has_file_path
+            && has_hunks
+            && compare_target == CompareTarget::HeadToIndex;
         let rows_len = diff_view.rows.len();
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
         let row_height = window.line_height() + px(4.);
+
+        let app = cx.entity();
+        let compare_label: SharedString =
+            format!("对比: {}", compare_target_label(compare_target)).into();
+        let compare_control: AnyElement = if git_available && has_file_path {
+            let app_for_menu = app.clone();
+            let active_target = compare_target;
+            Popover::new("diff-compare-menu")
+                .appearance(false)
+                .trigger(
+                    Button::new("diff-compare-trigger")
+                        .label(compare_label.clone())
+                        .ghost()
+                        .on_click(|_, _, _| {}),
+                )
+                .content(move |_, _window, cx| {
+                    let theme = cx.theme();
+                    let popover = cx.entity();
+
+                    let app_for_items = app_for_menu.clone();
+                    let popover_for_items = popover.clone();
+                    let make_item = move |id: &'static str, label: SharedString, target| {
+                        let app = app_for_items.clone();
+                        let popover = popover_for_items.clone();
+                        let is_active = active_target == target;
+
+                        div()
+                            .id(id)
+                            .flex()
+                            .items_center()
+                            .h(px(32.))
+                            .px(px(10.))
+                            .rounded(px(6.))
+                            .text_sm()
+                            .when(is_active, |this| {
+                                this.bg(theme.accent)
+                                    .text_color(theme.accent_foreground)
+                                    .cursor_default()
+                            })
+                            .when(!is_active, |this| {
+                                this.bg(theme.transparent)
+                                    .text_color(theme.popover_foreground)
+                                    .cursor_pointer()
+                                    .hover(|this| {
+                                        this.bg(theme.accent.alpha(0.4))
+                                            .text_color(theme.accent_foreground)
+                                    })
+                                    .active(|this| {
+                                        this.bg(theme.accent).text_color(theme.accent_foreground)
+                                    })
+                                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                        window.prevent_default();
+                                        app.update(cx, |this, cx| {
+                                            this.set_compare_target(target, window, cx);
+                                            cx.notify();
+                                        });
+                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                    })
+                            })
+                            .child(label)
+                    };
+
+                    div()
+                        .p(px(6.))
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .shadow_md()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .py(px(4.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("选择对比目标"),
+                        )
+                        .child(make_item(
+                            "diff-compare-head-worktree",
+                            "HEAD ↔ 工作区".into(),
+                            CompareTarget::HeadToWorktree,
+                        ))
+                        .child(make_item(
+                            "diff-compare-index-worktree",
+                            "暂存 ↔ 工作区".into(),
+                            CompareTarget::IndexToWorktree,
+                        ))
+                        .child(make_item(
+                            "diff-compare-head-index",
+                            "HEAD ↔ 暂存".into(),
+                            CompareTarget::HeadToIndex,
+                        ))
+                })
+                .into_any_element()
+        } else {
+            Button::new("diff-compare-disabled")
+                .label(compare_label)
+                .ghost()
+                .disabled(true)
+                .into_any_element()
+        };
+
+        let can_expand_all = diff_view
+            .rows
+            .iter()
+            .any(|row| matches!(row, DisplayRow::Fold { .. }));
+
+        let more_menu = {
+            let app_for_menu = app.clone();
+            Popover::new("diff-more-menu")
+                .appearance(false)
+                .trigger(
+                    Button::new("diff-more-trigger")
+                        .label("更多")
+                        .ghost()
+                        .on_click(|_, _, _| {}),
+                )
+                .content(move |_, _window, cx| {
+                    let theme = cx.theme();
+                    let popover = cx.entity();
+
+                    let make_action = move |id: &'static str,
+                                            label: SharedString,
+                                            disabled: bool,
+                                            action: Rc<dyn Fn(&mut Window, &mut App) + 'static>| {
+                        let popover = popover.clone();
+                        Button::new(id)
+                            .label(label)
+                            .ghost()
+                            .disabled(disabled)
+                            .w_full()
+                            .on_click({
+                                let action = action.clone();
+                                move |_, window, cx| {
+                                    action(window, cx);
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                            })
+                            .into_any_element()
+                    };
+
+                    let view_toggle_split_label: SharedString = if inline_mode {
+                        "分栏（Inline 模式不可用）".into()
+                    } else if two_pane {
+                        "分栏: 开".into()
+                    } else {
+                        "分栏: 关".into()
+                    };
+                    let view_toggle_ws_label: SharedString = if ignore_whitespace {
+                        "忽略空白: 开".into()
+                    } else {
+                        "忽略空白: 关".into()
+                    };
+
+                    let app_for_split = app_for_menu.clone();
+                    let toggle_split = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        app_for_split.update(cx, |this, cx| {
+                            if this.view_mode == DiffViewMode::Inline {
+                                return;
+                            }
+                            this.split_layout = match this.split_layout {
+                                SplitLayout::Aligned => SplitLayout::TwoPane,
+                                SplitLayout::TwoPane => SplitLayout::Aligned,
+                            };
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_ws = app_for_menu.clone();
+                    let toggle_ws = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        app_for_ws.update(cx, |this, cx| {
+                            let next = !this.diff_options.ignore_whitespace;
+                            this.set_ignore_whitespace(next);
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_expand = app_for_menu.clone();
+                    let expand_all = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        app_for_expand.update(cx, |this, cx| {
+                            this.expand_all_folds();
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_stage_file = app_for_menu.clone();
+                    let stage_file = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_stage_file.update(cx, |this, cx| {
+                            this.stage_current_file(window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_unstage_file = app_for_menu.clone();
+                    let unstage_file = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_unstage_file.update(cx, |this, cx| {
+                            this.unstage_current_file(window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_stage_hunk = app_for_menu.clone();
+                    let stage_hunk = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_stage_hunk.update(cx, |this, cx| {
+                            this.stage_current_hunk(window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_unstage_hunk = app_for_menu.clone();
+                    let unstage_hunk = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_unstage_hunk.update(cx, |this, cx| {
+                            this.unstage_current_hunk(window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_revert_hunk = app_for_menu.clone();
+                    let revert_hunk = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_revert_hunk.update(cx, |this, cx| {
+                            this.revert_current_hunk(window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    let can_toggle_split = !inline_mode;
+
+                    div()
+                        .p(px(8.))
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .shadow_md()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .px(px(4.))
+                                .py(px(2.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("视图"),
+                        )
+                        .child(make_action(
+                            "diff-more-toggle-split",
+                            view_toggle_split_label,
+                            !can_toggle_split,
+                            toggle_split,
+                        ))
+                        .child(make_action(
+                            "diff-more-toggle-ws",
+                            view_toggle_ws_label,
+                            false,
+                            toggle_ws,
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.))
+                                .px(px(6.))
+                                .child(div().text_sm().child(format!("上下文: {context_lines}")))
+                                .child(
+                                    Button::new("diff-more-context-dec")
+                                        .label("－")
+                                        .ghost()
+                                        .disabled(context_lines == 0)
+                                        .on_click({
+                                            let app = app_for_menu.clone();
+                                            move |_, _window, cx| {
+                                                app.update(cx, |this, cx| {
+                                                    let next = this
+                                                        .diff_options
+                                                        .context_lines
+                                                        .saturating_sub(1);
+                                                    this.set_context_lines(next);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                )
+                                .child(
+                                    Button::new("diff-more-context-inc")
+                                        .label("＋")
+                                        .ghost()
+                                        .disabled(context_lines >= MAX_CONTEXT_LINES)
+                                        .on_click({
+                                            let app = app_for_menu.clone();
+                                            move |_, _window, cx| {
+                                                app.update(cx, |this, cx| {
+                                                    let next = this.diff_options.context_lines + 1;
+                                                    this.set_context_lines(next);
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                ),
+                        )
+                        .child(make_action(
+                            "diff-more-expand-all",
+                            "展开全部".into(),
+                            !can_expand_all,
+                            expand_all,
+                        ))
+                        .child(div().h(px(1.)).bg(theme.border.alpha(0.4)))
+                        .child(
+                            div()
+                                .px(px(4.))
+                                .py(px(2.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("Git"),
+                        )
+                        .child(make_action(
+                            "diff-more-stage-file",
+                            "Stage 文件".into(),
+                            !can_stage,
+                            stage_file,
+                        ))
+                        .child(make_action(
+                            "diff-more-unstage-file",
+                            "Unstage 文件".into(),
+                            !can_unstage,
+                            unstage_file,
+                        ))
+                        .child(make_action(
+                            "diff-more-stage-hunk",
+                            "Stage 当前 hunk".into(),
+                            !can_stage_hunk,
+                            stage_hunk,
+                        ))
+                        .child(make_action(
+                            "diff-more-unstage-hunk",
+                            "Unstage 当前 hunk".into(),
+                            !can_unstage_hunk,
+                            unstage_hunk,
+                        ))
+                        .child(make_action(
+                            "diff-more-revert-hunk",
+                            "Revert 当前 hunk".into(),
+                            !can_revert_hunk,
+                            revert_hunk,
+                        ))
+                })
+        };
 
         let toolbar = div()
             .flex()
@@ -1548,72 +1940,7 @@ impl GitViewerApp {
                                 }
                             }),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(div().text_color(cx.theme().muted_foreground).child("对比:"))
-                            .child({
-                                let mut button =
-                                    Button::new("compare-head-worktree").label("HEAD↔工作区");
-                                if compare_target == CompareTarget::HeadToWorktree {
-                                    button = button.primary();
-                                } else {
-                                    button = button.ghost().on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            this.set_compare_target(
-                                                CompareTarget::HeadToWorktree,
-                                                window,
-                                                cx,
-                                            );
-                                            cx.notify();
-                                        },
-                                    ));
-                                }
-                                button
-                            })
-                            .child({
-                                let mut button =
-                                    Button::new("compare-index-worktree").label("暂存↔工作区");
-                                if compare_target == CompareTarget::IndexToWorktree {
-                                    button = button.primary();
-                                } else {
-                                    button = button.ghost().on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            this.set_compare_target(
-                                                CompareTarget::IndexToWorktree,
-                                                window,
-                                                cx,
-                                            );
-                                            cx.notify();
-                                        },
-                                    ));
-                                }
-                                button
-                            })
-                            .child({
-                                let mut button =
-                                    Button::new("compare-head-index").label("HEAD↔暂存");
-                                if compare_target == CompareTarget::HeadToIndex {
-                                    button = button.primary();
-                                } else {
-                                    button = button.ghost().on_click(cx.listener(
-                                        |this, _, window, cx| {
-                                            this.set_compare_target(
-                                                CompareTarget::HeadToIndex,
-                                                window,
-                                                cx,
-                                            );
-                                            cx.notify();
-                                        },
-                                    ));
-                                }
-                                button
-                            }),
-                    )
-                    .child(div().child(format!("hunks: {hunk_count}")))
+                    .child(compare_control)
                     .child(
                         Button::new("prev-hunk")
                             .label("上一 hunk")
@@ -1634,136 +1961,7 @@ impl GitViewerApp {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        Button::new("expand-all")
-                            .label("展开全部")
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                while this.diff_view.as_ref().map_or(false, |diff_view| {
-                                    diff_view
-                                        .rows
-                                        .iter()
-                                        .any(|row| matches!(row, DisplayRow::Fold { .. }))
-                                }) {
-                                    let next_index =
-                                        this.diff_view.as_ref().and_then(|diff_view| {
-                                            diff_view.rows.iter().enumerate().find_map(
-                                                |(index, row)| {
-                                                    matches!(row, DisplayRow::Fold { .. })
-                                                        .then_some(index)
-                                                },
-                                            )
-                                        });
-                                    let Some(next_index) = next_index else { break };
-                                    this.expand_fold(next_index);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(div().child(format!("上下文: {context_lines}")))
-                            .child(
-                                Button::new("context-dec")
-                                    .label("－")
-                                    .ghost()
-                                    .disabled(context_lines == 0)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        let next =
-                                            this.diff_options.context_lines.saturating_sub(1);
-                                        this.set_context_lines(next);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("context-inc")
-                                    .label("＋")
-                                    .ghost()
-                                    .disabled(context_lines >= MAX_CONTEXT_LINES)
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        let next = this.diff_options.context_lines + 1;
-                                        this.set_context_lines(next);
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        Switch::new("two-pane")
-                            .label("分栏")
-                            .checked(two_pane)
-                            .disabled(inline_mode)
-                            .on_click(cx.listener(|this, checked, _window, cx| {
-                                this.split_layout = if *checked {
-                                    SplitLayout::TwoPane
-                                } else {
-                                    SplitLayout::Aligned
-                                };
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("stage-file")
-                            .label("Stage")
-                            .ghost()
-                            .disabled(!can_stage)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.stage_current_file(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("stage-hunk")
-                            .label("Stage hunk")
-                            .ghost()
-                            .disabled(!can_stage_hunk)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.stage_current_hunk(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("revert-hunk")
-                            .label("Revert hunk")
-                            .ghost()
-                            .disabled(!can_revert_hunk)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.revert_current_hunk(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("unstage-file")
-                            .label("Unstage")
-                            .ghost()
-                            .disabled(!can_unstage)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.unstage_current_file(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("unstage-hunk")
-                            .label("Unstage hunk")
-                            .ghost()
-                            .disabled(!can_unstage_hunk)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.unstage_current_hunk(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Switch::new("ignore-whitespace")
-                            .label("忽略空白")
-                            .checked(ignore_whitespace)
-                            .on_click(cx.listener(|this, checked, _window, cx| {
-                                this.set_ignore_whitespace(*checked);
-                                cx.notify();
-                            })),
-                    ),
+                    .child(more_menu),
             );
 
         let item_sizes = Rc::new(vec![size(px(0.), row_height); rows_len]);
