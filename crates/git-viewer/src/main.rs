@@ -6,6 +6,7 @@ use anyhow::Context as _;
 use anyhow::{Result, anyhow};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui::{KeyBinding, actions};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, TitleBar, VirtualListScrollHandle, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -13,9 +14,47 @@ use gpui_component::{
     notification::Notification,
     popover::Popover,
     scroll::{Scrollbar, ScrollbarState},
-    switch::Switch,
     v_virtual_list,
 };
+
+const CONTEXT: &str = "GitViewer";
+
+actions!(
+    git_viewer,
+    [
+        Back,
+        Next,
+        Prev,
+        ToggleViewMode,
+        ToggleSplitLayout,
+        ToggleWhitespace,
+        ExpandAll,
+        ApplyEditor,
+        SaveConflict,
+        SaveConflictAndAdd,
+    ]
+);
+
+fn init_keybindings(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("escape", Back, Some(CONTEXT)),
+        KeyBinding::new("alt-n", Next, Some(CONTEXT)),
+        KeyBinding::new("alt-p", Prev, Some(CONTEXT)),
+        KeyBinding::new("alt-v", ToggleViewMode, Some(CONTEXT)),
+        KeyBinding::new("alt-l", ToggleSplitLayout, Some(CONTEXT)),
+        KeyBinding::new("alt-w", ToggleWhitespace, Some(CONTEXT)),
+        KeyBinding::new("alt-e", ExpandAll, Some(CONTEXT)),
+        KeyBinding::new("alt-a", ApplyEditor, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-s", SaveConflict, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-s", SaveConflict, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-s", SaveConflictAndAdd, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-s", SaveConflictAndAdd, Some(CONTEXT)),
+    ]);
+}
 
 #[derive(Clone, Debug)]
 struct FileEntry {
@@ -184,6 +223,7 @@ struct GitViewerApp {
     files: Vec<FileEntry>,
     loading: bool,
     git_available: bool,
+    focus_handle: FocusHandle,
     screen: AppScreen,
     diff_view: Option<DiffViewState>,
     conflict_view: Option<ConflictViewState>,
@@ -200,6 +240,7 @@ impl GitViewerApp {
         let repo_root = detect_repo_root(&cwd);
         let repo_root_for_task = repo_root.clone();
         let git_available = Command::new("git").arg("--version").output().is_ok();
+        let focus_handle = cx.focus_handle().tab_stop(true);
 
         if git_available {
             cx.spawn_in(window, async move |_, window| {
@@ -233,6 +274,7 @@ impl GitViewerApp {
             files: Vec::new(),
             loading: git_available,
             git_available,
+            focus_handle,
             screen: AppScreen::StatusList,
             diff_view: None,
             conflict_view: None,
@@ -244,6 +286,10 @@ impl GitViewerApp {
             view_mode: DiffViewMode::Split,
             status_filter: StatusFilter::All,
         }
+    }
+
+    fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
     }
 
     fn open_demo(&mut self) {
@@ -525,7 +571,9 @@ impl GitViewerApp {
             return;
         }
         self.view_mode = mode;
-        self.rebuild_active_diff_view();
+        if let Some(diff_view) = self.diff_view.as_mut() {
+            diff_view.rebuild_rows(mode);
+        }
     }
 
     fn rebuild_active_diff_view(&mut self) {
@@ -768,6 +816,14 @@ impl GitViewerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if add_to_index && !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法执行 git add"),
+                cx,
+            );
+            return;
+        }
+
         let Some(conflict_view) = self.conflict_view.as_mut() else {
             return;
         };
@@ -1541,6 +1597,7 @@ impl GitViewerApp {
                     Button::new("diff-compare-trigger")
                         .label(compare_label.clone())
                         .ghost()
+                        .tooltip("选择对比目标")
                         .on_click(|_, _, _| {}),
                 )
                 .content(move |_, _window, cx| {
@@ -1638,6 +1695,78 @@ impl GitViewerApp {
             .iter()
             .any(|row| matches!(row, DisplayRow::Fold { .. }));
 
+        let stage_file_label: SharedString = if can_stage {
+            "Stage 文件".into()
+        } else if !git_available {
+            "Stage 文件（git 不可用）".into()
+        } else if !has_file_path {
+            "Stage 文件（demo 不支持）".into()
+        } else {
+            "Stage 文件（无可暂存变更）".into()
+        };
+        let unstage_file_label: SharedString = if can_unstage {
+            "Unstage 文件".into()
+        } else if !git_available {
+            "Unstage 文件（git 不可用）".into()
+        } else if !has_file_path {
+            "Unstage 文件（demo 不支持）".into()
+        } else {
+            "Unstage 文件（无可取消暂存）".into()
+        };
+
+        let stage_hunk_label: SharedString = if can_stage_hunk {
+            "Stage 当前 hunk".into()
+        } else if !git_available {
+            "Stage 当前 hunk（git 不可用）".into()
+        } else if !has_file_path {
+            "Stage 当前 hunk（demo 不支持）".into()
+        } else if !has_hunks {
+            "Stage 当前 hunk（无 hunk）".into()
+        } else if compare_target != CompareTarget::IndexToWorktree {
+            "Stage 当前 hunk（切到 暂存↔工作区）".into()
+        } else {
+            "Stage 当前 hunk（不可用）".into()
+        };
+
+        let unstage_hunk_label: SharedString = if can_unstage_hunk {
+            "Unstage 当前 hunk".into()
+        } else if !git_available {
+            "Unstage 当前 hunk（git 不可用）".into()
+        } else if !has_file_path {
+            "Unstage 当前 hunk（demo 不支持）".into()
+        } else if !has_hunks {
+            "Unstage 当前 hunk（无 hunk）".into()
+        } else if compare_target != CompareTarget::HeadToIndex {
+            "Unstage 当前 hunk（切到 HEAD↔暂存）".into()
+        } else {
+            "Unstage 当前 hunk（不可用）".into()
+        };
+
+        let revert_hunk_label: SharedString = if can_revert_hunk {
+            "Revert 当前 hunk".into()
+        } else if !git_available {
+            "Revert 当前 hunk（git 不可用）".into()
+        } else if !has_file_path {
+            "Revert 当前 hunk（demo 不支持）".into()
+        } else if !has_hunks {
+            "Revert 当前 hunk（无 hunk）".into()
+        } else if compare_target != CompareTarget::IndexToWorktree {
+            "Revert 当前 hunk（切到 暂存↔工作区）".into()
+        } else {
+            "Revert 当前 hunk（不可用）".into()
+        };
+
+        let shortcuts_message: SharedString = concat!(
+            "快捷键：\n",
+            "Esc 返回\n",
+            "Alt+N / Alt+P 下一/上一 hunk\n",
+            "Alt+V 切换 Split/Inline\n",
+            "Alt+L 切换对齐/分栏\n",
+            "Alt+W 忽略空白\n",
+            "Alt+E 展开全部\n",
+        )
+        .into();
+
         let more_menu = {
             let app_for_menu = app.clone();
             Popover::new("diff-more-menu")
@@ -1714,6 +1843,14 @@ impl GitViewerApp {
                             this.expand_all_folds();
                             cx.notify();
                         });
+                    });
+
+                    let shortcuts_message = shortcuts_message.clone();
+                    let show_shortcuts = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        window.push_notification(
+                            Notification::new().message(shortcuts_message.to_string()),
+                            cx,
+                        );
                     });
 
                     let app_for_stage_file = app_for_menu.clone();
@@ -1838,6 +1975,12 @@ impl GitViewerApp {
                             !can_expand_all,
                             expand_all,
                         ))
+                        .child(make_action(
+                            "diff-more-shortcuts",
+                            "快捷键…".into(),
+                            false,
+                            show_shortcuts,
+                        ))
                         .child(div().h(px(1.)).bg(theme.border.alpha(0.4)))
                         .child(
                             div()
@@ -1849,31 +1992,31 @@ impl GitViewerApp {
                         )
                         .child(make_action(
                             "diff-more-stage-file",
-                            "Stage 文件".into(),
+                            stage_file_label.clone(),
                             !can_stage,
                             stage_file,
                         ))
                         .child(make_action(
                             "diff-more-unstage-file",
-                            "Unstage 文件".into(),
+                            unstage_file_label.clone(),
                             !can_unstage,
                             unstage_file,
                         ))
                         .child(make_action(
                             "diff-more-stage-hunk",
-                            "Stage 当前 hunk".into(),
+                            stage_hunk_label.clone(),
                             !can_stage_hunk,
                             stage_hunk,
                         ))
                         .child(make_action(
                             "diff-more-unstage-hunk",
-                            "Unstage 当前 hunk".into(),
+                            unstage_hunk_label.clone(),
                             !can_unstage_hunk,
                             unstage_hunk,
                         ))
                         .child(make_action(
                             "diff-more-revert-hunk",
-                            "Revert 当前 hunk".into(),
+                            revert_hunk_label.clone(),
                             !can_revert_hunk,
                             revert_hunk,
                         ))
@@ -1897,6 +2040,7 @@ impl GitViewerApp {
                         Button::new("back")
                             .label("返回")
                             .ghost()
+                            .tooltip_with_action("返回", &Back, Some(CONTEXT))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.close_diff_view();
                                 cx.notify();
@@ -1945,6 +2089,7 @@ impl GitViewerApp {
                         Button::new("prev-hunk")
                             .label("上一 hunk")
                             .ghost()
+                            .tooltip_with_action("上一 hunk", &Prev, Some(CONTEXT))
                             .disabled(!can_prev_hunk)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.jump_hunk(-1);
@@ -1955,6 +2100,7 @@ impl GitViewerApp {
                         Button::new("next-hunk")
                             .label("下一 hunk")
                             .ghost()
+                            .tooltip_with_action("下一 hunk", &Next, Some(CONTEXT))
                             .disabled(!can_next_hunk)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.jump_hunk(1);
@@ -2111,7 +2257,13 @@ impl GitViewerApp {
             .flex_row()
             .items_center()
             .gap(px(12.))
-            .child(format!("hunk: {hunk_position}"));
+            .child(format!("hunk: {hunk_position}"))
+            .child(
+                div()
+                    .truncate()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Esc 返回 · Alt+N/P 导航 · Alt+W 空白 · Alt+V 视图"),
+            );
         let status_bar = div()
             .flex()
             .flex_row()
@@ -2132,6 +2284,12 @@ impl GitViewerApp {
             let total_rows = rows_len.max(1) as f32;
             let right_inset = px(14.);
             let width = px(8.);
+            let max_markers = 200usize;
+            let marker_step = (hunk_count / max_markers).max(1);
+            let mut marker_indices: Vec<usize> = (0..hunk_count).step_by(marker_step).collect();
+            marker_indices.push(diff_view.current_hunk);
+            marker_indices.sort_unstable();
+            marker_indices.dedup();
 
             let mut ruler = div()
                 .id("diff-scroll-ruler")
@@ -2146,7 +2304,8 @@ impl GitViewerApp {
                 .border_color(theme.border.alpha(0.35))
                 .relative();
 
-            for (hunk_index, row_index) in diff_view.hunk_rows.iter().copied().enumerate() {
+            for hunk_index in marker_indices {
+                let row_index = diff_view.hunk_rows.get(hunk_index).copied().unwrap_or(0);
                 let fraction = (row_index as f32 / total_rows).clamp(0.0, 1.0);
                 let is_current = hunk_index == diff_view.current_hunk;
                 let color = if is_current {
@@ -2216,6 +2375,7 @@ impl GitViewerApp {
             return div().p(px(12.)).child("No conflict view");
         };
 
+        let git_available = self.git_available;
         let two_pane = matches!(self.split_layout, SplitLayout::TwoPane);
         let show_result_editor = conflict_view.show_result_editor;
         let title = conflict_view.title.clone();
@@ -2225,6 +2385,7 @@ impl GitViewerApp {
         let can_next = conflict_view.current_conflict + 1 < conflict_total;
         let has_path = conflict_view.path.is_some();
         let can_save = has_path && conflicts_count == 0;
+        let can_add = can_save && git_available;
         let rows_len = conflict_view.rows.len();
         let scroll_handle = conflict_view.scroll_handle.clone();
         let scroll_state = conflict_view.scroll_state.clone();
@@ -2233,6 +2394,209 @@ impl GitViewerApp {
             "0/0".to_string()
         } else {
             format!("{}/{}", conflict_view.current_conflict + 1, conflict_total)
+        };
+
+        let save_file_label: SharedString = if can_save {
+            "保存到文件".into()
+        } else if has_path {
+            "保存到文件（仍有冲突未解决）".into()
+        } else {
+            "保存到文件（demo 不支持）".into()
+        };
+        let save_add_label: SharedString = if can_add {
+            "保存并 git add".into()
+        } else if !git_available {
+            "保存并 git add（git 不可用）".into()
+        } else if has_path {
+            "保存并 git add（仍有冲突未解决）".into()
+        } else {
+            "保存并 git add（demo 不支持）".into()
+        };
+
+        let save_shortcut = if cfg!(target_os = "macos") {
+            "Cmd+S"
+        } else {
+            "Ctrl+S"
+        };
+        let save_add_shortcut = if cfg!(target_os = "macos") {
+            "Cmd+Shift+S"
+        } else {
+            "Ctrl+Shift+S"
+        };
+        let shortcuts_message: SharedString = format!(
+            "快捷键：\n\
+             Esc 返回\n\
+             Alt+N / Alt+P 下一/上一冲突\n\
+             Alt+L 切换对齐/分栏\n\
+             Alt+A 应用编辑\n\
+             {save_shortcut} 保存（冲突清零后）\n\
+             {save_add_shortcut} 保存并 git add（冲突清零后）\n"
+        )
+        .into();
+
+        let app = cx.entity();
+        let more_menu = {
+            let app_for_menu = app.clone();
+            Popover::new("conflict-more-menu")
+                .appearance(false)
+                .trigger(
+                    Button::new("conflict-more-trigger")
+                        .label("更多")
+                        .ghost()
+                        .tooltip("更多操作")
+                        .on_click(|_, _, _| {}),
+                )
+                .content(move |_, _window, cx| {
+                    let theme = cx.theme();
+                    let popover = cx.entity();
+
+                    let make_action = move |id: &'static str,
+                                            label: SharedString,
+                                            disabled: bool,
+                                            action: Rc<dyn Fn(&mut Window, &mut App) + 'static>| {
+                        let popover = popover.clone();
+                        Button::new(id)
+                            .label(label)
+                            .ghost()
+                            .disabled(disabled)
+                            .w_full()
+                            .on_click({
+                                let action = action.clone();
+                                move |_, window, cx| {
+                                    action(window, cx);
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                            })
+                            .into_any_element()
+                    };
+
+                    let split_label: SharedString = if two_pane {
+                        "分栏: 开".into()
+                    } else {
+                        "分栏: 关".into()
+                    };
+                    let result_label: SharedString = if show_result_editor {
+                        "结果面板: 开".into()
+                    } else {
+                        "结果面板: 关".into()
+                    };
+
+                    let app_for_split = app_for_menu.clone();
+                    let toggle_split = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        app_for_split.update(cx, |this, cx| {
+                            this.split_layout = match this.split_layout {
+                                SplitLayout::Aligned => SplitLayout::TwoPane,
+                                SplitLayout::TwoPane => SplitLayout::Aligned,
+                            };
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_result = app_for_menu.clone();
+                    let toggle_result = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        app_for_result.update(cx, |this, cx| {
+                            if let Some(view) = this.conflict_view.as_mut() {
+                                view.show_result_editor = !view.show_result_editor;
+                            }
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_apply = app_for_menu.clone();
+                    let apply_editor = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_apply.update(cx, |this, cx| {
+                            this.apply_conflict_editor(window, cx);
+                        });
+                    });
+
+                    let shortcuts_message = shortcuts_message.clone();
+                    let show_shortcuts = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        window.push_notification(
+                            Notification::new().message(shortcuts_message.to_string()),
+                            cx,
+                        );
+                    });
+
+                    let app_for_save = app_for_menu.clone();
+                    let save_to_file = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_save.update(cx, |this, cx| {
+                            this.save_conflict_to_working_tree(false, window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_save_add = app_for_menu.clone();
+                    let save_and_add = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_save_add.update(cx, |this, cx| {
+                            this.save_conflict_to_working_tree(true, window, cx);
+                            cx.notify();
+                        });
+                    });
+
+                    div()
+                        .p(px(8.))
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .shadow_md()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .px(px(4.))
+                                .py(px(2.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("视图"),
+                        )
+                        .child(make_action(
+                            "conflict-more-toggle-split",
+                            split_label,
+                            false,
+                            toggle_split,
+                        ))
+                        .child(make_action(
+                            "conflict-more-toggle-result",
+                            result_label,
+                            false,
+                            toggle_result,
+                        ))
+                        .child(make_action(
+                            "conflict-more-apply",
+                            "应用编辑".into(),
+                            !show_result_editor,
+                            apply_editor,
+                        ))
+                        .child(div().h(px(1.)).bg(theme.border.alpha(0.4)))
+                        .child(
+                            div()
+                                .px(px(4.))
+                                .py(px(2.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("保存"),
+                        )
+                        .child(make_action(
+                            "conflict-more-save",
+                            save_file_label.clone(),
+                            !can_save,
+                            save_to_file,
+                        ))
+                        .child(make_action(
+                            "conflict-more-save-add",
+                            save_add_label.clone(),
+                            !can_add,
+                            save_and_add,
+                        ))
+                        .child(make_action(
+                            "conflict-more-shortcuts",
+                            "快捷键…".into(),
+                            false,
+                            show_shortcuts,
+                        ))
+                })
         };
 
         let toolbar = div()
@@ -2248,12 +2612,16 @@ impl GitViewerApp {
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
-                    .child(Button::new("conflict-back").label("返回").ghost().on_click(
-                        cx.listener(|this, _, _window, cx| {
-                            this.close_conflict_view();
-                            cx.notify();
-                        }),
-                    ))
+                    .child(
+                        Button::new("conflict-back")
+                            .label("返回")
+                            .ghost()
+                            .tooltip_with_action("返回", &Back, Some(CONTEXT))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_conflict_view();
+                                cx.notify();
+                            })),
+                    )
                     .child(div().flex_1().min_w(px(0.)).truncate().child(title)),
             )
             .child(
@@ -2268,6 +2636,7 @@ impl GitViewerApp {
                         Button::new("conflict-prev")
                             .label("上一冲突")
                             .ghost()
+                            .tooltip_with_action("上一冲突", &Prev, Some(CONTEXT))
                             .disabled(!can_prev)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.jump_conflict(-1);
@@ -2278,56 +2647,14 @@ impl GitViewerApp {
                         Button::new("conflict-next")
                             .label("下一冲突")
                             .ghost()
+                            .tooltip_with_action("下一冲突", &Next, Some(CONTEXT))
                             .disabled(!can_next)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.jump_conflict(1);
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        Switch::new("conflict-two-pane")
-                            .label("分栏")
-                            .checked(two_pane)
-                            .on_click(cx.listener(|this, checked, _window, cx| {
-                                this.split_layout = if *checked {
-                                    SplitLayout::TwoPane
-                                } else {
-                                    SplitLayout::Aligned
-                                };
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Switch::new("conflict-result-editor")
-                            .label("结果")
-                            .checked(show_result_editor)
-                            .on_click(cx.listener(|this, checked, _window, cx| {
-                                if let Some(view) = this.conflict_view.as_mut() {
-                                    view.show_result_editor = *checked;
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("conflict-save")
-                            .label("保存到文件")
-                            .ghost()
-                            .disabled(!can_save)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_conflict_to_working_tree(false, window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("conflict-save-add")
-                            .label("保存并 git add")
-                            .primary()
-                            .disabled(!can_save)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_conflict_to_working_tree(true, window, cx);
-                                cx.notify();
-                            })),
-                    ),
+                    .child(more_menu),
             );
 
         let item_sizes = Rc::new(vec![size(px(0.), row_height); rows_len]);
@@ -2506,13 +2833,25 @@ impl GitViewerApp {
                 conflict_view.path.as_deref().unwrap_or("<demo>")
             )))
             .child(format!("未解决: {conflicts_count}"));
-        let status_right = div().child(if can_save {
-            "可保存并标记已解决".to_string()
-        } else if has_path {
-            "仍有冲突未解决（编辑后点“应用”）".to_string()
-        } else {
-            "demo（不可保存）".to_string()
-        });
+        let status_hint = div()
+            .truncate()
+            .text_color(cx.theme().muted_foreground)
+            .child("Esc 返回 · Alt+N/P 导航 · Alt+A 应用 · Cmd/Ctrl+S 保存");
+        let status_right = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .child(if can_add {
+                "可保存并标记已解决".to_string()
+            } else if can_save {
+                "可保存（git 不可用，无法标记已解决）".to_string()
+            } else if has_path {
+                "仍有冲突未解决（编辑后点“应用”）".to_string()
+            } else {
+                "demo（不可保存）".to_string()
+            })
+            .child(status_hint);
         let status_bar = div()
             .flex()
             .flex_row()
@@ -2533,6 +2872,13 @@ impl GitViewerApp {
             let total_rows = rows_len.max(1) as f32;
             let right_inset = px(14.);
             let width = px(8.);
+            let conflict_total = conflict_view.conflict_rows.len();
+            let max_markers = 200usize;
+            let marker_step = (conflict_total / max_markers).max(1);
+            let mut marker_indices: Vec<usize> = (0..conflict_total).step_by(marker_step).collect();
+            marker_indices.push(conflict_view.current_conflict);
+            marker_indices.sort_unstable();
+            marker_indices.dedup();
 
             let mut ruler = div()
                 .id("conflict-scroll-ruler")
@@ -2547,9 +2893,12 @@ impl GitViewerApp {
                 .border_color(theme.border.alpha(0.35))
                 .relative();
 
-            for (conflict_index, row_index) in
-                conflict_view.conflict_rows.iter().copied().enumerate()
-            {
+            for conflict_index in marker_indices {
+                let row_index = conflict_view
+                    .conflict_rows
+                    .get(conflict_index)
+                    .copied()
+                    .unwrap_or(0);
                 let fraction = (row_index as f32 / total_rows).clamp(0.0, 1.0);
                 let is_current = conflict_index == conflict_view.current_conflict;
                 let color = if is_current {
@@ -3435,11 +3784,105 @@ impl GitViewerApp {
 
 impl Render for GitViewerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.screen {
+        let content = match self.screen {
             AppScreen::StatusList => self.render_status_list(window, cx).into_any_element(),
             AppScreen::DiffView => self.render_diff_view(window, cx).into_any_element(),
             AppScreen::ConflictView => self.render_conflict_view(window, cx).into_any_element(),
-        }
+        };
+
+        div()
+            .id("git-viewer-root")
+            .size_full()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus_handle)
+            .tab_index(0)
+            .when(!window.is_inspector_picking(cx), |this| {
+                this.on_action(cx.listener(|this, _: &Back, window, cx| {
+                    match this.screen {
+                        AppScreen::DiffView => this.close_diff_view(),
+                        AppScreen::ConflictView => this.close_conflict_view(),
+                        AppScreen::StatusList => {}
+                    }
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Next, _window, cx| {
+                    match this.screen {
+                        AppScreen::DiffView => this.jump_hunk(1),
+                        AppScreen::ConflictView => this.jump_conflict(1),
+                        AppScreen::StatusList => {}
+                    }
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Prev, _window, cx| {
+                    match this.screen {
+                        AppScreen::DiffView => this.jump_hunk(-1),
+                        AppScreen::ConflictView => this.jump_conflict(-1),
+                        AppScreen::StatusList => {}
+                    }
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ToggleViewMode, _window, cx| {
+                    if matches!(this.screen, AppScreen::DiffView) {
+                        let next = match this.view_mode {
+                            DiffViewMode::Split => DiffViewMode::Inline,
+                            DiffViewMode::Inline => DiffViewMode::Split,
+                        };
+                        this.set_view_mode(next);
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ToggleSplitLayout, _window, cx| {
+                    match this.screen {
+                        AppScreen::DiffView => {
+                            if this.view_mode == DiffViewMode::Inline {
+                                return;
+                            }
+                        }
+                        AppScreen::ConflictView => {}
+                        AppScreen::StatusList => return,
+                    }
+
+                    this.split_layout = match this.split_layout {
+                        SplitLayout::Aligned => SplitLayout::TwoPane,
+                        SplitLayout::TwoPane => SplitLayout::Aligned,
+                    };
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ToggleWhitespace, _window, cx| {
+                    if matches!(this.screen, AppScreen::DiffView) {
+                        let next = !this.diff_options.ignore_whitespace;
+                        this.set_ignore_whitespace(next);
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ExpandAll, _window, cx| {
+                    if matches!(this.screen, AppScreen::DiffView) {
+                        this.expand_all_folds();
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ApplyEditor, window, cx| {
+                    if matches!(this.screen, AppScreen::ConflictView) {
+                        this.apply_conflict_editor(window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &SaveConflict, window, cx| {
+                    if matches!(this.screen, AppScreen::ConflictView) {
+                        this.save_conflict_to_working_tree(false, window, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(
+                    |this, _: &SaveConflictAndAdd, window, cx| {
+                        if matches!(this.screen, AppScreen::ConflictView) {
+                            this.save_conflict_to_working_tree(true, window, cx);
+                            cx.notify();
+                        }
+                    },
+                ))
+            })
+            .child(content)
     }
 }
 
@@ -3565,13 +4008,13 @@ impl DiffViewState {
         options: DiffViewOptions,
         view_mode: DiffViewMode,
     ) -> Self {
-        let (diff_model, old_lines, new_lines, rows) = build_display_rows(
+        let (diff_model, old_lines, new_lines) = build_diff_model(
             &old_text,
             &new_text,
             options.ignore_whitespace,
             options.context_lines,
-            view_mode,
         );
+        let rows = build_display_rows_from_model(&diff_model, &old_lines, &new_lines, view_mode);
         let mut this = Self {
             title,
             path,
@@ -3592,6 +4035,16 @@ impl DiffViewState {
         };
         this.recalc_hunk_rows();
         this
+    }
+
+    fn rebuild_rows(&mut self, view_mode: DiffViewMode) {
+        self.rows = build_display_rows_from_model(
+            &self.diff_model,
+            &self.old_lines,
+            &self.new_lines,
+            view_mode,
+        );
+        self.recalc_hunk_rows();
     }
 
     fn recalc_hunk_rows(&mut self) {
@@ -3741,18 +4194,12 @@ fn conflict_demo_text() -> String {
     .to_string()
 }
 
-fn build_display_rows(
+fn build_diff_model(
     old_text: &str,
     new_text: &str,
     ignore_whitespace: bool,
     context_lines: usize,
-    view_mode: DiffViewMode,
-) -> (
-    diffview::DiffModel,
-    Vec<String>,
-    Vec<String>,
-    Vec<DisplayRow>,
-) {
+) -> (diffview::DiffModel, Vec<String>, Vec<String>) {
     let old_doc = diffview::Document::from_str(old_text);
     let new_doc = diffview::Document::from_str(new_text);
     let old_lines = old_doc.lines();
@@ -3766,6 +4213,15 @@ fn build_display_rows(
         },
     );
 
+    (model, old_lines, new_lines)
+}
+
+fn build_display_rows_from_model(
+    model: &diffview::DiffModel,
+    old_lines: &[String],
+    new_lines: &[String],
+    view_mode: DiffViewMode,
+) -> Vec<DisplayRow> {
     let mut rows = Vec::new();
     let mut old_pos = 0usize;
     let mut new_pos = 0usize;
@@ -3873,7 +4329,7 @@ fn build_display_rows(
         });
     }
 
-    (model, old_lines, new_lines, rows)
+    rows
 }
 
 fn build_conflict_rows(text: &str, conflicts: &[diffview::ConflictRegion]) -> Vec<ConflictRow> {
@@ -4385,6 +4841,7 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+        init_keybindings(cx);
         cx.activate(true);
 
         cx.spawn(async move |cx| {
@@ -4396,6 +4853,8 @@ fn main() {
                 |window, cx| {
                     window.set_window_title("git-viewer");
                     let view = cx.new(|cx| GitViewerApp::new(window, cx));
+                    let handle = view.read(cx).focus_handle();
+                    window.focus(&handle);
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )?;
