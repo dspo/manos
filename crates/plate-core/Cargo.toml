@@ -1,0 +1,12 @@
+[package]
+name = "gpui-plate-core"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

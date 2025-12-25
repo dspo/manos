@@ -1,0 +1,22 @@
+{
+  "schema": "gpui-plate",
+  "version": 1,
+  "document": {
+    "children": [
+      {
+        "node": "element",
+        "kind": "paragraph",
+        "attrs": {},
+        "children": [
+          {
+            "node": "text",
+            "text": "这是新版本的 editor。",
+            "marks": {
+              "bold": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

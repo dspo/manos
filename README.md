@@ -11,4 +11,5 @@ This repository is intended to host additional GPUI components about a Richtext 
 
 - Story app: `cargo run`
 - Rich text example: `cargo run --example richtext`
+- Rich text (next core): `cargo run --example richtext_next`
 - Plate toolbar buttons: `cargo run --example plate_toolbar_buttons`

@@ -2267,6 +2267,7 @@ dependencies = [
  "gpui-component",
  "gpui-manos-components",
  "gpui-manos-plate",
+ "gpui-plate-core",
  "serde_json",
 ]
 
@@ -2279,6 +2280,14 @@ dependencies = [
  "serde",
  "serde_json",
  "zed-sum-tree",
+]
+
+[[package]]
+name = "gpui-plate-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

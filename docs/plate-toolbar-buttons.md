@@ -2,6 +2,9 @@
 
 本教程介绍如何在本仓库中使用/扩展 `plate.js` 风格的 Toolbar Buttons，并说明这些组件是如何用 `gpui + gpui-component` 的方式组织起来的。
 
+这些组件也将作为 RichText 编辑器“工具层插件（Tooling Plugins）”的重要组成部分；编辑器未来架构与插件系统计划见：
+- [RichText：插件系统与未来架构计划（激进重构版）](richtext-plugin-system-plan.md)
+
 ## 运行预览
 
 本仓库提供了一个集中预览页面：

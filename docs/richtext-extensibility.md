@@ -1,4 +1,12 @@
-# RichText Editor 扩展性总结
+# RichText Editor：扩展性与重构方向（面向未来）
+
+本文包含两部分：
+
+1. 当前实现（`crates/rich_text`）在不改模型的前提下“已经能做/容易做什么”（用于理解现状与能力边界）
+2. 本项目的目标方向：直接重构为面向未来最佳实践的 **树模型 + 操作（operations）+ normalize + 插件系统** 架构（不再规划 v1 过渡态）
+
+详细的目标架构与落地计划见：
+- [RichText 插件系统与未来架构计划](richtext-plugin-system-plan.md)
 
 ## 现状：哪些扩展“已经可做”
 
@@ -7,8 +15,11 @@
 - **对齐（左/中/右）**：可在 `BlockFormat` 增加 `align: TextAlign`，渲染 block wrapper 时设置 `.text_left()/.text_center()/.text_right()`（或对应 `TextStyle`）；命中测试/光标位置跟随 `TextLayout` 一起正确更新。
 - **行距/段距**：行距可通过每块 `.line_height(...)`（`TextStyle` 原生支持），段距可通过 block 容器 `mt/mb` 或 `gap` 实现。
 
-## 当前模型的边界（需要重构的方向）
+## 现状模型的边界（也是我们选择“直接重构”的原因）
 
-- **文档结构（已升级为节点树）**：现在内部是 `RichTextDocument { blocks: Vec<BlockNode> }`，每个 `BlockNode` 有 `format`（块属性）与 `inlines`（`InlineNode::Text(TextNode { text, style })`）。编辑时仍然用“`\n` 连接 blocks”的扁平文本做 hit-test/IME，节点树是富文本的真实来源。
-- **更深层的 Slate/Plate 能力**：目前节点树是“block -> text leaf”的两层结构，足以支撑大多数 inline marks + 简单 block。要做到 Plate 那种嵌套列表、表格、图片/多媒体（void nodes）、块拖拽、schema/normalize 管线等，需要把 `InlineNode` 扩展为真正的 `Node { Element | Text | Void }` 并引入 Path/Operation/Normalize 体系。
-- **序列化/持久化**：节点树已经能表达样式，但还需要定义稳定的存储格式（建议做 versioned JSON），并提供与 Slate JSON 的互转层（因为当前结构天然接近 Slate 的 “element children + text leaf marks” 形态）。
+- **结构表达能力有限**：当前是“按行 blocks + 文本 leaf”的两层结构，缺少通用的 `Element children` 递归结构，难以优雅支持 table、图片/mention（inline void）、复杂嵌套、块级/行内级 schema 约束。
+- **编辑语义难以组合**：缺少 operation（InsertNode/RemoveNode/SplitNode/MergeNode/SetMark/SetAttr…）这一层，导致复杂能力只能写成特例逻辑，插件之间也难以组合、复用与覆写。
+- **normalize 体系不完整**：目前主要依靠局部 normalize（如合并相邻同样式的 TextNode）与手写特例来维持结构合法，难以扩展到复杂节点类型与跨节点约束。
+- **序列化可扩展性不足**：现有 Slate JSON 互转对未知类型缺少“无损保留”的兜底策略；当插件体系出现后，必须保证未启用插件时也不丢数据（round-trip）。
+
+结论：由于项目早期且无历史负担，我们不再规划“先做一个轻量 v1 插件化再升级”的路线，而是直接以未来目标架构为准绳重构；允许的“中间态”仅用于技术验证，并且应当与最终架构同构（例如在独立模块/独立 crate 内完成闭环后再替换旧实现）。
