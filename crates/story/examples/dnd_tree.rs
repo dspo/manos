@@ -1,10 +1,11 @@
 use gpui::*;
 use gpui_component::Root;
 
+use gpui_manos_components::assets::ExtrasAssetSource;
 use gpui_manos_components_story::dnd_tree::DndTreeExample;
 
 fn main() {
-    let app = Application::new();
+    let app = Application::new().with_assets(ExtrasAssetSource::new());
 
     app.run(move |cx| {
         gpui_component::init(cx);

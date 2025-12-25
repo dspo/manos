@@ -31,25 +31,18 @@ struct DndTreeDrag {
 
 struct DragGhost {
     label: SharedString,
-    cursor_offset: Point<Pixels>,
 }
 
 impl DragGhost {
-    fn new(label: SharedString, cursor_offset: Point<Pixels>) -> Self {
-        Self {
-            label,
-            cursor_offset,
-        }
+    fn new(label: SharedString) -> Self {
+        Self { label }
     }
 }
 
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let x = (self.cursor_offset.x - px(12.)).max(px(0.));
-        let y = (self.cursor_offset.y - px(12.)).max(px(0.));
-
-        let card = div()
+        div()
             .px(px(10.))
             .py(px(6.))
             .rounded(px(8.))
@@ -59,12 +52,7 @@ impl Render for DragGhost {
             .shadow_md()
             .text_color(theme.popover_foreground)
             .text_sm()
-            .child(self.label.clone());
-
-        div()
-            .flex_col()
-            .child(div().h(y))
-            .child(div().flex_row().child(div().w(x)).child(card))
+            .child(self.label.clone())
     }
 }
 
@@ -93,17 +81,19 @@ impl DndTreeItem {
             state: Rc::new(RefCell::new(DndTreeItemState {
                 expanded: false,
                 disabled: false,
-                can_accept_children: true,
+                can_accept_children: false,
             })),
         }
     }
 
     pub fn child(mut self, child: DndTreeItem) -> Self {
+        self.state.borrow_mut().can_accept_children = true;
         self.children.push(child);
         self
     }
 
     pub fn children(mut self, children: impl Into<Vec<DndTreeItem>>) -> Self {
+        self.state.borrow_mut().can_accept_children = true;
         self.children.extend(children.into());
         self
     }
@@ -120,7 +110,8 @@ impl DndTreeItem {
 
     /// Control whether this node can accept other nodes as its children during drop.
     ///
-    /// Defaults to `true`.
+    /// Defaults to `false`. When you add a child via [`DndTreeItem::child`] or
+    /// [`DndTreeItem::children`], it is automatically set to `true`.
     pub fn accept_children(self, accept_children: bool) -> Self {
         self.state.borrow_mut().can_accept_children = accept_children;
         self
@@ -192,7 +183,6 @@ impl DndTreeEntry {
 pub enum DndTreeDropTarget {
     Before,
     After,
-    Inside,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -230,16 +220,9 @@ pub struct DndTreeRowState {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum DropPreviewTarget {
-    Before { target_id: SharedString },
-    After { target_id: SharedString },
-    Inside { target_id: SharedString },
-    Root { index: usize },
-}
-
-#[derive(Clone, Debug, PartialEq)]
 struct DropPreview {
-    target: DropPreviewTarget,
+    gap_index: usize,
+    depth: usize,
     highlight_ix: Option<usize>,
     highlight_target: Option<DndTreeDropTarget>,
     line_y: Option<Pixels>,
@@ -269,9 +252,6 @@ pub struct DndTreeState {
     dragged_ix: Option<usize>,
     drop_preview: Option<DropPreview>,
     drag_start_mouse_position: Option<Point<Pixels>>,
-    drag_origin_x: Option<Pixels>,
-    drag_start_x_in_list: Option<Pixels>,
-    drag_start_depth: Option<usize>,
     render_item:
         Rc<dyn Fn(usize, &DndTreeEntry, DndTreeRowState, &mut Window, &mut App) -> ListItem>,
 }
@@ -283,7 +263,7 @@ impl DndTreeState {
             root_items: Vec::new(),
             entries: Vec::new(),
             indent_width: px(16.),
-            indent_offset: px(0.),
+            indent_offset: px(12.),
             indicator_style: DndTreeIndicatorStyle::default(),
             scrollbar_state: ScrollbarState::default(),
             scroll_handle: UniformListScrollHandle::default(),
@@ -293,9 +273,6 @@ impl DndTreeState {
             dragged_ix: None,
             drop_preview: None,
             drag_start_mouse_position: None,
-            drag_origin_x: None,
-            drag_start_x_in_list: None,
-            drag_start_depth: None,
             render_item: Rc::new(|_, _, _, _, _| ListItem::new("dnd-tree-empty")),
         }
     }
@@ -367,9 +344,6 @@ impl DndTreeState {
         self.dragged_id = None;
         self.dragged_ix = None;
         self.drag_start_mouse_position = None;
-        self.drag_origin_x = None;
-        self.drag_start_x_in_list = None;
-        self.drag_start_depth = None;
         self.rebuild_entries();
         cx.notify();
     }
@@ -569,24 +543,13 @@ impl DndTreeState {
         cx.notify();
     }
 
-    fn on_drag_start(
-        &mut self,
-        drag: &DndTreeDrag,
-        cursor_offset: Point<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_drag_start(&mut self, drag: &DndTreeDrag, window: &mut Window, cx: &mut Context<Self>) {
         self.dragged_id = Some(drag.item_id.clone());
         self.dragged_ix = self
             .entries
             .iter()
             .position(|entry| entry.item().id == drag.item_id);
         self.drag_start_mouse_position = Some(window.mouse_position());
-        self.drag_origin_x = Some(window.mouse_position().x - cursor_offset.x);
-        self.drag_start_x_in_list = Some(cursor_offset.x);
-        self.drag_start_depth = self
-            .dragged_ix
-            .and_then(|ix| self.entries.get(ix).map(|entry| entry.depth()));
         self.drop_preview = None;
         self.selected_ix = self
             .entries
@@ -622,13 +585,16 @@ impl DndTreeState {
             return;
         }
 
-        let origin_x = self.drag_origin_x.unwrap_or(list_bounds.origin.x);
-        let x_in_list = mouse_position.x - origin_x;
-        let desired_depth = self.desired_depth(x_in_list);
         let (delta_x, delta_y) = self
             .drag_start_mouse_position
             .map(|start| (mouse_position.x - start.x, mouse_position.y - start.y))
             .unwrap_or((Pixels::ZERO, Pixels::ZERO));
+        let start_depth = self
+            .dragged_ix
+            .and_then(|ix| self.entries.get(ix))
+            .map(|entry| entry.depth())
+            .unwrap_or(0);
+        let desired_depth = self.desired_depth(start_depth, delta_x);
         let delta_x_f32: f32 = delta_x.into();
         let delta_y_f32: f32 = delta_y.into();
         let is_horizontal_gesture = delta_x_f32.abs() > HORIZONTAL_GESTURE_THRESHOLD_PX
@@ -637,11 +603,12 @@ impl DndTreeState {
         let new_preview = (|| {
             if self.entries.is_empty() {
                 return Some(DropPreview {
-                    target: DropPreviewTarget::Root { index: 0 },
+                    gap_index: 0,
+                    depth: 0,
                     highlight_ix: None,
                     highlight_target: None,
                     line_y: Some(px(0.)),
-                    line_x: Some(self.indent_offset + self.indent_width * desired_depth),
+                    line_x: Some(self.indent_offset),
                 });
             }
 
@@ -668,7 +635,6 @@ impl DndTreeState {
                 return None;
             }
 
-            let entry = self.entries.get(hovered_ix)?;
             let y_in_row = (y_in_content - item_height * hovered_ix).max(px(0.));
             let drop_target = if y_in_row < item_height / 2.0 {
                 DndTreeDropTarget::Before
@@ -676,33 +642,36 @@ impl DndTreeState {
                 DndTreeDropTarget::After
             };
 
-            let dragged_id = self.dragged_id.as_ref()?;
-            if drop_target == DndTreeDropTarget::After
-                && (event.event.modifiers.alt || desired_depth > entry.depth())
-                && entry.can_accept_children()
-                && *dragged_id != entry.item().id
-            {
-                return Some(DropPreview {
-                    target: DropPreviewTarget::Inside {
-                        target_id: entry.item().id.clone(),
-                    },
-                    highlight_ix: Some(hovered_ix),
-                    highlight_target: Some(DndTreeDropTarget::Inside),
-                    line_y: Some(item_height * self.subtree_end_ix(hovered_ix) + scroll_y),
-                    line_x: Some(self.indent_offset + self.indent_width * (entry.depth() + 1)),
-                });
-            }
-
             let gap_index = match drop_target {
                 DndTreeDropTarget::Before => hovered_ix,
                 DndTreeDropTarget::After => hovered_ix.saturating_add(1),
-                DndTreeDropTarget::Inside => unreachable!("handled above"),
             };
 
             let mut preview = self.compute_drop_preview_for_gap(gap_index, desired_depth)?;
             if preview.highlight_ix.is_none() {
-                preview.highlight_ix = Some(hovered_ix);
-                preview.highlight_target = Some(drop_target);
+                let hovered_depth = self.entries.get(hovered_ix).map(|entry| entry.depth());
+                if hovered_depth.is_some_and(|hovered_depth| preview.depth > hovered_depth)
+                    && preview.depth > 0
+                    && preview.gap_index > 0
+                {
+                    let mut parent_ix = None;
+                    for ix in (0..preview.gap_index).rev() {
+                        if self.entries[ix].depth() == preview.depth - 1 {
+                            parent_ix = Some(ix);
+                            break;
+                        }
+                    }
+                    if let Some(parent_ix) = parent_ix {
+                        preview.highlight_ix = Some(parent_ix);
+                        preview.highlight_target = Some(DndTreeDropTarget::After);
+                    } else {
+                        preview.highlight_ix = Some(hovered_ix);
+                        preview.highlight_target = Some(drop_target);
+                    }
+                } else {
+                    preview.highlight_ix = Some(hovered_ix);
+                    preview.highlight_target = Some(drop_target);
+                }
             }
             Some(preview)
         })();
@@ -713,19 +682,20 @@ impl DndTreeState {
         }
     }
 
-    fn desired_depth(&self, x_in_list: Pixels) -> usize {
-        let base_depth = self.drag_start_depth.unwrap_or(0) as i32;
-        let start_x = self.drag_start_x_in_list.unwrap_or(x_in_list);
+    fn desired_depth(&self, start_depth: usize, delta_x: Pixels) -> usize {
         let indent_width_f32: f32 = self.indent_width.into();
         if !indent_width_f32.is_finite() || indent_width_f32 <= 0.0 {
-            return base_depth.max(0) as usize;
+            return start_depth;
         }
 
-        let delta_x = x_in_list - start_x;
-        // Snap depth changes only after crossing a full indent width, to avoid jittery
-        // "off-by-one" previews from small horizontal drift.
-        let delta_depth = (delta_x / self.indent_width).trunc() as i32;
-        (base_depth + delta_depth).max(0) as usize
+        let delta_x_f32: f32 = delta_x.into();
+        if !delta_x_f32.is_finite() {
+            return start_depth;
+        }
+
+        let depth_delta = (delta_x_f32 / indent_width_f32).trunc() as isize;
+        let desired_depth = start_depth as isize + depth_delta;
+        desired_depth.max(0) as usize
     }
 
     fn compute_horizontal_gesture_preview(
@@ -747,14 +717,14 @@ impl DndTreeState {
                 .iter()
                 .position(|entry| entry.item().id == parent_id)?;
             let parent_depth = self.entries.get(parent_ix)?.depth();
+            let gap_index = self.subtree_end_ix(parent_ix);
 
             return Some(DropPreview {
-                target: DropPreviewTarget::After {
-                    target_id: parent_id,
-                },
+                gap_index,
+                depth: parent_depth,
                 highlight_ix: Some(parent_ix),
                 highlight_target: Some(DndTreeDropTarget::After),
-                line_y: Some(item_height * self.subtree_end_ix(parent_ix) + scroll_y),
+                line_y: Some(item_height * gap_index + scroll_y),
                 line_x: Some(self.indent_offset + self.indent_width * parent_depth),
             });
         }
@@ -772,14 +742,15 @@ impl DndTreeState {
                         return None;
                     }
 
+                    let gap_index = ix + 1;
+                    let depth = entry.depth() + 1;
                     return Some(DropPreview {
-                        target: DropPreviewTarget::Inside {
-                            target_id: entry.item().id.clone(),
-                        },
+                        gap_index,
+                        depth,
                         highlight_ix: Some(ix),
-                        highlight_target: Some(DndTreeDropTarget::Inside),
-                        line_y: Some(item_height * self.subtree_end_ix(ix) + scroll_y),
-                        line_x: Some(self.indent_offset + self.indent_width * (entry.depth() + 1)),
+                        highlight_target: Some(DndTreeDropTarget::After),
+                        line_y: Some(item_height * gap_index + scroll_y),
+                        line_x: Some(self.indent_offset + self.indent_width * depth),
                     });
                 }
 
@@ -833,7 +804,8 @@ impl DndTreeState {
         let item_count = self.entries.len();
         if item_count == 0 {
             return Some(DropPreview {
-                target: DropPreviewTarget::Root { index: 0 },
+                gap_index: 0,
+                depth: 0,
                 highlight_ix: None,
                 highlight_target: None,
                 line_y: Some(px(0.)),
@@ -869,13 +841,12 @@ impl DndTreeState {
                         .is_some_and(|id| *id == prev.item().id)
                 {
                     return Some(DropPreview {
-                        target: DropPreviewTarget::Inside {
-                            target_id: prev.item().id.clone(),
-                        },
+                        gap_index,
+                        depth: desired_depth,
                         highlight_ix: Some(gap_index - 1),
-                        highlight_target: Some(DndTreeDropTarget::Inside),
-                        line_y: Some(item_height * self.subtree_end_ix(gap_index - 1) + scroll_y),
-                        line_x: Some(self.indent_offset + self.indent_width * (prev.depth() + 1)),
+                        highlight_target: Some(DndTreeDropTarget::After),
+                        line_y: Some(item_height * gap_index + scroll_y),
+                        line_x: Some(self.indent_offset + self.indent_width * desired_depth),
                     });
                 }
 
@@ -907,48 +878,28 @@ impl DndTreeState {
 
         let subtree_end_ix = |start_ix: usize| self.subtree_end_ix(start_ix);
 
-        let (target, _target_ix, line_y) = if gap_index == 0 {
-            let first = self.entries.first()?;
-            (
-                DropPreviewTarget::Before {
-                    target_id: first.item().id.clone(),
-                },
-                0,
-                scroll_y,
-            )
+        let gap_index = if gap_index == 0 {
+            0
         } else if gap_index >= item_count {
             let anchor_ix = find_prev_same_depth_ix(item_count - 1, desired_depth)?;
-            (
-                DropPreviewTarget::After {
-                    target_id: self.entries[anchor_ix].item().id.clone(),
-                },
-                anchor_ix,
-                item_height * subtree_end_ix(anchor_ix) + scroll_y,
-            )
+            subtree_end_ix(anchor_ix)
         } else {
             match find_next_boundary_ix(gap_index, desired_depth) {
-                Some(boundary_ix) if self.entries[boundary_ix].depth() == desired_depth => (
-                    DropPreviewTarget::Before {
-                        target_id: self.entries[boundary_ix].item().id.clone(),
-                    },
-                    boundary_ix,
-                    item_height * boundary_ix + scroll_y,
-                ),
+                Some(boundary_ix) if self.entries[boundary_ix].depth() == desired_depth => {
+                    boundary_ix
+                }
                 _ => {
                     let anchor_ix = find_prev_same_depth_ix(gap_index - 1, desired_depth)?;
-                    (
-                        DropPreviewTarget::After {
-                            target_id: self.entries[anchor_ix].item().id.clone(),
-                        },
-                        anchor_ix,
-                        item_height * subtree_end_ix(anchor_ix) + scroll_y,
-                    )
+                    subtree_end_ix(anchor_ix)
                 }
             }
         };
 
+        let line_y = item_height * gap_index + scroll_y;
+
         Some(DropPreview {
-            target,
+            gap_index,
+            depth: desired_depth,
             highlight_ix: None,
             highlight_target: None,
             line_y: Some(line_y),
@@ -956,40 +907,34 @@ impl DndTreeState {
         })
     }
 
-    fn apply_drop_target(
+    fn apply_drop_preview(
         &mut self,
         drag: &DndTreeDrag,
-        target: DropPreviewTarget,
+        preview: DropPreview,
         cx: &mut Context<Self>,
     ) {
+        let Some((dest_parent_id, mut dest_index, expand_parent)) =
+            compute_destination_from_gap_depth(
+                &self.root_items,
+                &self.entries,
+                &drag.item_id,
+                preview.gap_index,
+                preview.depth,
+            )
+        else {
+            self.drop_preview = None;
+            self.dragged_id = None;
+            self.dragged_ix = None;
+            self.drag_start_mouse_position = None;
+            cx.notify();
+            return;
+        };
+
         let Some(removed) = remove_item_recursive(&mut self.root_items, &drag.item_id, None) else {
             self.drop_preview = None;
             self.dragged_id = None;
             self.dragged_ix = None;
             self.drag_start_mouse_position = None;
-            self.drag_origin_x = None;
-            self.drag_start_x_in_list = None;
-            self.drag_start_depth = None;
-            cx.notify();
-            return;
-        };
-
-        let Some((dest_parent_id, dest_index, expand_parent)) =
-            compute_destination(&self.root_items, &removed.item, &target)
-        else {
-            insert_item_at(
-                &mut self.root_items,
-                removed.parent_id.as_ref(),
-                removed.index,
-                removed.item,
-            );
-            self.drop_preview = None;
-            self.dragged_id = None;
-            self.dragged_ix = None;
-            self.drag_start_mouse_position = None;
-            self.drag_origin_x = None;
-            self.drag_start_x_in_list = None;
-            self.drag_start_depth = None;
             cx.notify();
             return;
         };
@@ -1007,11 +952,12 @@ impl DndTreeState {
             self.dragged_id = None;
             self.dragged_ix = None;
             self.drag_start_mouse_position = None;
-            self.drag_origin_x = None;
-            self.drag_start_x_in_list = None;
-            self.drag_start_depth = None;
             cx.notify();
             return;
+        }
+
+        if dest_parent_id.as_ref() == removed.parent_id.as_ref() && dest_index > removed.index {
+            dest_index = dest_index.saturating_sub(1);
         }
 
         insert_item_at(
@@ -1035,9 +981,6 @@ impl DndTreeState {
         self.dragged_id = None;
         self.dragged_ix = None;
         self.drag_start_mouse_position = None;
-        self.drag_origin_x = None;
-        self.drag_start_x_in_list = None;
-        self.drag_start_depth = None;
         cx.notify();
     }
 
@@ -1054,9 +997,6 @@ impl DndTreeState {
             self.dragged_id = None;
             self.dragged_ix = None;
             self.drag_start_mouse_position = None;
-            self.drag_origin_x = None;
-            self.drag_start_x_in_list = None;
-            self.drag_start_depth = None;
             cx.notify();
             return;
         }
@@ -1064,7 +1004,7 @@ impl DndTreeState {
         let Some(preview) = self.drop_preview.clone() else {
             return;
         };
-        self.apply_drop_target(drag, preview.target, cx);
+        self.apply_drop_preview(drag, preview, cx);
     }
 
     fn on_drop_after_last(
@@ -1079,9 +1019,6 @@ impl DndTreeState {
             self.dragged_id = None;
             self.dragged_ix = None;
             self.drag_start_mouse_position = None;
-            self.drag_origin_x = None;
-            self.drag_start_x_in_list = None;
-            self.drag_start_depth = None;
             cx.notify();
             return;
         }
@@ -1090,7 +1027,7 @@ impl DndTreeState {
             return;
         };
 
-        self.apply_drop_target(drag, preview.target, cx);
+        self.apply_drop_preview(drag, preview, cx);
     }
 
     // Note: Drop is handled per-row (`on_drop_on_row`) and on the list container
@@ -1105,9 +1042,6 @@ impl Render for DndTreeState {
             self.dragged_id = None;
             self.dragged_ix = None;
             self.drag_start_mouse_position = None;
-            self.drag_origin_x = None;
-            self.drag_start_x_in_list = None;
-            self.drag_start_depth = None;
         }
 
         let render_item = Rc::clone(&self.render_item);
@@ -1249,35 +1183,23 @@ impl Render for DndTreeState {
                                                 .cursor(CursorStyle::OpenHand)
                                                 .on_drag(
                                                     drag_value,
-                                                    move |drag, cursor_offset, window, cx| {
+                                                    move |drag, _cursor_offset, window, cx| {
                                                         state_entity.update(cx, |state, cx| {
-                                                            state.on_drag_start(
-                                                                drag,
-                                                                cursor_offset,
-                                                                window,
-                                                                cx,
-                                                            );
+                                                            state.on_drag_start(drag, window, cx);
                                                         });
                                                         let label = drag.label.clone();
-                                                        cx.new(|_| {
-                                                            DragGhost::new(label, cursor_offset)
-                                                        })
+                                                        cx.new(|_| DragGhost::new(label))
                                                     },
                                                 ),
                                         ),
                                         None => this.on_drag(
                                             drag_value,
-                                            move |drag, cursor_offset, window, cx| {
+                                            move |drag, _cursor_offset, window, cx| {
                                                 state_entity.update(cx, |state, cx| {
-                                                    state.on_drag_start(
-                                                        drag,
-                                                        cursor_offset,
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    state.on_drag_start(drag, window, cx);
                                                 });
                                                 let label = drag.label.clone();
-                                                cx.new(|_| DragGhost::new(label, cursor_offset))
+                                                cx.new(|_| DragGhost::new(label))
                                             },
                                         ),
                                     }
@@ -1493,48 +1415,99 @@ fn find_node<'a>(items: &'a [DndTreeItem], target_id: &SharedString) -> Option<&
     None
 }
 
-fn compute_destination(
+fn compute_destination_from_gap_depth(
     root_items: &[DndTreeItem],
-    dragged_item: &DndTreeItem,
-    preview: &DropPreviewTarget,
+    entries: &[DndTreeEntry],
+    dragged_id: &SharedString,
+    gap_index: usize,
+    depth: usize,
 ) -> Option<(Option<SharedString>, usize, bool)> {
-    match preview {
-        DropPreviewTarget::Root { index } => Some((None, *index, false)),
-        DropPreviewTarget::Before { target_id } => {
-            if *target_id == dragged_item.id {
+    let gap_index = gap_index.min(entries.len());
+
+    if entries.is_empty() {
+        return Some((None, 0, false));
+    }
+
+    if depth == 0 {
+        let next_root_id = entries
+            .iter()
+            .skip(gap_index)
+            .find(|entry| entry.depth() == 0)
+            .map(|entry| entry.item().id.clone());
+
+        if let Some(next_root_id) = next_root_id {
+            let (parent_id, index) = find_parent_and_index(root_items, &next_root_id, None)?;
+            if parent_id.is_some() {
                 return None;
             }
-            let (parent_id, target_ix) = find_parent_and_index(root_items, target_id, None)?;
-            Some((parent_id, target_ix, false))
+            return Some((None, index, false));
         }
-        DropPreviewTarget::After { target_id } => {
-            if *target_id == dragged_item.id {
-                return None;
-            }
-            let (parent_id, target_ix) = find_parent_and_index(root_items, target_id, None)?;
-            Some((parent_id, target_ix + 1, false))
-        }
-        DropPreviewTarget::Inside { target_id } => {
-            if *target_id == dragged_item.id {
-                return None;
-            }
-            let target = find_node(root_items, target_id)?;
-            if !target.can_accept_children() {
-                return None;
-            }
-            Some((Some(target_id.clone()), target.children.len(), true))
+
+        return Some((None, root_items.len(), false));
+    }
+
+    if gap_index == 0 {
+        return None;
+    }
+
+    let mut parent_entry_ix = None;
+    for ix in (0..gap_index).rev() {
+        if entries[ix].depth() == depth - 1 {
+            parent_entry_ix = Some(ix);
+            break;
         }
     }
+    let parent_entry_ix = parent_entry_ix?;
+    let parent_id = entries[parent_entry_ix].item().id.clone();
+
+    if parent_id == *dragged_id {
+        return None;
+    }
+
+    let parent_node = find_node(root_items, &parent_id)?;
+    if !parent_node.can_accept_children() {
+        return None;
+    }
+
+    // If we're inserting right after the parent row, treat it as "first child" even if the
+    // subtree is currently collapsed (so there are no visible children to anchor against).
+    if gap_index == parent_entry_ix + 1 {
+        return Some((Some(parent_id), 0, true));
+    }
+
+    let next_sibling_id = entries
+        .iter()
+        .skip(gap_index)
+        .find(|entry| {
+            if entry.depth() != depth {
+                return false;
+            }
+            match entry.parent_id() {
+                Some(entry_parent) => entry_parent == &parent_id,
+                None => false,
+            }
+        })
+        .map(|entry| entry.item().id.clone());
+
+    if let Some(next_sibling_id) = next_sibling_id {
+        let (found_parent_id, index) = find_parent_and_index(root_items, &next_sibling_id, None)?;
+        if found_parent_id.as_ref() != Some(&parent_id) {
+            return None;
+        }
+        return Some((Some(parent_id), index, true));
+    }
+
+    Some((Some(parent_id), parent_node.children.len(), true))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn item(id: &'static str, children: Vec<DndTreeItem>) -> DndTreeItem {
-        let mut node = DndTreeItem::new(id, id).expanded(true);
-        node.children = children;
-        node
+    fn item(id: &'static str, expanded: bool, children: Vec<DndTreeItem>) -> DndTreeItem {
+        DndTreeItem::new(id, id)
+            .expanded(expanded)
+            .children(children)
     }
 
     fn dump(items: &[DndTreeItem], depth: usize, out: &mut String) {
@@ -1546,15 +1519,71 @@ mod tests {
         }
     }
 
+    fn flatten(items: &[DndTreeItem]) -> Vec<DndTreeEntry> {
+        fn walk(
+            items: &[DndTreeItem],
+            depth: usize,
+            parent_id: Option<SharedString>,
+            out: &mut Vec<DndTreeEntry>,
+        ) {
+            for item in items {
+                let item_id = item.id.clone();
+                out.push(DndTreeEntry {
+                    item: item.clone(),
+                    depth,
+                    parent_id: parent_id.clone(),
+                });
+                if item.is_expanded() {
+                    walk(&item.children, depth + 1, Some(item_id.clone()), out);
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        walk(items, 0, None, &mut out);
+        out
+    }
+
+    fn apply_drop(
+        root: &mut Vec<DndTreeItem>,
+        dragged_id: SharedString,
+        gap_index: usize,
+        depth: usize,
+    ) {
+        let entries = flatten(root);
+        let (dest_parent_id, mut dest_index, _expand_parent) =
+            compute_destination_from_gap_depth(root, &entries, &dragged_id, gap_index, depth)
+                .expect("destination");
+
+        let removed = remove_item_recursive(root, &dragged_id, None).expect("removed");
+
+        if let Some(parent_id) = dest_parent_id.as_ref()
+            && subtree_contains(&removed.item, parent_id)
+        {
+            insert_item_at(
+                root,
+                removed.parent_id.as_ref(),
+                removed.index,
+                removed.item,
+            );
+            return;
+        }
+
+        if dest_parent_id.as_ref() == removed.parent_id.as_ref() && dest_index > removed.index {
+            dest_index = dest_index.saturating_sub(1);
+        }
+
+        insert_item_at(root, dest_parent_id.as_ref(), dest_index, removed.item);
+    }
+
     #[test]
     fn move_before_in_same_parent() {
-        let mut root = vec![item("A", vec![item("B", vec![]), item("C", vec![])])];
-        let removed = remove_item_recursive(&mut root, &"C".into(), None).unwrap();
-        let preview = DropPreviewTarget::Before {
-            target_id: "B".into(),
-        };
-        let (parent_id, index, _) = compute_destination(&root, &removed.item, &preview).unwrap();
-        insert_item_at(&mut root, parent_id.as_ref(), index, removed.item);
+        let mut root = vec![item(
+            "A",
+            true,
+            vec![item("B", true, vec![]), item("C", true, vec![])],
+        )];
+        apply_drop(&mut root, "C".into(), 1, 1);
 
         let mut s = String::new();
         dump(&root, 0, &mut s);
@@ -1568,29 +1597,38 @@ mod tests {
 
     #[test]
     fn prevent_cycle_on_drop_into_descendant() {
-        let mut root = vec![item("A", vec![item("B", vec![item("C", vec![])])])];
-        let removed = remove_item_recursive(&mut root, &"A".into(), None).unwrap();
+        let mut root = vec![item(
+            "A",
+            true,
+            vec![item("B", true, vec![item("C", true, vec![])])],
+        )];
 
-        let preview = DropPreviewTarget::Inside {
-            target_id: "C".into(),
+        let original = {
+            let mut s = String::new();
+            dump(&root, 0, &mut s);
+            s
         };
-        let dest = compute_destination(&root, &removed.item, &preview);
-        assert!(dest.is_none(), "target no longer exists after removal");
+
+        // Attempt to drop A as a child of C (gap after C, depth=3). This would create a cycle, so
+        // the drop should be rejected and the tree should remain unchanged.
+        apply_drop(&mut root, "A".into(), 3, 3);
+
+        let mut s = String::new();
+        dump(&root, 0, &mut s);
+        assert_eq!(s, original);
     }
 
     #[test]
     fn move_out_to_root_level() {
         let mut root = vec![
-            item("A", vec![item("B", vec![item("C", vec![])])]),
-            item("D", vec![]),
+            item(
+                "A",
+                true,
+                vec![item("B", true, vec![item("C", true, vec![])])],
+            ),
+            item("D", true, vec![]),
         ];
-
-        let removed = remove_item_recursive(&mut root, &"C".into(), None).unwrap();
-        let preview = DropPreviewTarget::After {
-            target_id: "A".into(),
-        };
-        let (parent_id, index, _) = compute_destination(&root, &removed.item, &preview).unwrap();
-        insert_item_at(&mut root, parent_id.as_ref(), index, removed.item);
+        apply_drop(&mut root, "C".into(), 3, 0);
 
         let mut s = String::new();
         dump(&root, 0, &mut s);
@@ -1605,14 +1643,11 @@ D"#
 
     #[test]
     fn move_item_into_other_node() {
-        let mut root = vec![item("A", vec![item("B", vec![])]), item("D", vec![])];
-        let removed = remove_item_recursive(&mut root, &"B".into(), None).unwrap();
-
-        let preview = DropPreviewTarget::Inside {
-            target_id: "D".into(),
-        };
-        let (parent_id, index, _) = compute_destination(&root, &removed.item, &preview).unwrap();
-        insert_item_at(&mut root, parent_id.as_ref(), index, removed.item);
+        let mut root = vec![
+            item("A", true, vec![item("B", true, vec![])]),
+            item("D", true, vec![]),
+        ];
+        apply_drop(&mut root, "B".into(), 3, 1);
 
         let mut s = String::new();
         dump(&root, 0, &mut s);
@@ -1621,6 +1656,29 @@ D"#
             r#"A
 D
   B"#
+        );
+    }
+
+    #[test]
+    fn depth_plus_one_inserts_as_first_child() {
+        let mut root = vec![
+            item(
+                "A",
+                false,
+                vec![item("X", true, vec![]), item("Y", true, vec![])],
+            ),
+            item("B", true, vec![]),
+        ];
+        apply_drop(&mut root, "B".into(), 1, 1);
+
+        let mut s = String::new();
+        dump(&root, 0, &mut s);
+        assert_eq!(
+            s.trim(),
+            r#"A
+  B
+  X
+  Y"#
         );
     }
 }

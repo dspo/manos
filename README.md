@@ -14,3 +14,8 @@ This repository is intended to host additional GPUI components about a Richtext 
 - DnD tree example: `cargo run --example dnd_tree`
 - Rich text example: `cargo run --example richtext`
 - Plate toolbar buttons: `cargo run --example plate_toolbar_buttons`
+
+## Docs
+
+- DnD List design: `docs/dnd-list-component-design.md`
+- DnD Tree implementation notes: `docs/dnd-tree.md`

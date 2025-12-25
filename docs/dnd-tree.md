@@ -4,13 +4,39 @@
 
 - 同级重排（兄弟节点上下换位）
 - 跨层级移动（从深层拖到浅层/从浅层拖到深层）
-- 投放为子节点（默认任意节点可接收，也可用字段限制）
+- 投放为子节点（通过 `depth` 推导；是否允许由 `accept_children` 控制）
+- 可配置拖拽启动区域（仅左侧手柄 / 整行）
+- 可配置插入线样式与缩进基准（颜色/粗细/端点、对齐 icon/文本/任意 px）
 
 你可以一边看一边跑示例验收：
 
 - 运行 story：`cargo run`
 - 运行独立示例：`cargo run --example dnd_tree`
 - 跑单元测试：`cargo test -p gpui-dnd-tree`
+
+---
+
+## 0. 本次工作梳理（v1）
+
+### 0.1 已实现的交互与能力
+
+- **统一模型**：Tree 依旧是 list 渲染，DnD 只由 `(gap_index, depth)` 两个变量决定（预览与落地一致）。
+- **视觉反馈**：hover 目标行高亮 + 插入线提示“最终落点的序号与层级”。
+- **层级推导**：`depth` 由水平拖动位移推导（避免用鼠标绝对 X 导致层级飙升/误触）。
+- **快捷手势**：在“光标仍在本行且横向位移主导”时，支持左右拖动快速升/降级。
+- **约束**：通过 `DndTreeItem::accept_children(bool)` 控制某节点是否允许接收子节点（默认为 `false`）。
+
+### 0.2 已暴露的关键 API（使用方可控）
+
+- **行渲染完全自定义**：`dnd_tree(state, render_item)` 的 `render_item` 决定每行布局（icon/文本/按钮/手柄视觉等）。
+- **拖拽启动区域**：`DndTreeState::drag_handle_width(px(...))`（仅左侧手柄区域）/ `drag_on_row()`（整行可拖）。
+- **插入线样式**：`indicator_style(...)` / `indicator_color(...)` / `indicator_thickness(...)` / `indicator_cap(...)`。
+- **插入线缩进基准**：`indent_width(...)`（每层缩进步长）/ `indent_offset(...)`（插入线基准 x，对齐 icon/文本/任意 px）。
+
+### 0.3 当前限制（可按需增强）
+
+- 插入线目前是 **实线**（不支持虚线/点线）；若需要可扩展为“自定义 indicator renderer”。
+- 暂未实现“靠近边缘自动滚动”“hover 自动展开（延时）”等增强体验（见第 9 节）。
 
 ---
 
@@ -36,7 +62,7 @@
 - drag 开始时，GPUI 会把 `value` 存到 `cx.active_drag`
 - 同时调用你的 closure，创建拖拽“影子”（ghost），用于显示拖拽中的浮层
 
-本组件用一个轻量的 `DragGhost` 来显示当前拖拽节点的 label（见 `crates/dnd_tree/src/tree.rs`），并利用 `cursor_offset` 把 ghost 内容对齐到鼠标附近，避免“drag 源很宽但 ghost 很窄”导致 ghost 偏离鼠标的问题。
+本组件用一个轻量的 `DragGhost` 来显示当前拖拽节点的 label（见 `crates/dnd_tree/src/tree.rs`）。实现上刻意不依赖 `cursor_offset`，保持行为与 Zed 的 tab drag preview 一致：ghost 由 GPUI 跟随鼠标移动，组件只负责渲染内容。
 
 ### 2.2 拖拽过程：`on_drag_move::<T>(...)`
 
@@ -47,7 +73,7 @@
 - `event.bounds`：该元素 hitbox 的 bounds
 - `event.drag(cx)`：拿到当前 drag 的类型化值 `&T`
 
-本组件用它来实时计算 `drop_preview`（插入线位置、inside 高亮等）。
+本组件用它来实时计算 `drop_preview`（插入线位置、目标行高亮等）。
 
 ### 2.3 Drop：`on_drop::<T>(...)` 的命中规则（非常重要）
 
@@ -74,12 +100,17 @@
 
 - `expanded`：是否展开（影响 entries 拍平）
 - `disabled`：是否禁用（禁用后不响应 click/drag）
-- `can_accept_children`：是否可作为父节点（决定 inside drop 是否允许）
+- `can_accept_children`：是否可作为父节点（决定 `depth = parent.depth + 1` 的投放是否允许）
 
 其中：
 
 - `DndTreeItem::accept_children(bool)` 用来控制可否接收子节点
-- 默认 `true`（满足“任意节点可接收”）
+- 默认 `false`；当你通过 `child/children` 为节点添加子节点时，会自动变为 `true`（更贴近“文件夹/目录才能接收子节点”的常见树语义）。如果你的业务允许“任意节点可变为父节点”，可以显式调用 `accept_children(true)`。
+
+补充说明：
+
+- `is_folder()` 目前基于“是否有 children”（用于是否显示/响应展开收起），而 `accept_children` 仅用于 **DnD 是否允许接收子节点**。
+- 如果你希望“空目录也显示为目录（可接收子节点）”，建议在 UI 上用 `entry.can_accept_children()` 来决定 icon/样式（story 示例即如此）。
 
 ### 3.2 `DndTreeEntry`：可见行（item + depth + parent_id）
 
@@ -96,7 +127,7 @@
 - `entries: Vec<DndTreeEntry>`：可见的扁平行列表（每次结构变化后重建）
 - `scroll_handle`：读 scroll offset 与 item height（`uniform_list` 记录）
 - `drop_preview`：拖拽过程的预览（插入线位置/目标行）
-- `indent_width/indent_offset`：用于把鼠标 x 推导为“目标 depth”，并绘制缩进插入线
+- `indent_width/indent_offset`：用于推导与绘制“目标 depth”（插入线缩进）
 - `indicator_style`：插入线样式（颜色/粗细/端点），用于表达层级与对齐
 
 你可以通过 builder 配置它们：
@@ -126,18 +157,19 @@
 
 ## 5. Drop 预览算法：命中行决定 before/after，X 决定层级
 
-核心在 `DndTreeState::compute_drop_preview_for_row_hover`（行命中）与 `compute_drop_preview_for_gap`（树层级对齐）。
+核心在 `DndTreeState::on_drag_move`（行命中）与 `compute_drop_preview_for_gap`（树层级对齐）。
 
 ### 5.1 用 X 推导目标层级（depth）
 
-为了让“整行可拖拽”时也不会因为鼠标初始位置不同而导致层级跳变，组件用“拖拽起点 depth + 横向位移”推导期望深度：
+组件会根据 **水平拖动位移** 推导期望深度（类似很多 Web DnD Tree 的 `dropLevel` 概念）：
 
 ```
-delta_x = x_in_list - drag_start_x_in_list
-desired_depth = clamp(drag_start_depth + trunc(delta_x / indent_width), 0..)
+start_depth = dragged_entry.depth
+depth_delta = trunc(delta_x / indent_width)
+desired_depth = clamp(start_depth + depth_delta, 0..)
 ```
 
-这里用 `trunc`（向 0 截断）而不是 `round`，确保必须横向跨过一个完整的 `indent_width` 才会改变层级，避免轻微左右抖动造成“预览层级偏一档”的错觉。
+这意味着：黑线的层级提示会跟随“向左/向右拖动”而变化，而不依赖于拖拽从行内哪个位置开始（避免抓住 label 时 `desired_depth` 远大于真实层级，导致层级误触或提示失真）。
 
 并绘制插入线的起始 x：
 
@@ -145,7 +177,7 @@ desired_depth = clamp(drag_start_depth + trunc(delta_x / indent_width), 0..)
 line_x = indent_offset + desired_depth * indent_width
 ```
 
-示例（story）里行缩进用的是 `pl(10 + depth * 16)`，所以 story 将：
+示例（story）里行缩进用的是 `ListItem::pl(10 + depth * 16)`（会覆盖 `ListItem` 自带的 `px_3()` 左内边距），所以 story 将：
 
 - `indent_width = 16px`
 - `indent_offset = 10px`
@@ -166,39 +198,30 @@ line_x = indent_offset + desired_depth * indent_width
 - Before：`gap_index = hovered_ix`
 - After：`gap_index = hovered_ix + 1`
 
-### 5.3 Inside（投放为子节点）的判定
+### 5.3 “投放为子节点”不是独立模式
 
-当鼠标命中某行时，以下任一条件成立则视为 inside（投放为子节点）：
+`gpui-dnd-tree` 采用 **List 模拟 Tree** 的统一模型：DnD 预览与落地只由两个变量决定：
 
-- 按住 `Option(Alt)` 强制 inside
-- 或 `desired_depth > target.depth`（向右拖动表示“想变深层”）
+- `gap_index`：插入点（行与行之间的缝）
+- `depth`：拖拽节点 drop 后的层级（也就是缩进层级）
 
-为了避免误触，本组件只会在 **After（下半区）** 场景下才会把投放视为 inside。
+因此“成为某节点的子节点”也不需要单独的 `Inside/Into` 模式，只要满足：
 
-同时还要求：
+- 插入点位于父节点行之后：`gap_index = parent_ix + 1`
+- 目标深度为子层：`depth = parent.depth + 1`
 
-- 目标节点 `can_accept_children == true`（可用 `DndTreeItem::accept_children(false)` 禁止接收子节点）
-- 目标不能是自身，且不能把节点拖进自己的子树（预览阶段会直接拒绝；落地阶段也会用 `subtree_contains` 二次防环）
+在 UI 上这对应“把提示线画在父节点行下方、并把线的起点缩进到下一层”，表达“插入为第一个子节点”。如果用户希望追加到子节点末尾，需要把 `gap_index` 明确拖到子树末尾（与 DnD List 的 before/after 一致）。
 
-Inside 预览会绘制插入线：
+### 5.4 Gap + desired_depth → 规范化 gap + depth（跨层级移动的关键）
 
-- `line_x = indent_offset + (target.depth + 1) * indent_width`
-- `line_y = subtree_end_ix(target_ix) * item_height + scroll_y`（位于目标节点可见子树末尾，表达“作为子节点追加”）
-
-Inside 的落地语义为：**追加为最后一个子节点**（并自动展开目标节点）。
-
-### 5.4 Gap + desired_depth → Before/After 目标（跨层级移动的关键）
-
-当不是 inside 时，需要把“gap + desired_depth”映射回树上的 Before/After（`compute_drop_preview_for_gap`）：
+组件会把“用户意图的 `gap_index + desired_depth`”规范化为一个 **一致可落地** 的 `(gap_index, depth)`（见 `compute_drop_preview_for_gap`）：
 
 - 先将 `desired_depth` clamp 到当前 gap 允许的最大深度（最多只能比 gap 前一个节点深 1 层，且前一个节点必须允许接收子节点）
 - 然后从 gap 往下找第一个 `depth <= desired_depth` 的“边界行”
   - 如果边界行 `depth == desired_depth`：插到它 **Before**
   - 否则：插到 gap 之前最近的同 depth 行 **After**（相当于追加到该层最后）
 
-此外还支持一种“gap 内 inside”（把节点塞进上一行作为子节点）：
-
-- 当 `desired_depth == prev.depth + 1` 且 `prev.can_accept_children()` 时，直接视为 **Inside(prev)**（插入线落在 `prev` 的可见子树末尾）
+当 `desired_depth == prev.depth + 1` 且 `prev.can_accept_children()` 时，会保留 `gap_index` 不做“跳到子树末尾”的修正，从而把提示线稳定地画在 **父节点行之后（子树头部）**。
 
 ### 5.5 After 的插入线必须落到“子树末尾”
 
@@ -220,7 +243,7 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 则触发快捷层级调整：
 
 - **向左（delta_x < 0）提升层级**：若节点有父级，则预览/投放目标切换为 **After(parent)**，节点跳出当前父节点，成为父节点同级并紧跟在父节点之后。
-- **向右（delta_x > 0）降低层级**：若存在左侧兄弟，则预览/投放目标切换为 **Inside(left_sibling)**，节点成为左侧兄弟的子节点（追加为最后一个子节点），并自动展开该兄弟节点。
+- **向右（delta_x > 0）降低层级**：若存在左侧兄弟，则预览/投放目标切换为“插入点在左侧兄弟之后 + depth = 左侧兄弟.depth + 1”，节点成为左侧兄弟的子节点（插入为第一个子节点），并自动展开该兄弟节点。
 
 ---
 
@@ -231,10 +254,10 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 核心步骤：
 
 1. 递归移除被拖拽节点：`remove_item_recursive`
-2. 根据 `drop_preview.target` 计算目标父节点与插入 index：`compute_destination`
+2. 根据 `drop_preview.(gap_index, depth)` 计算目标父节点与插入 index：`compute_destination_from_gap_depth`
 3. 防止形成环（把节点塞进自己的子树）：`subtree_contains`
 4. 插入并重建可见 entries：`insert_item_at` + `rebuild_entries`
-5. inside 投放时自动展开目标父节点：`set_expanded`
+5. 当 `depth > 0`（投放到某节点的子层）时自动展开目标父节点：`set_expanded`
 
 ---
 
@@ -250,6 +273,14 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 - 行渲染如何用 `entry.depth()` 缩进
 - `DndTreeState::indent_width/indent_offset` 如何与行缩进对齐
 - 右侧 debug 树结构实时打印（验证重排是否正确）
+
+### 7.1 示例里的 icon（用于消除视觉歧义）
+
+为了避免“文本并非 item 左对齐”导致用户误读层级，示例在每行最左侧固定渲染 icon，并将插入线基准 `indent_offset` 对齐到 icon 起点：
+
+- 行渲染：`crates/story/src/dnd_tree.rs`
+- assets 加载：`crates/story/examples/dnd_tree.rs` 使用 `Application::new().with_assets(ExtrasAssetSource::new())`
+- icon 资源：`crates/extras/assets/icons/{square-library,library,text-align-start,pen-line}.svg`
 
 ---
 

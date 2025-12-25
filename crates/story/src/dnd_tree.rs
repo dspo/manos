@@ -2,10 +2,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_component::list::ListItem;
-use gpui_component::{Icon, IconName, Sizable as _, h_flex, v_flex};
-use gpui_dnd_tree::{
-    DndTreeDropTarget, DndTreeIndicatorCap, DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree,
-};
+use gpui_component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_dnd_tree::{DndTreeIndicatorCap, DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree};
 
 pub struct DndTreeExample {
     tree: Entity<DndTreeState>,
@@ -19,10 +17,10 @@ impl DndTreeExample {
                 .indent_width(px(16.))
                 .indent_offset(px(10.))
                 .indicator_color(cx.theme().foreground)
-                .indicator_thickness(px(2.))
+                .indicator_thickness(px(1.))
                 .indicator_cap(DndTreeIndicatorCap::StartAndEndBars {
                     width: px(2.),
-                    height: px(10.),
+                    height: px(8.),
                 })
                 .items(items)
         });
@@ -53,7 +51,7 @@ impl Render for DndTreeExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("提示：拖拽节点；目标行会高亮并显示插入线（指针在目标行上半区=Before，下半区=After）；层级由“拖拽起点 depth + 左右位移”决定（向右加深、向左减少；Alt 可强制投放为子节点）；水平手势：光标保持在本行且横向位移 > 24px 且主导时，向左=提升一级（紧跟父节点之后），向右=降低一级（变为左侧兄弟的子节点并自动展开）；插入线样式可通过 `indicator_style / indicator_color / indicator_cap` 配置。"),
+                            .child("提示：拖拽节点；目标行会高亮并显示插入线（指针在目标行上半区=Before，下半区=After）；层级由水平拖动位移决定（向右更深、向左更浅）；水平手势：光标保持在本行且横向位移 > 24px 且主导时，向左=提升一级（跳出父节点，插入到父节点子树之后），向右=降低一级（变为左侧兄弟的子节点并自动展开）；插入线样式可通过 `indicator_style / indicator_color / indicator_cap` 配置。"),
                     )
                     .child(
                         div()
@@ -123,51 +121,34 @@ fn render_tree_row(
 ) -> ListItem {
     let theme = cx.theme();
     let indent = px(16.) * entry.depth();
-    let folder = entry.is_folder();
+    let is_directory = entry.can_accept_children();
     let expanded = entry.is_expanded();
 
-    let disclosure_icon = if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    };
-
-    let item_icon = if folder {
+    let icon_path = if is_directory {
         if expanded {
-            IconName::FolderOpen
+            "icons/library.svg"
         } else {
-            IconName::FolderClosed
+            "icons/square-library.svg"
         }
+    } else if row_state.selected {
+        "icons/pen-line.svg"
     } else {
-        IconName::File
+        "icons/text-align-start.svg"
     };
-
-    let disclosure = if folder {
-        Icon::from(disclosure_icon)
-            .small()
-            .text_color(theme.muted_foreground)
-            .into_any_element()
+    let icon_color = if row_state.selected {
+        theme.foreground
     } else {
-        div().w(px(16.)).into_any_element()
+        theme.muted_foreground
     };
 
     ListItem::new(ix)
         .pl(px(10.) + indent)
         .when(row_state.dragging, |this| this.opacity(0.4))
-        .when(
-            row_state.drop_target == Some(DndTreeDropTarget::Inside),
-            |this| this.bg(theme.accent).text_color(theme.accent_foreground),
-        )
         .child(
             h_flex()
                 .gap_x_2()
                 .items_center()
-                .child(disclosure)
-                .child(
-                    Icon::from(item_icon)
-                        .small()
-                        .text_color(theme.muted_foreground),
-                )
+                .child(Icon::empty().path(icon_path).small().text_color(icon_color))
                 .child(entry.item().label.clone()),
         )
 }
