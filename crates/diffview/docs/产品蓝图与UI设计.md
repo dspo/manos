@@ -17,7 +17,7 @@
 - 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；底部“合并结果”编辑器（编辑后点击“应用”刷新冲突检测）；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
 - 小窗口适配：Diff/Conflict 工具条将“对比目标/视图&Git/保存操作”收纳到 Popover（`对比` / `更多`）；其它区域用 `flex-wrap` 兜底，避免按钮被挤出不可点。
 - 键盘快捷键（基础）：Esc 返回；Alt+N/P 导航；Alt+W 忽略空白；Alt+V 切换 Split/Inline；Alt+L 切换对齐/分栏；Cmd/Ctrl+S 保存冲突结果（冲突清零后）。
-- 性能小优化：切换 Split/Inline 时不重算 diff（复用 diff model，仅重建行列表）。
+- 性能与体验（基础版）：git/IO/diff 计算移到 `background_executor`；忽略空白/上下文改动采用 120ms 防抖 + 后台重算；虚拟列表 `item_sizes` 缓存减少大向量分配；提供 Large Diff Demo（`GIT_VIEWER_LARGE_DEMO_LINES`）用于 1-5 万行验收。
 
 ## 信息架构与流程
 - 根布局：左侧文件面板 + 顶部工具条 + 主视图 + 右侧标尺/辅助（可折叠） + 底部状态栏。
@@ -228,7 +228,7 @@
 - 验收：
   - 1-5 万行文件 diff：滚动与跳转无明显卡顿；内存/CPU 不爆炸（主观体验 + 简单计时日志）。
 - 本步 TODO：
-  - [ ] 性能与体验调优：防抖、缓存、基准样例
+  - [x] 性能与体验调优：防抖、缓存、基准样例（后台化 git/IO/diff；diff 重算 120ms 防抖；虚拟列表 `item_sizes` 缓存；Large Diff Demo（`GIT_VIEWER_LARGE_DEMO_LINES`））
   - [x] TopToolbar：溢出收纳（Popover，对比/更多）
   - [x] 错误提示（基础）：`git` 缺失时提示并禁用相关操作
   - [x] TopToolbar/StatusBar 细节：统一禁用态/提示/快捷键

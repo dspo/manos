@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
@@ -85,6 +86,7 @@ struct DiffViewOptions {
 }
 
 const MAX_CONTEXT_LINES: usize = 20;
+const DIFF_REBUILD_DEBOUNCE_MS: u64 = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SplitLayout {
@@ -172,8 +174,6 @@ struct DiffViewState {
     compare_target: CompareTarget,
     old_text: String,
     new_text: String,
-    ignore_whitespace: bool,
-    context_lines: usize,
     old_lines: Vec<String>,
     new_lines: Vec<String>,
     diff_model: diffview::DiffModel,
@@ -182,6 +182,8 @@ struct DiffViewState {
     current_hunk: usize,
     scroll_handle: VirtualListScrollHandle,
     scroll_state: ScrollbarState,
+    list_item_sizes: Rc<Vec<Size<Pixels>>>,
+    list_item_height: Pixels,
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +218,8 @@ struct ConflictViewState {
     current_conflict: usize,
     scroll_handle: VirtualListScrollHandle,
     scroll_state: ScrollbarState,
+    list_item_sizes: Rc<Vec<Size<Pixels>>>,
+    list_item_height: Pixels,
 }
 
 struct GitViewerApp {
@@ -228,6 +232,8 @@ struct GitViewerApp {
     diff_view: Option<DiffViewState>,
     conflict_view: Option<ConflictViewState>,
     diff_options: DiffViewOptions,
+    diff_content_revision: u64,
+    diff_rebuild_seq: u64,
     split_layout: SplitLayout,
     view_mode: DiffViewMode,
     status_filter: StatusFilter,
@@ -244,12 +250,17 @@ impl GitViewerApp {
 
         if git_available {
             cx.spawn_in(window, async move |_, window| {
-                let entries = fetch_git_status(&repo_root_for_task)
-                    .map_err(|err| {
-                        eprintln!("git status failed: {err:?}");
-                        err
+                let entries = window
+                    .background_executor()
+                    .spawn(async move {
+                        fetch_git_status(&repo_root_for_task)
+                            .map_err(|err| {
+                                eprintln!("git status failed: {err:?}");
+                                err
+                            })
+                            .unwrap_or_default()
                     })
-                    .unwrap_or_default();
+                    .await;
 
                 let _ = window.update(|_window, cx| {
                     this.update(cx, |this, _cx| {
@@ -282,6 +293,8 @@ impl GitViewerApp {
                 ignore_whitespace: false,
                 context_lines: 3,
             },
+            diff_content_revision: 0,
+            diff_rebuild_seq: 0,
             split_layout: SplitLayout::TwoPane,
             view_mode: DiffViewMode::Split,
             status_filter: StatusFilter::All,
@@ -304,6 +317,80 @@ impl GitViewerApp {
         );
     }
 
+    fn open_large_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let line_count = std::env::var("GIT_VIEWER_LARGE_DEMO_LINES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(20_000);
+
+        let this = cx.entity();
+        window.push_notification(
+            Notification::new().message(format!("正在生成 Large Diff Demo（{line_count} 行）…")),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let (old_text, new_text) = window
+                .background_executor()
+                .spawn(async move { large_demo_texts(line_count) })
+                .await;
+
+            let diff_options =
+                window
+                    .update(|_, cx| this.read(cx).diff_options)
+                    .unwrap_or(DiffViewOptions {
+                        ignore_whitespace: false,
+                        context_lines: 3,
+                    });
+            let view_mode = window
+                .update(|_, cx| this.read(cx).view_mode)
+                .unwrap_or(DiffViewMode::Split);
+
+            let (old_text, new_text, model, old_lines, new_lines) = window
+                .background_executor()
+                .spawn(async move {
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+                    (old_text, new_text, model, old_lines, new_lines)
+                })
+                .await;
+
+            window
+                .update(|window, cx| {
+                    window.push_notification(
+                        Notification::new().message("Large Diff Demo 已加载"),
+                        cx,
+                    );
+                    this.update(cx, |this, _cx| {
+                        this.diff_content_revision = this.diff_content_revision.wrapping_add(1);
+                        this.conflict_view = None;
+                        this.diff_view = Some(DiffViewState::from_precomputed(
+                            format!("Large Diff Demo ({line_count} lines)").into(),
+                            None,
+                            None,
+                            CompareTarget::HeadToWorktree,
+                            old_text,
+                            new_text,
+                            view_mode,
+                            model,
+                            old_lines,
+                            new_lines,
+                        ));
+                        this.screen = AppScreen::DiffView;
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
     fn open_conflict_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = conflict_demo_text();
         let initial_text = text.clone();
@@ -324,6 +411,7 @@ impl GitViewerApp {
         old_text: String,
         new_text: String,
     ) {
+        self.diff_content_revision = self.diff_content_revision.wrapping_add(1);
         self.conflict_view = None;
         self.diff_view = Some(DiffViewState::new(
             title,
@@ -391,35 +479,77 @@ impl GitViewerApp {
         );
 
         cx.spawn_in(window, async move |_, window| {
-            let (old_text, old_err) = match target {
-                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
-                    match read_head_file(&repo_root, &path_for_task, &status_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::IndexToWorktree => {
-                    match read_index_file(&repo_root, &path_for_task, &status_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+            let path_for_task_bg = path_for_task.clone();
+            let status_for_task_bg = status_for_task.clone();
+            let (old_text, old_err, new_text, new_err) = window
+                .background_executor()
+                .spawn(async move {
+                    let (old_text, old_err) = match target {
+                        CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                            match read_head_file(&repo_root, &path_for_task_bg, &status_for_task_bg)
+                            {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::IndexToWorktree => {
+                            match read_index_file(
+                                &repo_root,
+                                &path_for_task_bg,
+                                &status_for_task_bg,
+                            ) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
 
-            let (new_text, new_err) = match target {
-                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
-                    match read_working_file(&repo_root, &path_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::HeadToIndex => {
-                    match read_index_file(&repo_root, &path_for_task, &status_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+                    let (new_text, new_err) = match target {
+                        CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                            match read_working_file(&repo_root, &path_for_task_bg) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::HeadToIndex => {
+                            match read_index_file(
+                                &repo_root,
+                                &path_for_task_bg,
+                                &status_for_task_bg,
+                            ) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    (old_text, old_err, new_text, new_err)
+                })
+                .await;
+
+            let diff_options =
+                window
+                    .update(|_, cx| this.read(cx).diff_options)
+                    .unwrap_or(DiffViewOptions {
+                        ignore_whitespace: false,
+                        context_lines: 3,
+                    });
+            let view_mode = window
+                .update(|_, cx| this.read(cx).view_mode)
+                .unwrap_or(DiffViewMode::Split);
+
+            let (old_text, new_text, model, old_lines, new_lines) = window
+                .background_executor()
+                .spawn(async move {
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+                    (old_text, new_text, model, old_lines, new_lines)
+                })
+                .await;
 
             window
                 .update(|window, cx| {
@@ -443,14 +573,21 @@ impl GitViewerApp {
                     }
 
                     this.update(cx, |this, _cx| {
-                        this.open_diff_view(
+                        this.diff_content_revision = this.diff_content_revision.wrapping_add(1);
+                        this.conflict_view = None;
+                        this.diff_view = Some(DiffViewState::from_precomputed(
                             format!("{status_for_task} {path_for_task}").into(),
                             Some(path_for_task.clone()),
                             Some(status_for_task.clone()),
                             target,
                             old_text,
                             new_text,
-                        );
+                            view_mode,
+                            model,
+                            old_lines,
+                            new_lines,
+                        ));
+                        this.screen = AppScreen::DiffView;
                     });
                 })
                 .ok();
@@ -512,10 +649,16 @@ impl GitViewerApp {
         );
 
         cx.spawn_in(window, async move |_, window| {
-            let (text, err) = match read_working_file(&repo_root, &path_for_task) {
-                Ok(text) => (text, None),
-                Err(err) => (String::new(), Some(err.to_string())),
-            };
+            let path_for_task_bg = path_for_task.clone();
+            let (text, err) = window
+                .background_executor()
+                .spawn(async move {
+                    match read_working_file(&repo_root, &path_for_task_bg) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                })
+                .await;
 
             window
                 .update(|window, cx| {
@@ -549,21 +692,21 @@ impl GitViewerApp {
         .detach();
     }
 
-    fn set_ignore_whitespace(&mut self, value: bool) {
+    fn set_ignore_whitespace(&mut self, value: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.diff_options.ignore_whitespace == value {
             return;
         }
         self.diff_options.ignore_whitespace = value;
-        self.rebuild_active_diff_view();
+        self.request_diff_rebuild(window, cx);
     }
 
-    fn set_context_lines(&mut self, value: usize) {
+    fn set_context_lines(&mut self, value: usize, window: &mut Window, cx: &mut Context<Self>) {
         let value = value.min(MAX_CONTEXT_LINES);
         if self.diff_options.context_lines == value {
             return;
         }
         self.diff_options.context_lines = value;
-        self.rebuild_active_diff_view();
+        self.request_diff_rebuild(window, cx);
     }
 
     fn set_view_mode(&mut self, mode: DiffViewMode) {
@@ -576,36 +719,116 @@ impl GitViewerApp {
         }
     }
 
-    fn rebuild_active_diff_view(&mut self) {
+    fn request_diff_rebuild(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(diff_view) = self.diff_view.as_ref() else {
             return;
         };
 
-        let scroll_handle = diff_view.scroll_handle.clone();
-        let scroll_state = diff_view.scroll_state.clone();
-        let title = diff_view.title.clone();
-        let path = diff_view.path.clone();
-        let status = diff_view.status.clone();
+        self.diff_rebuild_seq = self.diff_rebuild_seq.wrapping_add(1);
+        let rebuild_seq = self.diff_rebuild_seq;
+        let content_revision = self.diff_content_revision;
         let compare_target = diff_view.compare_target;
-        let old_text = diff_view.old_text.clone();
-        let new_text = diff_view.new_text.clone();
-        let current_hunk = diff_view.current_hunk;
+        let this = cx.entity();
 
-        let mut next = DiffViewState::new(
-            title,
-            path,
-            status,
-            compare_target,
-            old_text,
-            new_text,
-            self.diff_options,
-            self.view_mode,
-        );
-        next.scroll_handle = scroll_handle;
-        next.scroll_state = scroll_state;
-        next.current_hunk = current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+        cx.spawn_in(window, async move |_, window| {
+            Timer::after(Duration::from_millis(DIFF_REBUILD_DEBOUNCE_MS)).await;
 
-        self.diff_view = Some(next);
+            let snapshot = window
+                .update(|_, cx| {
+                    let app = this.read(cx);
+                    if app.diff_rebuild_seq != rebuild_seq
+                        || app.diff_content_revision != content_revision
+                    {
+                        return None;
+                    }
+
+                    let diff_view = app.diff_view.as_ref()?;
+                    Some((
+                        diff_view.title.clone(),
+                        diff_view.path.clone(),
+                        diff_view.status.clone(),
+                        diff_view.old_text.clone(),
+                        diff_view.new_text.clone(),
+                        diff_view.scroll_handle.clone(),
+                        diff_view.scroll_state.clone(),
+                        diff_view.current_hunk,
+                        app.diff_options,
+                        app.view_mode,
+                    ))
+                })
+                .ok()
+                .flatten();
+
+            let Some((
+                title,
+                path,
+                status,
+                old_text,
+                new_text,
+                scroll_handle,
+                scroll_state,
+                current_hunk,
+                diff_options,
+                view_mode,
+            )) = snapshot
+            else {
+                return Some(());
+            };
+
+            let (old_text, new_text, model, old_lines, new_lines) = window
+                .background_executor()
+                .spawn(async move {
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+                    (old_text, new_text, model, old_lines, new_lines)
+                })
+                .await;
+
+            window
+                .update(|_window, cx| {
+                    this.update(cx, |this, cx| {
+                        if this.diff_rebuild_seq != rebuild_seq
+                            || this.diff_content_revision != content_revision
+                        {
+                            return;
+                        }
+
+                        let still_same = this.diff_view.as_ref().is_some_and(|view| {
+                            view.path == path && view.compare_target == compare_target
+                        });
+                        if !still_same {
+                            return;
+                        }
+
+                        let mut next = DiffViewState::from_precomputed(
+                            title,
+                            path,
+                            status,
+                            compare_target,
+                            old_text,
+                            new_text,
+                            view_mode,
+                            model,
+                            old_lines,
+                            new_lines,
+                        );
+                        next.scroll_handle = scroll_handle;
+                        next.scroll_state = scroll_state;
+                        next.current_hunk =
+                            current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                        this.diff_view = Some(next);
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
     }
 
     fn jump_hunk(&mut self, direction: i32) {
@@ -860,33 +1083,40 @@ impl GitViewerApp {
         );
 
         cx.spawn_in(window, async move |_, window| {
-            let full_path = repo_root.join(&path_for_task);
-            let write_result = std::fs::write(&full_path, text.as_bytes())
-                .with_context(|| format!("写入文件失败：{path_for_task}"));
+            let (write_result, add_result, status_result) = window
+                .background_executor()
+                .spawn(async move {
+                    let full_path = repo_root.join(&path_for_task);
+                    let write_result = std::fs::write(&full_path, text.as_bytes())
+                        .with_context(|| format!("写入文件失败：{path_for_task}"));
 
-            let add_result = if add_to_index && write_result.is_ok() {
-                let output = Command::new("git")
-                    .arg("-C")
-                    .arg(&repo_root)
-                    .args(["add", "--"])
-                    .arg(&path_for_task)
-                    .output()
-                    .with_context(|| format!("执行 git add 失败：{path_for_task}"));
+                    let add_result = if add_to_index && write_result.is_ok() {
+                        let output = Command::new("git")
+                            .arg("-C")
+                            .arg(&repo_root)
+                            .args(["add", "--"])
+                            .arg(&path_for_task)
+                            .output()
+                            .with_context(|| format!("执行 git add 失败：{path_for_task}"));
 
-                match output {
-                    Ok(output) if output.status.success() => Ok(()),
-                    Ok(output) => Err(anyhow!(
-                        "git add 返回非零（{}）：{}",
-                        output.status.code().unwrap_or(-1),
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    )),
-                    Err(err) => Err(err),
-                }
-            } else {
-                Ok(())
-            };
+                        match output {
+                            Ok(output) if output.status.success() => Ok(()),
+                            Ok(output) => Err(anyhow!(
+                                "git add 返回非零（{}）：{}",
+                                output.status.code().unwrap_or(-1),
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            )),
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        Ok(())
+                    };
 
-            let status_result = fetch_git_status(&repo_root);
+                    let status_result = fetch_git_status(&repo_root);
+
+                    (write_result, add_result, status_result)
+                })
+                .await;
 
             window
                 .update(|window, cx| {
@@ -947,50 +1177,102 @@ impl GitViewerApp {
         window.push_notification(Notification::new().message(format!("git add {path}")), cx);
 
         cx.spawn_in(window, async move |_, window| {
-            let add_result = run_git(repo_root.as_path(), ["add", "--", &path_for_task]);
-            let add_ok = add_result.is_ok();
-            let add_err = add_result.err().map(|err| err.to_string());
-            let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
-                Ok(entries) => {
-                    let updated_status = entries
-                        .iter()
-                        .find(|entry| entry.path == path_for_task)
-                        .map(|entry| entry.status.clone())
-                        .unwrap_or_default();
-                    (Some(entries), None, updated_status)
-                }
-                Err(err) => (None, Some(err.to_string()), String::new()),
-            };
+            let diff_options =
+                window
+                    .update(|_, cx| this.read(cx).diff_options)
+                    .unwrap_or(DiffViewOptions {
+                        ignore_whitespace: false,
+                        context_lines: 3,
+                    });
+            let view_mode = window
+                .update(|_, cx| this.read(cx).view_mode)
+                .unwrap_or(DiffViewMode::Split);
 
-            let (old_text, old_err) = match compare_target {
-                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
-                    match read_head_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::IndexToWorktree => {
-                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+            let path_for_task_bg = path_for_task.clone();
+            let (
+                add_ok,
+                add_err,
+                entries,
+                status_err,
+                updated_status,
+                old_text,
+                old_err,
+                new_text,
+                new_err,
+                model,
+                old_lines,
+                new_lines,
+            ) = window
+                .background_executor()
+                .spawn(async move {
+                    let add_result = run_git(repo_root.as_path(), ["add", "--", &path_for_task_bg]);
+                    let add_ok = add_result.is_ok();
+                    let add_err = add_result.err().map(|err| err.to_string());
+                    let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
+                        Ok(entries) => {
+                            let updated_status = entries
+                                .iter()
+                                .find(|entry| entry.path == path_for_task_bg)
+                                .map(|entry| entry.status.clone())
+                                .unwrap_or_default();
+                            (Some(entries), None, updated_status)
+                        }
+                        Err(err) => (None, Some(err.to_string()), String::new()),
+                    };
 
-            let (new_text, new_err) = match compare_target {
-                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
-                    match read_working_file(&repo_root, &path_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::HeadToIndex => {
-                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+                    let (old_text, old_err) = match compare_target {
+                        CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                            match read_head_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::IndexToWorktree => {
+                            match read_index_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    let (new_text, new_err) = match compare_target {
+                        CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                            match read_working_file(&repo_root, &path_for_task_bg) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::HeadToIndex => {
+                            match read_index_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+
+                    (
+                        add_ok,
+                        add_err,
+                        entries,
+                        status_err,
+                        updated_status,
+                        old_text,
+                        old_err,
+                        new_text,
+                        new_err,
+                        model,
+                        old_lines,
+                        new_lines,
+                    )
+                })
+                .await;
 
             window
                 .update(|window, cx| {
@@ -1043,7 +1325,7 @@ impl GitViewerApp {
 
                             if let Some(diff_view) = this.diff_view.as_ref() {
                                 if diff_view.path.as_deref() == Some(path_for_task.as_str()) {
-                                    let mut next = DiffViewState::new(
+                                    let mut next = DiffViewState::from_precomputed(
                                         title,
                                         Some(path_for_task.clone()),
                                         (!updated_status.is_empty())
@@ -1051,13 +1333,17 @@ impl GitViewerApp {
                                         compare_target,
                                         old_text,
                                         new_text,
-                                        this.diff_options,
-                                        this.view_mode,
+                                        view_mode,
+                                        model,
+                                        old_lines,
+                                        new_lines,
                                     );
                                     next.scroll_handle = scroll_handle.clone();
                                     next.scroll_state = scroll_state.clone();
                                     next.current_hunk =
                                         current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                                    this.diff_content_revision =
+                                        this.diff_content_revision.wrapping_add(1);
                                     this.diff_view = Some(next);
                                 }
                             }
@@ -1096,51 +1382,105 @@ impl GitViewerApp {
         );
 
         cx.spawn_in(window, async move |_, window| {
-            let reset_result =
-                run_git(repo_root.as_path(), ["reset", "HEAD", "--", &path_for_task]);
-            let reset_ok = reset_result.is_ok();
-            let reset_err = reset_result.err().map(|err| err.to_string());
-            let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
-                Ok(entries) => {
-                    let updated_status = entries
-                        .iter()
-                        .find(|entry| entry.path == path_for_task)
-                        .map(|entry| entry.status.clone())
-                        .unwrap_or_default();
-                    (Some(entries), None, updated_status)
-                }
-                Err(err) => (None, Some(err.to_string()), String::new()),
-            };
+            let diff_options =
+                window
+                    .update(|_, cx| this.read(cx).diff_options)
+                    .unwrap_or(DiffViewOptions {
+                        ignore_whitespace: false,
+                        context_lines: 3,
+                    });
+            let view_mode = window
+                .update(|_, cx| this.read(cx).view_mode)
+                .unwrap_or(DiffViewMode::Split);
 
-            let (old_text, old_err) = match compare_target {
-                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
-                    match read_head_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::IndexToWorktree => {
-                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+            let path_for_task_bg = path_for_task.clone();
+            let (
+                reset_ok,
+                reset_err,
+                entries,
+                status_err,
+                updated_status,
+                old_text,
+                old_err,
+                new_text,
+                new_err,
+                model,
+                old_lines,
+                new_lines,
+            ) = window
+                .background_executor()
+                .spawn(async move {
+                    let reset_result = run_git(
+                        repo_root.as_path(),
+                        ["reset", "HEAD", "--", &path_for_task_bg],
+                    );
+                    let reset_ok = reset_result.is_ok();
+                    let reset_err = reset_result.err().map(|err| err.to_string());
+                    let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
+                        Ok(entries) => {
+                            let updated_status = entries
+                                .iter()
+                                .find(|entry| entry.path == path_for_task_bg)
+                                .map(|entry| entry.status.clone())
+                                .unwrap_or_default();
+                            (Some(entries), None, updated_status)
+                        }
+                        Err(err) => (None, Some(err.to_string()), String::new()),
+                    };
 
-            let (new_text, new_err) = match compare_target {
-                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
-                    match read_working_file(&repo_root, &path_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::HeadToIndex => {
-                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+                    let (old_text, old_err) = match compare_target {
+                        CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                            match read_head_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::IndexToWorktree => {
+                            match read_index_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    let (new_text, new_err) = match compare_target {
+                        CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                            match read_working_file(&repo_root, &path_for_task_bg) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::HeadToIndex => {
+                            match read_index_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+
+                    (
+                        reset_ok,
+                        reset_err,
+                        entries,
+                        status_err,
+                        updated_status,
+                        old_text,
+                        old_err,
+                        new_text,
+                        new_err,
+                        model,
+                        old_lines,
+                        new_lines,
+                    )
+                })
+                .await;
 
             window
                 .update(|window, cx| {
@@ -1193,7 +1533,7 @@ impl GitViewerApp {
 
                             if let Some(diff_view) = this.diff_view.as_ref() {
                                 if diff_view.path.as_deref() == Some(path_for_task.as_str()) {
-                                    let mut next = DiffViewState::new(
+                                    let mut next = DiffViewState::from_precomputed(
                                         title,
                                         Some(path_for_task.clone()),
                                         (!updated_status.is_empty())
@@ -1201,13 +1541,17 @@ impl GitViewerApp {
                                         compare_target,
                                         old_text,
                                         new_text,
-                                        this.diff_options,
-                                        this.view_mode,
+                                        view_mode,
+                                        model,
+                                        old_lines,
+                                        new_lines,
                                     );
                                     next.scroll_handle = scroll_handle.clone();
                                     next.scroll_state = scroll_state.clone();
                                     next.current_hunk =
                                         current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                                    this.diff_content_revision =
+                                        this.diff_content_revision.wrapping_add(1);
                                     this.diff_view = Some(next);
                                 }
                             }
@@ -1290,48 +1634,99 @@ impl GitViewerApp {
         );
 
         cx.spawn_in(window, async move |_, window| {
-            let apply_result = run_git_with_stdin(repo_root.as_path(), action.git_args(), &patch);
-            let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
-                Ok(entries) => {
-                    let updated_status = entries
-                        .iter()
-                        .find(|entry| entry.path == path_for_task)
-                        .map(|entry| entry.status.clone())
-                        .unwrap_or_default();
-                    (Some(entries), None, updated_status)
-                }
-                Err(err) => (None, Some(err.to_string()), String::new()),
-            };
+            let diff_options =
+                window
+                    .update(|_, cx| this.read(cx).diff_options)
+                    .unwrap_or(DiffViewOptions {
+                        ignore_whitespace: false,
+                        context_lines: 3,
+                    });
+            let view_mode = window
+                .update(|_, cx| this.read(cx).view_mode)
+                .unwrap_or(DiffViewMode::Split);
 
-            let (old_text, old_err) = match compare_target {
-                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
-                    match read_head_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::IndexToWorktree => {
-                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+            let path_for_task_bg = path_for_task.clone();
+            let (
+                apply_result,
+                entries,
+                status_err,
+                updated_status,
+                old_text,
+                old_err,
+                new_text,
+                new_err,
+                model,
+                old_lines,
+                new_lines,
+            ) = window
+                .background_executor()
+                .spawn(async move {
+                    let apply_result =
+                        run_git_with_stdin(repo_root.as_path(), action.git_args(), &patch);
+                    let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
+                        Ok(entries) => {
+                            let updated_status = entries
+                                .iter()
+                                .find(|entry| entry.path == path_for_task_bg)
+                                .map(|entry| entry.status.clone())
+                                .unwrap_or_default();
+                            (Some(entries), None, updated_status)
+                        }
+                        Err(err) => (None, Some(err.to_string()), String::new()),
+                    };
 
-            let (new_text, new_err) = match compare_target {
-                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
-                    match read_working_file(&repo_root, &path_for_task) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-                CompareTarget::HeadToIndex => {
-                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
-                        Ok(text) => (text, None),
-                        Err(err) => (String::new(), Some(err.to_string())),
-                    }
-                }
-            };
+                    let (old_text, old_err) = match compare_target {
+                        CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                            match read_head_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::IndexToWorktree => {
+                            match read_index_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    let (new_text, new_err) = match compare_target {
+                        CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                            match read_working_file(&repo_root, &path_for_task_bg) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::HeadToIndex => {
+                            match read_index_file(&repo_root, &path_for_task_bg, &updated_status) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                    };
+
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+
+                    (
+                        apply_result,
+                        entries,
+                        status_err,
+                        updated_status,
+                        old_text,
+                        old_err,
+                        new_text,
+                        new_err,
+                        model,
+                        old_lines,
+                        new_lines,
+                    )
+                })
+                .await;
 
             window
                 .update(|window, cx| {
@@ -1387,20 +1782,24 @@ impl GitViewerApp {
 
                         if let Some(diff_view) = this.diff_view.as_ref() {
                             if diff_view.path.as_deref() == Some(path_for_task.as_str()) {
-                                let mut next = DiffViewState::new(
+                                let mut next = DiffViewState::from_precomputed(
                                     title,
                                     Some(path_for_task.clone()),
                                     (!updated_status.is_empty()).then(|| updated_status.clone()),
                                     compare_target,
                                     old_text,
                                     new_text,
-                                    this.diff_options,
-                                    this.view_mode,
+                                    view_mode,
+                                    model,
+                                    old_lines,
+                                    new_lines,
                                 );
                                 next.scroll_handle = scroll_handle.clone();
                                 next.scroll_state = scroll_state.clone();
                                 next.current_hunk =
                                     current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                                this.diff_content_revision =
+                                    this.diff_content_revision.wrapping_add(1);
                                 this.diff_view = Some(next);
                             }
                         }
@@ -1436,6 +1835,14 @@ impl GitViewerApp {
             .ghost()
             .on_click(cx.listener(|this, _, _window, cx| {
                 this.open_demo();
+                cx.notify();
+            }));
+
+        let large_demo_button = Button::new("open-large-demo")
+            .label("打开 Large Diff Demo")
+            .ghost()
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_large_demo(window, cx);
                 cx.notify();
             }));
 
@@ -1537,6 +1944,7 @@ impl GitViewerApp {
                             .flex_row()
                             .gap(px(8.))
                             .child(demo_button)
+                            .child(large_demo_button)
                             .child(conflict_demo_button),
                     ),
             )
@@ -1545,7 +1953,7 @@ impl GitViewerApp {
     }
 
     fn render_diff_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let Some(diff_view) = self.diff_view.as_ref() else {
+        let Some(diff_view) = self.diff_view.as_mut() else {
             return div().p(px(12.)).child("No diff view");
         };
 
@@ -1554,8 +1962,8 @@ impl GitViewerApp {
         let two_pane = matches!(self.split_layout, SplitLayout::TwoPane);
         let title = diff_view.title.clone();
         let compare_target = diff_view.compare_target;
-        let ignore_whitespace = diff_view.ignore_whitespace;
-        let context_lines = diff_view.context_lines;
+        let ignore_whitespace = self.diff_options.ignore_whitespace;
+        let context_lines = self.diff_options.context_lines;
         let hunk_count = diff_view.hunk_rows.len();
         let can_prev_hunk = diff_view.current_hunk > 0;
         let can_next_hunk = diff_view.current_hunk + 1 < diff_view.hunk_rows.len();
@@ -1584,6 +1992,7 @@ impl GitViewerApp {
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
         let row_height = window.line_height() + px(4.);
+        let item_sizes = diff_view.item_sizes(row_height);
 
         let app = cx.entity();
         let compare_label: SharedString =
@@ -1829,10 +2238,10 @@ impl GitViewerApp {
                     });
 
                     let app_for_ws = app_for_menu.clone();
-                    let toggle_ws = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                    let toggle_ws = Rc::new(move |window: &mut Window, cx: &mut App| {
                         app_for_ws.update(cx, |this, cx| {
                             let next = !this.diff_options.ignore_whitespace;
-                            this.set_ignore_whitespace(next);
+                            this.set_ignore_whitespace(next, window, cx);
                             cx.notify();
                         });
                     });
@@ -1940,13 +2349,13 @@ impl GitViewerApp {
                                         .disabled(context_lines == 0)
                                         .on_click({
                                             let app = app_for_menu.clone();
-                                            move |_, _window, cx| {
+                                            move |_, window, cx| {
                                                 app.update(cx, |this, cx| {
                                                     let next = this
                                                         .diff_options
                                                         .context_lines
                                                         .saturating_sub(1);
-                                                    this.set_context_lines(next);
+                                                    this.set_context_lines(next, window, cx);
                                                     cx.notify();
                                                 });
                                             }
@@ -1959,10 +2368,10 @@ impl GitViewerApp {
                                         .disabled(context_lines >= MAX_CONTEXT_LINES)
                                         .on_click({
                                             let app = app_for_menu.clone();
-                                            move |_, _window, cx| {
+                                            move |_, window, cx| {
                                                 app.update(cx, |this, cx| {
                                                     let next = this.diff_options.context_lines + 1;
-                                                    this.set_context_lines(next);
+                                                    this.set_context_lines(next, window, cx);
                                                     cx.notify();
                                                 });
                                             }
@@ -2110,7 +2519,6 @@ impl GitViewerApp {
                     .child(more_menu),
             );
 
-        let item_sizes = Rc::new(vec![size(px(0.), row_height); rows_len]);
         let list = match view_mode {
             DiffViewMode::Inline => v_virtual_list(
                 cx.entity(),
@@ -2371,7 +2779,7 @@ impl GitViewerApp {
     }
 
     fn render_conflict_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let Some(conflict_view) = self.conflict_view.as_ref() else {
+        let Some(conflict_view) = self.conflict_view.as_mut() else {
             return div().p(px(12.)).child("No conflict view");
         };
 
@@ -2390,6 +2798,7 @@ impl GitViewerApp {
         let scroll_handle = conflict_view.scroll_handle.clone();
         let scroll_state = conflict_view.scroll_state.clone();
         let row_height = window.line_height() + px(4.);
+        let item_sizes = conflict_view.item_sizes(row_height);
         let conflict_position = if conflict_total == 0 {
             "0/0".to_string()
         } else {
@@ -2657,7 +3066,6 @@ impl GitViewerApp {
                     .child(more_menu),
             );
 
-        let item_sizes = Rc::new(vec![size(px(0.), row_height); rows_len]);
         let list = match self.split_layout {
             SplitLayout::Aligned => v_virtual_list(
                 cx.entity(),
@@ -3849,10 +4257,10 @@ impl Render for GitViewerApp {
                     };
                     cx.notify();
                 }))
-                .on_action(cx.listener(|this, _: &ToggleWhitespace, _window, cx| {
+                .on_action(cx.listener(|this, _: &ToggleWhitespace, window, cx| {
                     if matches!(this.screen, AppScreen::DiffView) {
                         let next = !this.diff_options.ignore_whitespace;
-                        this.set_ignore_whitespace(next);
+                        this.set_ignore_whitespace(next, window, cx);
                         cx.notify();
                     }
                 }))
@@ -4022,8 +4430,6 @@ impl DiffViewState {
             compare_target,
             old_text,
             new_text,
-            ignore_whitespace: options.ignore_whitespace,
-            context_lines: options.context_lines,
             old_lines,
             new_lines,
             diff_model,
@@ -4032,9 +4438,55 @@ impl DiffViewState {
             current_hunk: 0,
             scroll_handle: VirtualListScrollHandle::new(),
             scroll_state: ScrollbarState::default(),
+            list_item_sizes: Rc::new(Vec::new()),
+            list_item_height: px(0.),
         };
         this.recalc_hunk_rows();
         this
+    }
+
+    fn from_precomputed(
+        title: SharedString,
+        path: Option<String>,
+        status: Option<String>,
+        compare_target: CompareTarget,
+        old_text: String,
+        new_text: String,
+        view_mode: DiffViewMode,
+        diff_model: diffview::DiffModel,
+        old_lines: Vec<String>,
+        new_lines: Vec<String>,
+    ) -> Self {
+        let rows = build_display_rows_from_model(&diff_model, &old_lines, &new_lines, view_mode);
+        let mut this = Self {
+            title,
+            path,
+            status,
+            compare_target,
+            old_text,
+            new_text,
+            old_lines,
+            new_lines,
+            diff_model,
+            rows,
+            hunk_rows: Vec::new(),
+            current_hunk: 0,
+            scroll_handle: VirtualListScrollHandle::new(),
+            scroll_state: ScrollbarState::default(),
+            list_item_sizes: Rc::new(Vec::new()),
+            list_item_height: px(0.),
+        };
+        this.recalc_hunk_rows();
+        this
+    }
+
+    fn item_sizes(&mut self, row_height: Pixels) -> Rc<Vec<Size<Pixels>>> {
+        let count = self.rows.len();
+        if self.list_item_height != row_height || self.list_item_sizes.len() != count {
+            self.list_item_height = row_height;
+            self.list_item_sizes = Rc::new(vec![size(px(0.), row_height); count]);
+        }
+        self.list_item_sizes.clone()
     }
 
     fn rebuild_rows(&mut self, view_mode: DiffViewMode) {
@@ -4084,9 +4536,20 @@ impl ConflictViewState {
             current_conflict: 0,
             scroll_handle: VirtualListScrollHandle::new(),
             scroll_state: ScrollbarState::default(),
+            list_item_sizes: Rc::new(Vec::new()),
+            list_item_height: px(0.),
         };
         this.recalc_conflict_rows();
         this
+    }
+
+    fn item_sizes(&mut self, row_height: Pixels) -> Rc<Vec<Size<Pixels>>> {
+        let count = self.rows.len();
+        if self.list_item_height != row_height || self.list_item_sizes.len() != count {
+            self.list_item_height = row_height;
+            self.list_item_sizes = Rc::new(vec![size(px(0.), row_height); count]);
+        }
+        self.list_item_sizes.clone()
     }
 
     fn rebuild(&mut self) {
@@ -4168,6 +4631,36 @@ fn demo_texts() -> (String, String) {
 "#;
 
     (old.to_string(), new.to_string())
+}
+
+fn large_demo_texts(line_count: usize) -> (String, String) {
+    let mut old = String::new();
+    let mut new = String::new();
+    old.reserve(line_count.saturating_mul(32));
+    new.reserve(line_count.saturating_mul(34));
+
+    for i in 0..line_count {
+        let base = format!("{i:05} let value_{i} = {i};\n");
+        old.push_str(&base);
+
+        if i > 0 && i % 251 == 0 {
+            continue;
+        }
+
+        if i % 199 == 0 {
+            new.push_str(&format!("{i:05} // inserted comment for {i}\n"));
+        }
+
+        if i % 97 == 0 {
+            new.push_str(&format!("{i:05} let value_{i} = {i} + 1;\n"));
+        } else if i % 123 == 0 {
+            new.push_str(&format!("{i:05} let  value_{i}  =  {i};\n"));
+        } else {
+            new.push_str(&base);
+        }
+    }
+
+    (old, new)
 }
 
 fn conflict_demo_text() -> String {
