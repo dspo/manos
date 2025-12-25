@@ -2687,6 +2687,7 @@ dependencies = [
  "http",
  "raw-window-handle",
  "serde",
+ "serde_json",
  "serialize-to-javascript",
  "wry",
 ]

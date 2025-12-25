@@ -1,4 +1,7 @@
 pub mod webview;
+pub use http;
+pub use serde;
+pub use serde_json;
 pub use wry;
 
 use http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE};
@@ -9,13 +12,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wry::{Error as WryError, Result, WebView, WebViewBuilder, WebViewId};
 
-pub use gpui_manos_webview_macros::{api_handler, command_handlers};
+pub use gpui_manos_webview_macros::{
+    api_handler, api_handlers, command, command_handler, command_handlers, generate_handler,
+};
 
 // todo: implement dev server
+
+pub struct Invoke {
+    pub command: String,
+    pub request: http::Request<Vec<u8>>,
+}
+
+pub type InvokeHandler =
+    Arc<dyn Fn(Invoke) -> Option<http::Response<Vec<u8>>> + Send + Sync + 'static>;
 
 pub struct Builder<'a> {
     builder: WebViewBuilder<'a>,
     webview_id: WebViewId<'a>,
+    invoke_handler: Option<InvokeHandler>,
     handlers: HashMap<
         String,
         Arc<dyn Fn(http::Request<Vec<u8>>) -> http::Response<Vec<u8>> + Send + Sync + 'static>,
@@ -27,6 +41,7 @@ impl<'a> Builder<'a> {
         Builder {
             builder: WebViewBuilder::new(),
             webview_id: WebViewId::default(),
+            invoke_handler: None,
             handlers: HashMap::new(),
         }
     }
@@ -44,13 +59,25 @@ impl<'a> Builder<'a> {
         self
     }
 
-    pub fn invoke_handler_single<F>(mut self, api: (String, F)) -> Self
+    /// Registers a single low-level HTTP handler (used by the `ipc://` custom protocol).
+    pub fn serve_api<F>(mut self, api: (String, F)) -> Self
     where
         F: Fn(http::Request<Vec<u8>>) -> http::Response<Vec<u8>> + Send + Sync + 'static,
     {
         let (name, f) = api;
         self.handlers.insert(name, Arc::new(f));
 
+        self
+    }
+
+    /// Registers an invoke handler, similar to Tauri's `Builder::invoke_handler`.
+    ///
+    /// Typically used with `gpui_manos_webview::generate_handler![...]`.
+    pub fn invoke_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Invoke) -> Option<http::Response<Vec<u8>>> + Send + Sync + 'static,
+    {
+        self.invoke_handler = Some(Arc::new(handler));
         self
     }
 
@@ -120,6 +147,7 @@ impl<'a> Builder<'a> {
 
     fn with_apis(self) -> Self {
         let handlers = self.handlers.clone();
+        let invoke_handler = self.invoke_handler.clone();
         self.apply(move |b| {
             b.with_asynchronous_custom_protocol(
                 "ipc".into(),
@@ -132,17 +160,113 @@ impl<'a> Builder<'a> {
                         request.uri().host(),
                         request.uri().path()
                     );
-                    if let Some(path) = request.uri().path().strip_prefix('/') {
-                        if let Some(handler) = handlers.get(path) {
-                            let response = handler(request);
+
+                    let raw_path = request.uri().path().to_string();
+                    let command = decode_uri_component(
+                        raw_path.strip_prefix('/').unwrap_or(raw_path.as_str()),
+                    );
+
+                    if let Some(ref handler) = invoke_handler {
+                        let invoke = Invoke { command, request };
+                        if let Some(response) = handler(invoke) {
                             responder.respond(response);
                             return;
                         }
+
+                        responder.respond(ipc::not_found(raw_path));
+                        return;
                     }
-                    responder.respond(response_not_found(request.uri().path()));
+
+                    if let Some(handler) = handlers.get(&command) {
+                        let response = handler(request);
+                        responder.respond(response);
+                        return;
+                    }
+
+                    responder.respond(ipc::not_found(raw_path));
                 },
             )
         })
+    }
+}
+
+fn decode_uri_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = from_hex(bytes[i + 1]);
+            let lo = from_hex(bytes[i + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub mod ipc {
+    use super::*;
+    use http::HeaderValue;
+
+    fn response_builder(
+        status_code: http::StatusCode,
+        tauri_response: &'static str,
+    ) -> http::response::Builder {
+        http::Response::builder()
+            .status(status_code)
+            .header(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))
+            .header(
+                http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                "Tauri-Response",
+            )
+            .header("Tauri-Response", HeaderValue::from_static(tauri_response))
+    }
+
+    pub fn ok_json<T: serde::Serialize>(value: &T) -> http::Response<Vec<u8>> {
+        match serde_json::to_vec(value) {
+            Ok(body) => response_builder(http::StatusCode::OK, "ok")
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(body)
+                .unwrap(),
+            Err(err) => internal_error(err),
+        }
+    }
+
+    pub fn bad_request<S: ToString>(message: S) -> http::Response<Vec<u8>> {
+        response_builder(http::StatusCode::BAD_REQUEST, "error")
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+            .body(message.to_string().into_bytes())
+            .unwrap()
+    }
+
+    pub fn internal_error<S: ToString>(message: S) -> http::Response<Vec<u8>> {
+        response_builder(http::StatusCode::INTERNAL_SERVER_ERROR, "error")
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+            .body(message.to_string().into_bytes())
+            .unwrap()
+    }
+
+    pub fn not_found<S: ToString>(message: S) -> http::Response<Vec<u8>> {
+        response_builder(http::StatusCode::NOT_FOUND, "error")
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+            .body(format!("{} not found", message.to_string()).into_bytes())
+            .unwrap()
     }
 }
 
