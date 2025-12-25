@@ -7,7 +7,6 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    input::InputState,
     menu::AppMenuBar,
     notification::Notification,
 };
@@ -69,9 +68,11 @@ pub struct LineLayoutCache {
 
 pub struct RichTextNextState {
     focus_handle: FocusHandle,
+    scroll_handle: ScrollHandle,
     editor: Editor,
     selecting: bool,
-    selection_anchor: Option<usize>,
+    selection_anchor: Option<CorePoint>,
+    viewport_bounds: Bounds<Pixels>,
     layout_cache: Vec<Option<LineLayoutCache>>,
     ime_marked_range: Option<Range<usize>>,
     did_auto_focus: bool,
@@ -82,9 +83,11 @@ impl RichTextNextState {
         let focus_handle = cx.focus_handle().tab_stop(true);
         Self {
             focus_handle,
+            scroll_handle: ScrollHandle::new(),
             editor: Editor::with_core_plugins(),
             selecting: false,
             selection_anchor: None,
+            viewport_bounds: Bounds::default(),
             layout_cache: Vec::new(),
             ime_marked_range: None,
             did_auto_focus: false,
@@ -114,6 +117,7 @@ impl RichTextNextState {
             selection,
             gpui_plate_core::PluginRegistry::core(),
         );
+        self.scroll_handle.set_offset(point(px(0.), px(0.)));
         self.ime_marked_range = None;
         cx.notify();
     }
@@ -146,6 +150,19 @@ impl RichTextNextState {
             focus: CorePoint::new(path, focus),
         };
         self.editor.set_selection(sel);
+        _ = self.scroll_cursor_into_view();
+        self.ime_marked_range = None;
+        cx.notify();
+    }
+
+    fn set_selection_points(
+        &mut self,
+        anchor: CorePoint,
+        focus: CorePoint,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.set_selection(Selection { anchor, focus });
+        _ = self.scroll_cursor_into_view();
         self.ime_marked_range = None;
         cx.notify();
     }
@@ -179,6 +196,7 @@ impl RichTextNextState {
             focus: CorePoint::new(path, focus),
         };
         self.editor.set_selection(sel);
+        _ = self.scroll_cursor_into_view();
         self.ime_marked_range = None;
         cx.notify();
     }
@@ -194,6 +212,33 @@ impl RichTextNextState {
             std::mem::swap(&mut a, &mut b);
         }
         a..b
+    }
+
+    fn ordered_selection_points(&self) -> (CorePoint, CorePoint) {
+        let sel = self.editor.selection();
+        if sel.anchor.path == sel.focus.path {
+            if sel.focus.offset < sel.anchor.offset {
+                return (sel.focus.clone(), sel.anchor.clone());
+            }
+            return (sel.anchor.clone(), sel.focus.clone());
+        }
+        if sel.focus.path < sel.anchor.path {
+            return (sel.focus.clone(), sel.anchor.clone());
+        }
+        (sel.anchor.clone(), sel.focus.clone())
+    }
+
+    fn paragraph_text(&self, row: usize) -> Option<SharedString> {
+        let Some(Node::Element(el)) = self.editor.doc().children.get(row) else {
+            return None;
+        };
+        if el.kind != "paragraph" {
+            return None;
+        }
+        let Some(Node::Text(t)) = el.children.first() else {
+            return Some(SharedString::default());
+        };
+        Some(t.text.clone().into())
     }
 
     fn prev_boundary(text: &str, offset: usize) -> usize {
@@ -216,6 +261,237 @@ impl RichTextNextState {
             ix += 1;
         }
         ix
+    }
+
+    fn is_word_char(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    fn word_range(text: &str, offset: usize) -> Range<usize> {
+        if text.is_empty() {
+            return 0..0;
+        }
+
+        let offset = offset.min(text.len());
+        let mut start = offset;
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = offset;
+        while end < text.len() && !text.is_char_boundary(end) {
+            end += 1;
+        }
+
+        let probe_ix = if start == text.len() {
+            Self::prev_boundary(text, start)
+        } else if start == end && start > 0 {
+            Self::prev_boundary(text, start)
+        } else {
+            start
+        };
+        let probe = text.get(probe_ix..).and_then(|s| s.chars().next());
+        let Some(probe) = probe else {
+            return 0..0;
+        };
+
+        if probe.is_whitespace() {
+            let mut a = probe_ix;
+            while a > 0 {
+                let prev = Self::prev_boundary(text, a);
+                let Some(ch) = text.get(prev..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !ch.is_whitespace() {
+                    break;
+                }
+                a = prev;
+            }
+            let mut b = probe_ix + probe.len_utf8();
+            while b < text.len() {
+                let next = Self::next_boundary(text, b);
+                let Some(ch) = text.get(b..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !ch.is_whitespace() {
+                    break;
+                }
+                b = next;
+            }
+            return a..b;
+        }
+
+        if Self::is_word_char(probe) {
+            let mut a = probe_ix;
+            while a > 0 {
+                let prev = Self::prev_boundary(text, a);
+                let Some(ch) = text.get(prev..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                a = prev;
+            }
+            let mut b = probe_ix + probe.len_utf8();
+            while b < text.len() {
+                let next = Self::next_boundary(text, b);
+                let Some(ch) = text.get(b..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                b = next;
+            }
+            return a..b;
+        }
+
+        probe_ix..probe_ix + probe.len_utf8()
+    }
+
+    fn line_range(text: &str, offset: usize) -> Range<usize> {
+        if text.is_empty() {
+            return 0..0;
+        }
+
+        let offset = offset.min(text.len());
+        let left = text[..offset].rfind('\n').map(|ix| ix + 1).unwrap_or(0);
+        let right = text[offset..]
+            .find('\n')
+            .map(|ix| offset + ix)
+            .unwrap_or(text.len());
+        left..right
+    }
+
+    fn tx_insert_text_at_point(
+        &self,
+        at: &CorePoint,
+        inserted: &str,
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        if at.path.len() != 2 || at.path[1] != 0 {
+            return None;
+        }
+        let row = at.path[0];
+        let Some(existing) = self.paragraph_text(row) else {
+            return None;
+        };
+
+        let existing = existing.to_string();
+        let len = existing.len();
+        let offset = at.offset.min(len);
+        let tail = existing.get(offset..).unwrap_or("").to_string();
+
+        let parts: Vec<&str> = inserted.split('\n').collect();
+        if parts.len() <= 1 {
+            return Some(
+                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::InsertText {
+                    path: at.path.clone(),
+                    offset,
+                    text: inserted.to_string(),
+                }])
+                .selection_after(Selection::collapsed(CorePoint::new(
+                    at.path.clone(),
+                    offset + inserted.len(),
+                )))
+                .source(source),
+            );
+        }
+
+        let mut ops = Vec::new();
+        ops.push(gpui_plate_core::Op::RemoveText {
+            path: at.path.clone(),
+            range: offset..len,
+        });
+        if !parts[0].is_empty() {
+            ops.push(gpui_plate_core::Op::InsertText {
+                path: at.path.clone(),
+                offset,
+                text: parts[0].to_string(),
+            });
+        }
+
+        let last_ix = parts.len() - 1;
+        for (i, part) in parts.iter().enumerate().skip(1) {
+            let text = if i == last_ix {
+                format!("{part}{tail}")
+            } else {
+                (*part).to_string()
+            };
+            ops.push(gpui_plate_core::Op::InsertNode {
+                path: vec![row + i],
+                node: Node::paragraph(text),
+            });
+        }
+
+        let selection_after =
+            Selection::collapsed(CorePoint::new(vec![row + last_ix, 0], parts[last_ix].len()));
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source),
+        )
+    }
+
+    fn delete_selection_transaction(&self) -> Option<(gpui_plate_core::Transaction, CorePoint)> {
+        let sel = self.editor.selection();
+        if sel.is_collapsed() {
+            return None;
+        }
+
+        let (start, end) = self.ordered_selection_points();
+        if start.path.len() != 2 || end.path.len() != 2 || start.path[1] != 0 || end.path[1] != 0 {
+            return None;
+        }
+
+        let start_row = start.path[0];
+        let end_row = end.path[0];
+        if start_row == end_row {
+            return Some((
+                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
+                    path: start.path.clone(),
+                    range: start.offset..end.offset,
+                }])
+                .selection_after(Selection::collapsed(start.clone()))
+                .source("selection:delete"),
+                start,
+            ));
+        }
+
+        let start_text = self.paragraph_text(start_row)?.to_string();
+        let end_text = self.paragraph_text(end_row)?.to_string();
+        let tail = end_text.get(end.offset..).unwrap_or("").to_string();
+        let start_len = start_text.len();
+
+        let mut ops = Vec::new();
+        ops.push(gpui_plate_core::Op::RemoveText {
+            path: start.path.clone(),
+            range: start.offset..start_len,
+        });
+        if !tail.is_empty() {
+            ops.push(gpui_plate_core::Op::InsertText {
+                path: start.path.clone(),
+                offset: start.offset,
+                text: tail,
+            });
+        }
+
+        for row in (start_row + 1..=end_row).rev() {
+            ops.push(gpui_plate_core::Op::RemoveNode { path: vec![row] });
+        }
+
+        Some((
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(Selection::collapsed(start.clone()))
+                .source("selection:delete_multi_paragraph"),
+            start,
+        ))
+    }
+
+    fn delete_selection_if_any(&mut self, cx: &mut Context<Self>) -> Option<CorePoint> {
+        let (tx, collapse_to) = self.delete_selection_transaction()?;
+        self.push_tx(tx, cx);
+        Some(collapse_to)
     }
 
     fn offset_for_point(&self, row: usize, point: gpui::Point<Pixels>) -> Option<usize> {
@@ -268,8 +544,55 @@ impl RichTextNextState {
 
     fn push_tx(&mut self, tx: gpui_plate_core::Transaction, cx: &mut Context<Self>) {
         if self.editor.apply(tx).is_ok() {
+            _ = self.scroll_cursor_into_view();
             cx.notify();
         }
+    }
+
+    fn scroll_cursor_into_view(&mut self) -> bool {
+        let Some(row) = self.editor.selection().focus.path.first().copied() else {
+            return false;
+        };
+        let Some(cache) = self.layout_cache.get(row).and_then(|c| c.as_ref()) else {
+            return false;
+        };
+        let viewport = self.viewport_bounds;
+        if viewport.size.width == px(0.) && viewport.size.height == px(0.) {
+            return false;
+        }
+
+        let caret_ix = self
+            .editor
+            .selection()
+            .focus
+            .offset
+            .min(cache.text_layout.len());
+        let Some(pos) = cache.text_layout.position_for_index(caret_ix).or_else(|| {
+            cache
+                .text_layout
+                .position_for_index(cache.text_layout.len())
+        }) else {
+            return false;
+        };
+
+        let line_height = cache.text_layout.line_height();
+        let caret_bounds = Bounds::from_corners(pos, point(pos.x + px(1.5), pos.y + line_height));
+
+        let prev_offset = self.scroll_handle.offset();
+        let mut offset = prev_offset;
+
+        let margin = px(12.);
+        if caret_bounds.top() < viewport.top() + margin {
+            offset.y += (viewport.top() + margin) - caret_bounds.top();
+        } else if caret_bounds.bottom() > viewport.bottom() - margin {
+            offset.y -= caret_bounds.bottom() - (viewport.bottom() - margin);
+        }
+
+        if offset == prev_offset {
+            return false;
+        }
+        self.scroll_handle.set_offset(offset);
+        true
     }
 
     pub(super) fn backspace(
@@ -278,6 +601,10 @@ impl RichTextNextState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.delete_selection_if_any(cx).is_some() {
+            return;
+        }
+
         let text = self.active_text();
         let range = self.ordered_active_range();
         if !range.is_empty() {
@@ -316,6 +643,10 @@ impl RichTextNextState {
     }
 
     pub(super) fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_selection_if_any(cx).is_some() {
+            return;
+        }
+
         let text = self.active_text();
         let range = self.ordered_active_range();
         if !range.is_empty() {
@@ -343,27 +674,12 @@ impl RichTextNextState {
     }
 
     pub(super) fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+
         let block_ix = self.active_block_index();
         let path = self.active_text_path().unwrap_or_default();
         if path.len() < 2 {
             return;
-        }
-
-        // Delete selection within the block first.
-        let range = self.ordered_active_range();
-        if !range.is_empty() {
-            self.push_tx(
-                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
-                    path: path.clone(),
-                    range: range.clone(),
-                }])
-                .selection_after(Selection::collapsed(CorePoint::new(
-                    path.clone(),
-                    range.start,
-                )))
-                .source("key:enter:delete_selection"),
-                cx,
-            );
         }
 
         let text = self.active_text();
@@ -494,32 +810,44 @@ impl RichTextNextState {
     }
 
     pub fn command_copy(&mut self, cx: &mut Context<Self>) {
-        let text = self.active_text();
-        let range = self.ordered_active_range();
-        if range.is_empty() {
+        let sel = self.editor.selection().clone();
+        if sel.is_collapsed() {
             return;
         }
-        let selected = text.as_str().get(range).unwrap_or("").to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(selected));
+
+        let (start, end) = self.ordered_selection_points();
+        if start.path.len() == 2 && end.path.len() == 2 && start.path[1] == 0 && end.path[1] == 0 {
+            let start_row = start.path[0];
+            let end_row = end.path[0];
+            if start_row == end_row {
+                let text = self.paragraph_text(start_row).unwrap_or_default();
+                let selected = text
+                    .as_str()
+                    .get(start.offset..end.offset)
+                    .unwrap_or("")
+                    .to_string();
+                cx.write_to_clipboard(ClipboardItem::new_string(selected));
+                return;
+            }
+
+            let mut out = String::new();
+            let start_text = self.paragraph_text(start_row).unwrap_or_default();
+            out.push_str(start_text.as_str().get(start.offset..).unwrap_or(""));
+            out.push('\n');
+            for row in (start_row + 1)..end_row {
+                let mid = self.paragraph_text(row).unwrap_or_default();
+                out.push_str(mid.as_str());
+                out.push('\n');
+            }
+            let end_text = self.paragraph_text(end_row).unwrap_or_default();
+            out.push_str(end_text.as_str().get(..end.offset).unwrap_or(""));
+            cx.write_to_clipboard(ClipboardItem::new_string(out));
+        }
     }
 
     pub fn command_cut(&mut self, cx: &mut Context<Self>) {
-        let text = self.active_text();
-        let range = self.ordered_active_range();
-        if range.is_empty() {
-            return;
-        }
-        let selected = text.as_str().get(range.clone()).unwrap_or("").to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(selected));
-
-        let path = self.active_text_path().unwrap_or_default();
-        let tx = gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
-            path: path.clone(),
-            range: range.clone(),
-        }])
-        .selection_after(Selection::collapsed(CorePoint::new(path, range.start)))
-        .source("command:cut");
-        self.push_tx(tx, cx);
+        self.command_copy(cx);
+        _ = self.delete_selection_if_any(cx);
     }
 
     pub fn command_paste(&mut self, cx: &mut Context<Self>) {
@@ -532,27 +860,29 @@ impl RichTextNextState {
             return;
         }
 
-        let text = self.active_text();
-        let range = self.ordered_active_range();
-        let path = self.active_text_path().unwrap_or_default();
+        let insert_at = self
+            .delete_selection_if_any(cx)
+            .unwrap_or_else(|| self.editor.selection().focus.clone());
+        let path = insert_at.path.clone();
+
+        if new_text.contains('\n') {
+            if let Some(tx) = self.tx_insert_text_at_point(&insert_at, &new_text, "command:paste") {
+                self.push_tx(tx, cx);
+                return;
+            }
+        }
 
         let mut ops = Vec::new();
-        if !range.is_empty() {
-            ops.push(gpui_plate_core::Op::RemoveText {
-                path: path.clone(),
-                range: range.clone(),
-            });
-        }
         ops.push(gpui_plate_core::Op::InsertText {
             path: path.clone(),
-            offset: range.start,
+            offset: insert_at.offset,
             text: new_text.clone(),
         });
 
         let tx = gpui_plate_core::Transaction::new(ops)
             .selection_after(Selection::collapsed(CorePoint::new(
                 path,
-                range.start + new_text.len(),
+                insert_at.offset + new_text.len(),
             )))
             .source("command:paste");
         self.push_tx(tx, cx);
@@ -769,6 +1099,68 @@ impl RichTextNextLineElement {
             text: SharedString::default(),
         }
     }
+
+    fn paint_selection_positions(
+        start_position: Point<Pixels>,
+        end_position: Point<Pixels>,
+        bounds: &Bounds<Pixels>,
+        line_height: Pixels,
+        window: &mut Window,
+        selection_color: gpui::Hsla,
+    ) {
+        if start_position.y == end_position.y {
+            window.paint_quad(gpui::quad(
+                Bounds::from_corners(
+                    start_position,
+                    point(end_position.x, end_position.y + line_height),
+                ),
+                px(0.),
+                selection_color,
+                gpui::Edges::default(),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+            return;
+        }
+
+        window.paint_quad(gpui::quad(
+            Bounds::from_corners(
+                start_position,
+                point(bounds.right(), start_position.y + line_height),
+            ),
+            px(0.),
+            selection_color,
+            gpui::Edges::default(),
+            gpui::transparent_black(),
+            gpui::BorderStyle::default(),
+        ));
+
+        if end_position.y > start_position.y + line_height {
+            window.paint_quad(gpui::quad(
+                Bounds::from_corners(
+                    point(bounds.left(), start_position.y + line_height),
+                    point(bounds.right(), end_position.y),
+                ),
+                px(0.),
+                selection_color,
+                gpui::Edges::default(),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+        }
+
+        window.paint_quad(gpui::quad(
+            Bounds::from_corners(
+                point(bounds.left(), end_position.y),
+                point(end_position.x, end_position.y + line_height),
+            ),
+            px(0.),
+            selection_color,
+            gpui::Edges::default(),
+            gpui::transparent_black(),
+            gpui::BorderStyle::default(),
+        ));
+    }
 }
 
 impl IntoElement for RichTextNextLineElement {
@@ -837,7 +1229,7 @@ impl Element for RichTextNextLineElement {
         let mut runs = Vec::new();
 
         let marked_range = marked_range
-            .filter(|r| !self.text.is_empty())
+            .filter(|_| !self.text.is_empty())
             .map(|r| r.start.min(self.text.len())..r.end.min(self.text.len()))
             .filter(|r| r.start < r.end);
 
@@ -913,7 +1305,7 @@ impl Element for RichTextNextLineElement {
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
-        // Paint selection/caret for this row (only within the active paragraph block).
+        // Paint selection/caret for this row.
         let (selection, is_focused) = {
             let state = self.state.read(cx);
             (
@@ -922,35 +1314,14 @@ impl Element for RichTextNextLineElement {
             )
         };
         let path = vec![self.row, 0];
-        if selection.anchor.path == path && selection.focus.path == path {
-            let mut a = selection.anchor.offset;
-            let mut b = selection.focus.offset;
-            if b < a {
-                std::mem::swap(&mut a, &mut b);
-            }
+        let layout = self.styled_text.layout().clone();
+        let line_height = layout.line_height();
 
-            let layout = self.styled_text.layout().clone();
-            let line_height = layout.line_height();
-
-            if a < b {
-                if let (Some(start), Some(end)) = (
-                    layout.position_for_index(a),
-                    layout
-                        .position_for_index(b)
-                        .or_else(|| layout.position_for_index(layout.len())),
-                ) {
-                    window.paint_quad(gpui::quad(
-                        Bounds::from_corners(start, point(end.x, end.y + line_height)),
-                        px(0.),
-                        cx.theme().selection,
-                        gpui::Edges::default(),
-                        gpui::transparent_black(),
-                        gpui::BorderStyle::default(),
-                    ));
-                }
-            } else if is_focused {
+        if selection.is_collapsed() {
+            if selection.focus.path == path && is_focused {
+                let caret_ix = selection.focus.offset.min(layout.len());
                 if let Some(pos) = layout
-                    .position_for_index(a)
+                    .position_for_index(caret_ix)
                     .or_else(|| layout.position_for_index(layout.len()))
                 {
                     window.paint_quad(gpui::quad(
@@ -963,6 +1334,58 @@ impl Element for RichTextNextLineElement {
                     ));
                 }
             }
+            return;
+        }
+
+        // Highlight selections over root paragraph text nodes (`[row, 0]`).
+        let mut start = selection.anchor.clone();
+        let mut end = selection.focus.clone();
+        if start.path == end.path {
+            if end.offset < start.offset {
+                std::mem::swap(&mut start, &mut end);
+            }
+        } else if end.path < start.path {
+            std::mem::swap(&mut start, &mut end);
+        }
+        if start.path.len() != 2 || end.path.len() != 2 || start.path[1] != 0 || end.path[1] != 0 {
+            return;
+        }
+
+        let start_row = start.path[0];
+        let end_row = end.path[0];
+        if self.row < start_row || self.row > end_row {
+            return;
+        }
+
+        let row_len = self.text.len();
+        let (a, b) = if start_row == end_row {
+            (start.offset.min(row_len), end.offset.min(row_len))
+        } else if self.row == start_row {
+            (start.offset.min(row_len), row_len)
+        } else if self.row == end_row {
+            (0, end.offset.min(row_len))
+        } else {
+            (0, row_len)
+        };
+
+        if a >= b {
+            return;
+        }
+
+        if let (Some(start_pos), Some(end_pos)) = (
+            layout.position_for_index(a.min(layout.len())),
+            layout
+                .position_for_index(b.min(layout.len()))
+                .or_else(|| layout.position_for_index(layout.len())),
+        ) {
+            Self::paint_selection_positions(
+                start_pos,
+                end_pos,
+                &bounds,
+                line_height,
+                window,
+                cx.theme().selection,
+            );
         }
     }
 }
@@ -1017,8 +1440,11 @@ impl Element for RichTextNextInputHandlerElement {
         bounds: Bounds<Pixels>,
         _state: &mut Self::RequestLayoutState,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Self::PrepaintState {
+        self.state.update(cx, |state, _| {
+            state.viewport_bounds = bounds;
+        });
         // Mirror the existing rich text editor behavior: capture mouse events for selection,
         // but allow scrolling to propagate to the underlying scroll area.
         window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll)
@@ -1066,19 +1492,40 @@ impl Element for RichTextNextInputHandlerElement {
                     let offset = this
                         .offset_for_point(row, event.position)
                         .unwrap_or_else(|| this.block_text_len(row));
+                    let focus = CorePoint::new(vec![row, 0], offset);
 
-                    let (anchor, focus) = if event.modifiers.shift {
-                        let anchor = if this.active_block_index() == row {
-                            this.editor.selection().anchor.offset
-                        } else {
-                            offset
-                        };
-                        (anchor, offset)
+                    if event.click_count >= 3 {
+                        let text = this.paragraph_text(row).unwrap_or_default();
+                        let range = RichTextNextState::line_range(text.as_str(), offset);
+                        let anchor = CorePoint::new(vec![row, 0], range.start);
+                        let focus = CorePoint::new(vec![row, 0], range.end);
+                        this.set_selection_points(anchor, focus, cx);
+                        // Do not enter "drag selecting" mode on multi-click. This avoids tiny mouse
+                        // movements between down/up being interpreted as a drag that expands the
+                        // selection across paragraphs (which can look like "select all").
+                        this.selecting = false;
+                        this.selection_anchor = None;
+                        return;
+                    }
+
+                    if event.click_count == 2 {
+                        let text = this.paragraph_text(row).unwrap_or_default();
+                        let range = RichTextNextState::word_range(text.as_str(), offset);
+                        let anchor = CorePoint::new(vec![row, 0], range.start);
+                        let focus = CorePoint::new(vec![row, 0], range.end);
+                        this.set_selection_points(anchor.clone(), focus, cx);
+                        this.selecting = false;
+                        this.selection_anchor = None;
+                        return;
+                    }
+
+                    let anchor = if event.modifiers.shift {
+                        this.editor.selection().anchor.clone()
                     } else {
-                        (offset, offset)
+                        focus.clone()
                     };
 
-                    this.set_selection_in_row(row, anchor, focus, cx);
+                    this.set_selection_points(anchor.clone(), focus, cx);
                     this.selecting = true;
                     this.selection_anchor = Some(anchor);
                 });
@@ -1098,11 +1545,15 @@ impl Element for RichTextNextInputHandlerElement {
                     let Some(row) = this.paragraph_row_for_point(event.position) else {
                         return;
                     };
-                    let Some(offset) = this.offset_for_point(row, event.position) else {
-                        return;
-                    };
-                    let anchor = this.selection_anchor.unwrap_or(offset);
-                    this.set_selection_in_row(row, anchor, offset, cx);
+                    let offset = this
+                        .offset_for_point(row, event.position)
+                        .unwrap_or_else(|| this.block_text_len(row));
+                    let focus = CorePoint::new(vec![row, 0], offset);
+                    let anchor = this
+                        .selection_anchor
+                        .clone()
+                        .unwrap_or_else(|| focus.clone());
+                    this.set_selection_points(anchor, focus, cx);
                 });
             }
         });
@@ -1133,12 +1584,11 @@ impl Render for RichTextNextState {
             self.did_auto_focus = true;
         }
 
-        if self.layout_cache.len() != self.editor.doc().children.len() {
-            self.layout_cache
-                .resize_with(self.editor.doc().children.len(), || None);
-        }
-        for cache in &mut self.layout_cache {
-            *cache = None;
+        let doc_len = self.editor.doc().children.len();
+        if self.layout_cache.len() > doc_len {
+            self.layout_cache.truncate(doc_len);
+        } else if self.layout_cache.len() < doc_len {
+            self.layout_cache.resize_with(doc_len, || None);
         }
 
         let mut blocks: Vec<AnyElement> = Vec::new();
@@ -1180,7 +1630,6 @@ impl Render for RichTextNextState {
             .border_1()
             .border_color(theme.border)
             .rounded(theme.radius)
-            .p(px(12.))
             .when(!window.is_inspector_picking(cx), |this| {
                 this.on_action(window.listener_for(&state, RichTextNextState::backspace))
                     .on_action(window.listener_for(&state, RichTextNextState::delete))
@@ -1193,8 +1642,6 @@ impl Render for RichTextNextState {
                     .on_action(window.listener_for(&state, RichTextNextState::redo))
                     .on_action(window.listener_for(&state, RichTextNextState::insert_divider))
             })
-            // Render content first, then place an absolute overlay input handler on top.
-            .child(div().flex_col().gap(px(6.)).children(blocks))
             .child(
                 div()
                     .absolute()
@@ -1203,6 +1650,14 @@ impl Render for RichTextNextState {
                     .right_0()
                     .bottom_0()
                     .child(RichTextNextInputHandlerElement::new(state.clone())),
+            )
+            .child(
+                div()
+                    .id("scroll-area")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    .child(div().p(px(12.)).flex_col().gap(px(6.)).children(blocks)),
             )
     }
 }
@@ -1241,7 +1696,6 @@ pub struct RichTextNextExample {
     app_menu_bar: Entity<AppMenuBar>,
     editor: Entity<RichTextNextState>,
     file_path: Option<PathBuf>,
-    link_input: Entity<InputState>,
 }
 
 impl RichTextNextExample {
@@ -1254,16 +1708,10 @@ impl RichTextNextExample {
         // Ensure typing works immediately without a first click.
         let focus_handle = editor.read(cx).focus_handle();
         window.focus(&focus_handle);
-        let link_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx);
-            state.set_placeholder("https://example.com", window, cx);
-            state
-        });
         Self {
             app_menu_bar,
             editor,
             file_path: None,
-            link_input,
         }
     }
 
@@ -1375,7 +1823,7 @@ impl RichTextNextExample {
 }
 
 impl Render for RichTextNextExample {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let can_undo = self.editor.read(cx).can_undo();
         let can_redo = self.editor.read(cx).can_redo();

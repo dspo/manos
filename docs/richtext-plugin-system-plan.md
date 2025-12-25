@@ -354,25 +354,37 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 ### Iteration 2：EditorView（gpui 输入/IME/hit-test）与“文本布局 → path/offset”映射闭环
 
 **要实现什么**
-- 新的 `EditorView`（或 `EditorState` + element）负责：
-  - gpui `EntityInputHandler` 的 IME 集成（marked range、replace_text、bounds_for_range…）
-  - hit-test：point → `{path, offset}` 与 `{path, offset}` → screen bounds
-  - selection/caret 渲染与滚动定位（至少能 scroll-to-caret）
-- 文本渲染需从“纯 StyledText 一行”升级为“可定位”的布局结构：
-  - 允许你们继续用 `StyledText/TextLayout`，但要抽象为“layout tree”，每个文本片段能映射回对应的 Text node path+range。
+- `richtext_next` 示例的 EditorView 体验补齐（仍然处于同一套最终架构：tree+selection+ops+normalize）：
+  - gpui `EntityInputHandler` 的 IME 集成完整可用（marked range、replace_text、replace_and_mark、bounds_for_range…）。
+  - hit-test：鼠标点位 → `{path, offset}`（至少覆盖 root paragraph text 节点）。
+  - selection/caret：单段与跨段选区渲染；双击选词、三击选段；Shift+点击/拖拽扩展选区。
+  - 滚动：编辑区可滚动，且输入/移动光标/选择时 **caret 自动滚入视口**（scroll-to-caret）。
+- 文本渲染继续复用 `StyledText/TextLayout`，但要形成可复用的 layout cache（用于 hit-test 与 IME bounds）。
 
 **怎么实现（关键做法）**
 - 将 layout 缓存视为 `EditorLayout`（纯派生态），不进入 undo/serialize。
 - 建立统一的 `TextAnchor` 概念：`{path, byte_offset}` 与 gpui `TextLayout` 的 index 之间相互转换。
+- **避免“拖拽时 layout cache 丢失”**：不要在每次 render 时清空 layout cache；layout cache 由每行的 prepaint 写回更新（以便 drag/shift 等连续事件中总有可用的 mapping）。
+- **scroll-to-caret**：EditorState 持有 `ScrollHandle` 与 `viewport_bounds`；根据 `TextLayout.position_for_index` 得到 caret bounds，用与旧版一致的 margin 规则计算并更新 `scroll_handle.set_offset(...)`。
 
 **要验收什么**
-- `richtext_next` 示例升级验收：
-  - IME：中文/日文等输入法组合输入不会破坏 selection，marked underline 正常
-  - 鼠标：点击定位、拖拽选择、双击选词/三击选段（可按阶段实现，但该 iteration 结束时必须“体验完整”）
-  - bounds API：系统输入法候选框定位正常（依赖 `bounds_for_range`）
-- 验收方式：
-  - `cargo run --example richtext_next`
-  - 手动验收（包含 IME 场景）；如有条件可加最小的 layout mapping 单元测试（不强制）
+- 运行方式：`cargo run -p gpui-manos-components-story --example richtext_next`
+- 手动验收清单（Iteration 2 通过标准）：
+  - **滚动可用**：
+    - 连续 Enter 生成大量段落后，编辑区出现纵向滚动条；滚轮/触控板滚动可用。
+    - 光标移动/输入时，caret 会自动滚入视口（不会“打字打到看不见”）。
+  - **鼠标选区完整**：
+    - 单击落光标；按下拖拽可创建/调整选区；Shift+点击/拖拽可扩展选区。
+    - 双击：选词（中文边界见“已知问题”）；三击：选中当前段落（若段内存在 `\\n`，则选中当前行）。
+  - **跨段选区（root paragraphs）**：
+    - 从一个段落拖拽到另一个段落可形成跨段选区，并在每个段落行上可见高亮。
+    - Backspace/Delete/Cut 可删除跨段选区，并将起始段与末段尾部内容合并为一个段落。
+    - Copy 会以 `\\n` 拼接段落内容写入剪贴板（起始段选区片段 + 中间整段 + 末段片段）。
+    - Paste（包含 `\\n`）会拆分为多个段落（避免单段内塞入大量换行导致“三击像全选”的体验问题）。
+  - **IME bounds**：
+    - 中文拼音预编辑下划线正常；候选框位置跟随 caret（依赖 `bounds_for_range`），提交后不残留拼音字母。
+  - **已知问题**：
+    - 双击选词对中文边界目前不理想（已记录）：[`docs/richtext-next-known-issues.md`](richtext-next-known-issues.md)
 
 ### Iteration 3：插件化能力集扩展（List + Link + Marks + 工具层对接）
 
