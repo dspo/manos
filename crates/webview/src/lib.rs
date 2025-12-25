@@ -8,7 +8,9 @@ use http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE};
 use serde::Serialize;
 use serialize_to_javascript::{DefaultTemplate, Template, default_template};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use wry::{Error as WryError, Result, WebView, WebViewBuilder, WebViewId};
 
@@ -285,54 +287,38 @@ fn serve_static<S: ToString>(
         request.uri().host(),
         request.uri().path()
     );
-    // Read the file content from file path
-    let root = PathBuf::from(static_path.to_string());
-    let path = if path == "/" {
-        "index.html"
-    } else {
-        //  removing leading slash
-        &path[1..]
-    };
 
-    let content = match std::fs::canonicalize(root.join(path)) {
-        Ok(path) => match std::fs::read(path) {
-            Ok(content) => content,
-            Err(err) => {
-                println!("failed to read file: {err}");
-                return Ok(response_not_found(err)); // todo: change it to internal server error
-            }
-        },
+    let static_root = static_path.to_string();
+    let root = match fs::canonicalize(&static_root) {
+        Ok(root) => root,
         Err(err) => {
-            println!("failed to canonicalize path: {err}");
-            return Ok(response_not_found(path));
+            println!("failed to canonicalize static root `{static_root}`: {err}");
+            return Ok(response_internal_server_err("static root not accessible"));
         }
     };
 
-    // Return asset contents and mime types based on file extentions
-    // If you don't want to do this manually, there are some crates for you.
-    // Such as `infer` and `mime_guess`.
-    let mimetype = if path.ends_with(".html") || path == "/" {
-        "text/html"
-    } else if path.ends_with(".js") {
-        "text/javascript"
-    } else if path.ends_with(".png") {
-        "image/png"
-    } else if path.ends_with(".wasm") {
-        "application/wasm"
-    } else if path.ends_with(".css") {
-        "text/css"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        return Ok(response_not_implemented(path));
-    };
-
-    http::Response::builder()
-        .status(http::StatusCode::OK)
-        .header(CONTENT_TYPE, mimetype)
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(content)
-        .map_err(Into::into)
+    match resolve_static_asset(&root, path) {
+        Ok(asset) => response_asset(asset),
+        Err(StaticAssetError::NotFound(requested)) => {
+            println!("static asset not found: {}", requested.display());
+            Ok(response_not_found(requested.display()))
+        }
+        Err(StaticAssetError::OutsideRoot(requested)) => {
+            println!(
+                "attempt to read outside static root: {}",
+                requested.display()
+            );
+            Ok(response_forbidden(requested.display()))
+        }
+        Err(StaticAssetError::IsDirectory(requested)) => {
+            println!("requested path is a directory: {}", requested.display());
+            Ok(response_forbidden(requested.display()))
+        }
+        Err(StaticAssetError::Io(err)) => {
+            println!("failed to read static asset: {err}");
+            Ok(response_internal_server_err("failed to read static asset"))
+        }
+    }
 }
 
 fn response_not_found<S: ToString>(content: S) -> http::Response<Vec<u8>> {
@@ -344,20 +330,100 @@ fn response_not_found<S: ToString>(content: S) -> http::Response<Vec<u8>> {
         .unwrap()
 }
 
-fn response_not_implemented<S: ToString>(content: S) -> http::Response<Vec<u8>> {
-    http::Response::builder()
-        .status(http::StatusCode::NOT_IMPLEMENTED)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(format!("{} not implemented", content.to_string()).into_bytes())
-        .unwrap()
-}
-
 fn response_internal_server_err<S: ToString>(content: S) -> http::Response<Vec<u8>> {
     http::Response::builder()
         .status(http::StatusCode::INTERNAL_SERVER_ERROR)
         .header(CONTENT_TYPE, "text/plain")
         .body(content.to_string().as_bytes().to_vec())
+        .unwrap()
+}
+
+struct StaticAsset {
+    bytes: Vec<u8>,
+    mime: String,
+}
+
+enum StaticAssetError {
+    NotFound(PathBuf),
+    OutsideRoot(PathBuf),
+    IsDirectory(PathBuf),
+    Io(io::Error),
+}
+
+fn resolve_static_asset(
+    root: &Path,
+    uri_path: &str,
+) -> std::result::Result<StaticAsset, StaticAssetError> {
+    let relative = sanitize_path(uri_path)?;
+    let candidate = root.join(&relative);
+
+    let resolved = match fs::canonicalize(&candidate) {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(StaticAssetError::NotFound(relative));
+        }
+        Err(err) => return Err(StaticAssetError::Io(err)),
+    };
+
+    if !resolved.starts_with(root) {
+        return Err(StaticAssetError::OutsideRoot(relative));
+    }
+
+    if resolved.is_dir() {
+        return Err(StaticAssetError::IsDirectory(relative));
+    }
+
+    let bytes = fs::read(&resolved).map_err(StaticAssetError::Io)?;
+    let mime = mime_guess::from_path(&resolved)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+
+    Ok(StaticAsset { bytes, mime })
+}
+
+fn sanitize_path(path: &str) -> std::result::Result<PathBuf, StaticAssetError> {
+    let decoded = decode_uri_component(path);
+    let trimmed = decoded.trim_start_matches('/');
+    let fallback = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
+    let mut buf = PathBuf::new();
+
+    for component in Path::new(fallback).components() {
+        match component {
+            Component::Normal(part) => buf.push(part),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(StaticAssetError::OutsideRoot(PathBuf::from(fallback)));
+            }
+        }
+    }
+
+    if buf.as_os_str().is_empty() {
+        buf.push("index.html");
+    }
+
+    Ok(buf)
+}
+
+fn response_asset(asset: StaticAsset) -> http::Result<http::Response<Vec<u8>>> {
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(CONTENT_TYPE, asset.mime)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(asset.bytes)
+        .map_err(Into::into)
+}
+
+fn response_forbidden<S: ToString>(content: S) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(http::StatusCode::FORBIDDEN)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(format!("{} is not accessible", content.to_string()).into_bytes())
         .unwrap()
 }
 

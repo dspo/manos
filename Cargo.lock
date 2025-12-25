@@ -2685,6 +2685,7 @@ dependencies = [
  "gpui",
  "gpui-manos-webview-macros",
  "http",
+ "mime_guess",
  "raw-window-handle",
  "serde",
  "serde_json",
