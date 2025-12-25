@@ -67,6 +67,32 @@ Notes:
   - `T: serde::Serialize`
   - `Result<T, E>` where `T: serde::Serialize` and `E: ToString`
 
+## Issues (Gap vs Tauri)
+
+This section tracks known gaps between this "mini-Tauri" implementation and upstream Tauri behavior.
+
+### P0 — Compatibility / Security
+
+- [ ] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
+- [ ] IPC request validation: enforce/parse `Tauri-Invoke-Key`, `Origin`, `Tauri-Callback`, `Tauri-Error`, and decode body based on `Content-Type` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [ ] IPC preflight & method handling: support `OPTIONS` and restrict to `POST/OPTIONS` like Tauri (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [ ] postMessage fallback: implement the `window.ipc.postMessage` bridge when custom-protocol IPC fails (Tauri JS falls back; Rust handler is missing here).
+
+### P1 — Behavior Parity
+
+- [ ] Static asset fallback chain: support `path.html` / `path/index.html` / `index.html` fallbacks (ref: Tauri `crates/tauri/src/manager/mod.rs` `get_asset`).
+- [ ] CSP + security headers: add configurable headers and per-origin `Access-Control-Allow-Origin` (avoid unconditional `*`).
+- [ ] Dev server/proxy mode: proxy the app protocol to a dev server (and optional caching) in development (ref: Tauri `crates/tauri/src/protocol/tauri.rs`).
+- [ ] Binary payload + channel optimization: support `application/octet-stream` invokes and a channel-based fast response path (`__TAURI_CHANNEL__`).
+- [ ] Compose `invoke_handler` with low-level APIs: allow plugin-style `plugin:xxx|yyy` handlers even when `invoke_handler` is set.
+
+### P2 — Scripts Without Backend Support
+
+- [ ] Implement `plugin:webview|set_webview_zoom`, `plugin:webview|internal_toggle_devtools`, `plugin:webview|print` so injected scripts don’t 404.
+- [ ] Replace mocked window/webview labels in injected metadata.
+- [ ] Event system parity: add Rust-side listener management to match injected JS event dispatcher.
+- [ ] Isolation pattern: implement isolation mode (iframe + crypto) and related protocol(s).
+
 ## License
 
 This project is dual-licensed under both MIT and Apache 2.0 licenses.
