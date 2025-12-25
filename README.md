@@ -13,6 +13,7 @@ This repository is intended to host additional GPUI components about a Richtext 
 - DnD list example: `cargo run --example dnd_list`
 - DnD tree example: `cargo run --example dnd_tree`
 - Rich text example: `cargo run --example richtext`
+- WebView example: `cargo run --example webview` (loads `crates/story/examples/webview-app/dist` if present; otherwise shows a friendly hint page)
 - Plate toolbar buttons: `cargo run --example plate_toolbar_buttons`
 
 ## Docs
