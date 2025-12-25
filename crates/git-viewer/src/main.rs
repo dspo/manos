@@ -20,10 +20,20 @@ struct FileEntry {
     status: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusFilter {
+    All,
+    Conflicts,
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
 #[derive(Clone, Debug)]
 enum AppScreen {
     StatusList,
     DiffView,
+    ConflictView,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +54,53 @@ enum SplitLayout {
 enum DiffViewMode {
     Split,
     Inline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompareTarget {
+    HeadToWorktree,
+    IndexToWorktree,
+    HeadToIndex,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ConflictResolution {
+    Ours,
+    Theirs,
+    Base,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HunkApplyAction {
+    Stage,
+    Unstage,
+    Revert,
+}
+
+impl HunkApplyAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stage => "Stage",
+            Self::Unstage => "Unstage",
+            Self::Revert => "Revert",
+        }
+    }
+
+    fn required_compare_target(self) -> CompareTarget {
+        match self {
+            Self::Stage | Self::Revert => CompareTarget::IndexToWorktree,
+            Self::Unstage => CompareTarget::HeadToIndex,
+        }
+    }
+
+    fn git_args(self) -> Vec<&'static str> {
+        match self {
+            Self::Stage => vec!["apply", "--cached"],
+            Self::Unstage => vec!["apply", "-R", "--cached"],
+            Self::Revert => vec!["apply", "-R"],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -68,15 +125,51 @@ enum DisplayRow {
 #[derive(Clone)]
 struct DiffViewState {
     title: SharedString,
+    path: Option<String>,
+    status: Option<String>,
+    compare_target: CompareTarget,
     old_text: String,
     new_text: String,
     ignore_whitespace: bool,
     context_lines: usize,
     old_lines: Vec<String>,
     new_lines: Vec<String>,
+    diff_model: diffview::DiffModel,
     rows: Vec<DisplayRow>,
     hunk_rows: Vec<usize>,
     current_hunk: usize,
+    scroll_handle: VirtualListScrollHandle,
+    scroll_state: ScrollbarState,
+}
+
+#[derive(Clone, Debug)]
+enum ConflictRow {
+    EmptyState {
+        text: SharedString,
+    },
+    BlockHeader {
+        conflict_index: usize,
+        ours_branch_name: SharedString,
+        theirs_branch_name: SharedString,
+        has_base: bool,
+    },
+    Code {
+        kind: diffview::DiffRowKind,
+        ours_segments: Vec<diffview::DiffSegment>,
+        base_segments: Vec<diffview::DiffSegment>,
+        theirs_segments: Vec<diffview::DiffSegment>,
+    },
+}
+
+#[derive(Clone)]
+struct ConflictViewState {
+    title: SharedString,
+    path: Option<String>,
+    text: String,
+    conflicts: Vec<diffview::ConflictRegion>,
+    rows: Vec<ConflictRow>,
+    conflict_rows: Vec<usize>,
+    current_conflict: usize,
     scroll_handle: VirtualListScrollHandle,
     scroll_state: ScrollbarState,
 }
@@ -87,9 +180,11 @@ struct GitViewerApp {
     loading: bool,
     screen: AppScreen,
     diff_view: Option<DiffViewState>,
+    conflict_view: Option<ConflictViewState>,
     diff_options: DiffViewOptions,
     split_layout: SplitLayout,
     view_mode: DiffViewMode,
+    status_filter: StatusFilter,
 }
 
 impl GitViewerApp {
@@ -124,23 +219,49 @@ impl GitViewerApp {
             loading: true,
             screen: AppScreen::StatusList,
             diff_view: None,
+            conflict_view: None,
             diff_options: DiffViewOptions {
                 ignore_whitespace: false,
                 context_lines: 3,
             },
             split_layout: SplitLayout::TwoPane,
             view_mode: DiffViewMode::Split,
+            status_filter: StatusFilter::All,
         }
     }
 
     fn open_demo(&mut self) {
         let (old, new) = demo_texts();
-        self.open_diff_view("Split Diff Demo".into(), old, new);
+        self.open_diff_view(
+            "Split Diff Demo".into(),
+            None,
+            None,
+            CompareTarget::HeadToWorktree,
+            old,
+            new,
+        );
     }
 
-    fn open_diff_view(&mut self, title: SharedString, old_text: String, new_text: String) {
+    fn open_conflict_demo(&mut self) {
+        let text = conflict_demo_text();
+        self.open_conflict_view("Conflict Demo".into(), None, text);
+    }
+
+    fn open_diff_view(
+        &mut self,
+        title: SharedString,
+        path: Option<String>,
+        status: Option<String>,
+        compare_target: CompareTarget,
+        old_text: String,
+        new_text: String,
+    ) {
+        self.conflict_view = None;
         self.diff_view = Some(DiffViewState::new(
             title,
+            path,
+            status,
+            compare_target,
             old_text,
             new_text,
             self.diff_options,
@@ -149,11 +270,157 @@ impl GitViewerApp {
         self.screen = AppScreen::DiffView;
     }
 
+    fn open_conflict_view(&mut self, title: SharedString, path: Option<String>, text: String) {
+        self.diff_view = None;
+        self.conflict_view = Some(ConflictViewState::new(title, path, text));
+        self.screen = AppScreen::ConflictView;
+    }
+
     fn close_diff_view(&mut self) {
         self.screen = AppScreen::StatusList;
     }
 
+    fn close_conflict_view(&mut self) {
+        self.screen = AppScreen::StatusList;
+    }
+
     fn open_file_diff(
+        &mut self,
+        path: String,
+        status: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = default_compare_target(&status);
+        self.open_file_diff_with_target(path, status, target, window, cx);
+    }
+
+    fn open_file_diff_with_target(
+        &mut self,
+        path: String,
+        status: String,
+        target: CompareTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path_for_task = path.clone();
+        let status_for_task = status.clone();
+
+        window.push_notification(
+            Notification::new().message(format!(
+                "正在加载 diff：{status} {path}（{}）",
+                compare_target_label(target)
+            )),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let (old_text, old_err) = match target {
+                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                    match read_head_file(&repo_root, &path_for_task, &status_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::IndexToWorktree => {
+                    match read_index_file(&repo_root, &path_for_task, &status_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            let (new_text, new_err) = match target {
+                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                    match read_working_file(&repo_root, &path_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::HeadToIndex => {
+                    match read_index_file(&repo_root, &path_for_task, &status_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            window
+                .update(|window, cx| {
+                    if let Some(err) = old_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(target, Side::Old)
+                            )),
+                            cx,
+                        );
+                    }
+                    if let Some(err) = new_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(target, Side::New)
+                            )),
+                            cx,
+                        );
+                    }
+
+                    this.update(cx, |this, _cx| {
+                        this.open_diff_view(
+                            format!("{status_for_task} {path_for_task}").into(),
+                            Some(path_for_task.clone()),
+                            Some(status_for_task.clone()),
+                            target,
+                            old_text,
+                            new_text,
+                        );
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn set_compare_target(
+        &mut self,
+        target: CompareTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(diff_view) = self.diff_view.as_ref() else {
+            return;
+        };
+        if diff_view.compare_target == target {
+            return;
+        }
+
+        let Some(path) = diff_view.path.clone() else {
+            return;
+        };
+        let status = diff_view.status.clone().unwrap_or_default();
+        self.open_file_diff_with_target(path, status, target, window, cx);
+    }
+
+    fn open_file(
+        &mut self,
+        path: String,
+        status: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if status.contains('U') {
+            self.open_conflict_file(path, status, window, cx);
+        } else {
+            self.open_file_diff(path, status, window, cx);
+        }
+    }
+
+    fn open_conflict_file(
         &mut self,
         path: String,
         status: String,
@@ -166,31 +433,19 @@ impl GitViewerApp {
         let status_for_task = status.clone();
 
         window.push_notification(
-            Notification::new().message(format!("正在加载 diff：{status} {path}")),
+            Notification::new().message(format!("正在加载冲突：{status} {path}")),
             cx,
         );
 
         cx.spawn_in(window, async move |_, window| {
-            let (old_text, old_err) =
-                match read_head_file(&repo_root, &path_for_task, &status_for_task) {
-                    Ok(text) => (text, None),
-                    Err(err) => (String::new(), Some(err.to_string())),
-                };
-            let (new_text, new_err) = match read_working_file(&repo_root, &path_for_task) {
+            let (text, err) = match read_working_file(&repo_root, &path_for_task) {
                 Ok(text) => (text, None),
                 Err(err) => (String::new(), Some(err.to_string())),
             };
 
             window
                 .update(|window, cx| {
-                    if let Some(err) = old_err {
-                        window.push_notification(
-                            Notification::new()
-                                .message(format!("读取 HEAD 版本失败，按空内容处理：{err}")),
-                            cx,
-                        );
-                    }
-                    if let Some(err) = new_err {
+                    if let Some(err) = err {
                         window.push_notification(
                             Notification::new()
                                 .message(format!("读取工作区版本失败，按空内容处理：{err}")),
@@ -199,10 +454,10 @@ impl GitViewerApp {
                     }
 
                     this.update(cx, |this, _cx| {
-                        this.open_diff_view(
+                        this.open_conflict_view(
                             format!("{status_for_task} {path_for_task}").into(),
-                            old_text,
-                            new_text,
+                            Some(path_for_task),
+                            text,
                         );
                     });
                 })
@@ -246,12 +501,23 @@ impl GitViewerApp {
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
         let title = diff_view.title.clone();
+        let path = diff_view.path.clone();
+        let status = diff_view.status.clone();
+        let compare_target = diff_view.compare_target;
         let old_text = diff_view.old_text.clone();
         let new_text = diff_view.new_text.clone();
         let current_hunk = diff_view.current_hunk;
 
-        let mut next =
-            DiffViewState::new(title, old_text, new_text, self.diff_options, self.view_mode);
+        let mut next = DiffViewState::new(
+            title,
+            path,
+            status,
+            compare_target,
+            old_text,
+            new_text,
+            self.diff_options,
+            self.view_mode,
+        );
         next.scroll_handle = scroll_handle;
         next.scroll_state = scroll_state;
         next.current_hunk = current_hunk.min(next.hunk_rows.len().saturating_sub(1));
@@ -347,11 +613,666 @@ impl GitViewerApp {
         diff_view.recalc_hunk_rows();
     }
 
+    fn resolve_conflict(&mut self, conflict_index: usize, resolution: ConflictResolution) {
+        let Some(conflict_view) = self.conflict_view.as_mut() else {
+            return;
+        };
+        if conflict_index >= conflict_view.conflicts.len() {
+            return;
+        }
+
+        let region = conflict_view.conflicts[conflict_index].clone();
+        let replacement = match resolution {
+            ConflictResolution::Ours => conflict_view.text[region.ours.clone()].to_string(),
+            ConflictResolution::Theirs => conflict_view.text[region.theirs.clone()].to_string(),
+            ConflictResolution::Base => region
+                .base
+                .as_ref()
+                .map(|range| conflict_view.text[range.clone()].to_string())
+                .unwrap_or_default(),
+            ConflictResolution::Both => format!(
+                "{}{}",
+                &conflict_view.text[region.ours.clone()],
+                &conflict_view.text[region.theirs.clone()]
+            ),
+        };
+
+        let mut next = String::with_capacity(
+            conflict_view.text.len().saturating_sub(region.range.len()) + replacement.len(),
+        );
+        next.push_str(&conflict_view.text[..region.range.start]);
+        next.push_str(&replacement);
+        next.push_str(&conflict_view.text[region.range.end..]);
+
+        conflict_view.text = next;
+        conflict_view.rebuild();
+    }
+
+    fn jump_conflict(&mut self, direction: i32) {
+        let Some(conflict_view) = self.conflict_view.as_mut() else {
+            return;
+        };
+        if conflict_view.conflict_rows.is_empty() {
+            return;
+        }
+
+        let mut next_index = conflict_view.current_conflict;
+        if direction < 0 {
+            next_index = next_index.saturating_sub(1);
+        } else if direction > 0 {
+            next_index = (next_index + 1).min(conflict_view.conflict_rows.len().saturating_sub(1));
+        }
+
+        conflict_view.current_conflict = next_index;
+        let row_index = conflict_view.conflict_rows[next_index];
+        conflict_view
+            .scroll_handle
+            .scroll_to_item(row_index, ScrollStrategy::Top);
+    }
+
+    fn save_conflict_to_working_tree(
+        &mut self,
+        add_to_index: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conflict_view) = self.conflict_view.as_ref() else {
+            return;
+        };
+        let Some(path) = conflict_view.path.clone() else {
+            return;
+        };
+
+        if !conflict_view.conflicts.is_empty() {
+            window.push_notification(
+                Notification::new().message("仍有冲突未解决，无法保存/标记已解决"),
+                cx,
+            );
+            return;
+        }
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let text = conflict_view.text.clone();
+        let path_for_task = path.clone();
+
+        window.push_notification(
+            Notification::new().message(if add_to_index {
+                format!("保存并标记已解决：{path}")
+            } else {
+                format!("保存到文件：{path}")
+            }),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let full_path = repo_root.join(&path_for_task);
+            let write_result = std::fs::write(&full_path, text.as_bytes())
+                .with_context(|| format!("写入文件失败：{path_for_task}"));
+
+            let add_result = if add_to_index && write_result.is_ok() {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_root)
+                    .args(["add", "--"])
+                    .arg(&path_for_task)
+                    .output()
+                    .with_context(|| format!("执行 git add 失败：{path_for_task}"));
+
+                match output {
+                    Ok(output) if output.status.success() => Ok(()),
+                    Ok(output) => Err(anyhow!(
+                        "git add 返回非零（{}）：{}",
+                        output.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )),
+                    Err(err) => Err(err),
+                }
+            } else {
+                Ok(())
+            };
+
+            let status_result = fetch_git_status(&repo_root);
+
+            window
+                .update(|window, cx| {
+                    if let Err(err) = write_result {
+                        window.push_notification(
+                            Notification::new().message(format!("保存失败：{err}")),
+                            cx,
+                        );
+                        return;
+                    }
+                    if let Err(err) = add_result {
+                        window.push_notification(
+                            Notification::new().message(format!("git add 失败：{err}")),
+                            cx,
+                        );
+                    } else if add_to_index {
+                        window.push_notification(
+                            Notification::new().message("已保存并标记为已解决（git add）"),
+                            cx,
+                        );
+                    } else {
+                        window.push_notification(
+                            Notification::new().message("已保存到工作区文件"),
+                            cx,
+                        );
+                    }
+
+                    if let Ok(entries) = status_result {
+                        this.update(cx, |this, _cx| {
+                            this.files = entries;
+                        });
+                    }
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn stage_current_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(diff_view) = self.diff_view.as_ref() else {
+            return;
+        };
+        let Some(path) = diff_view.path.clone() else {
+            return;
+        };
+
+        let compare_target = diff_view.compare_target;
+        let scroll_handle = diff_view.scroll_handle.clone();
+        let scroll_state = diff_view.scroll_state.clone();
+        let current_hunk = diff_view.current_hunk;
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path_for_task = path.clone();
+
+        window.push_notification(Notification::new().message(format!("git add {path}")), cx);
+
+        cx.spawn_in(window, async move |_, window| {
+            let add_result = run_git(repo_root.as_path(), ["add", "--", &path_for_task]);
+            let add_ok = add_result.is_ok();
+            let add_err = add_result.err().map(|err| err.to_string());
+            let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
+                Ok(entries) => {
+                    let updated_status = entries
+                        .iter()
+                        .find(|entry| entry.path == path_for_task)
+                        .map(|entry| entry.status.clone())
+                        .unwrap_or_default();
+                    (Some(entries), None, updated_status)
+                }
+                Err(err) => (None, Some(err.to_string()), String::new()),
+            };
+
+            let (old_text, old_err) = match compare_target {
+                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                    match read_head_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::IndexToWorktree => {
+                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            let (new_text, new_err) = match compare_target {
+                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                    match read_working_file(&repo_root, &path_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::HeadToIndex => {
+                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            window
+                .update(|window, cx| {
+                    if let Some(err) = add_err {
+                        window.push_notification(
+                            Notification::new().message(format!("git add 失败：{err}")),
+                            cx,
+                        );
+                    } else {
+                        window.push_notification(Notification::new().message("git add 成功"), cx);
+                    }
+
+                    if let Some(err) = status_err {
+                        window.push_notification(
+                            Notification::new().message(format!("刷新 git 状态失败：{err}")),
+                            cx,
+                        );
+                    }
+
+                    if let Some(err) = old_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(compare_target, Side::Old)
+                            )),
+                            cx,
+                        );
+                    }
+                    if let Some(err) = new_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(compare_target, Side::New)
+                            )),
+                            cx,
+                        );
+                    }
+
+                    this.update(cx, |this, cx| {
+                        if let Some(entries) = entries {
+                            this.files = entries;
+                        }
+
+                        if add_ok {
+                            let title: SharedString = if updated_status.is_empty() {
+                                path_for_task.clone().into()
+                            } else {
+                                format!("{updated_status} {path_for_task}").into()
+                            };
+
+                            if let Some(diff_view) = this.diff_view.as_ref() {
+                                if diff_view.path.as_deref() == Some(path_for_task.as_str()) {
+                                    let mut next = DiffViewState::new(
+                                        title,
+                                        Some(path_for_task.clone()),
+                                        (!updated_status.is_empty())
+                                            .then(|| updated_status.clone()),
+                                        compare_target,
+                                        old_text,
+                                        new_text,
+                                        this.diff_options,
+                                        this.view_mode,
+                                    );
+                                    next.scroll_handle = scroll_handle.clone();
+                                    next.scroll_state = scroll_state.clone();
+                                    next.current_hunk =
+                                        current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                                    this.diff_view = Some(next);
+                                }
+                            }
+                        }
+
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn unstage_current_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(diff_view) = self.diff_view.as_ref() else {
+            return;
+        };
+        let Some(path) = diff_view.path.clone() else {
+            return;
+        };
+
+        let compare_target = diff_view.compare_target;
+        let scroll_handle = diff_view.scroll_handle.clone();
+        let scroll_state = diff_view.scroll_state.clone();
+        let current_hunk = diff_view.current_hunk;
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path_for_task = path.clone();
+
+        window.push_notification(
+            Notification::new().message(format!("git reset HEAD -- {path}")),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let reset_result =
+                run_git(repo_root.as_path(), ["reset", "HEAD", "--", &path_for_task]);
+            let reset_ok = reset_result.is_ok();
+            let reset_err = reset_result.err().map(|err| err.to_string());
+            let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
+                Ok(entries) => {
+                    let updated_status = entries
+                        .iter()
+                        .find(|entry| entry.path == path_for_task)
+                        .map(|entry| entry.status.clone())
+                        .unwrap_or_default();
+                    (Some(entries), None, updated_status)
+                }
+                Err(err) => (None, Some(err.to_string()), String::new()),
+            };
+
+            let (old_text, old_err) = match compare_target {
+                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                    match read_head_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::IndexToWorktree => {
+                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            let (new_text, new_err) = match compare_target {
+                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                    match read_working_file(&repo_root, &path_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::HeadToIndex => {
+                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            window
+                .update(|window, cx| {
+                    if let Some(err) = reset_err {
+                        window.push_notification(
+                            Notification::new().message(format!("unstage 失败：{err}")),
+                            cx,
+                        );
+                    } else {
+                        window.push_notification(Notification::new().message("unstage 成功"), cx);
+                    }
+
+                    if let Some(err) = status_err {
+                        window.push_notification(
+                            Notification::new().message(format!("刷新 git 状态失败：{err}")),
+                            cx,
+                        );
+                    }
+
+                    if let Some(err) = old_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(compare_target, Side::Old)
+                            )),
+                            cx,
+                        );
+                    }
+                    if let Some(err) = new_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(compare_target, Side::New)
+                            )),
+                            cx,
+                        );
+                    }
+
+                    this.update(cx, |this, cx| {
+                        if let Some(entries) = entries {
+                            this.files = entries;
+                        }
+
+                        if reset_ok {
+                            let title: SharedString = if updated_status.is_empty() {
+                                path_for_task.clone().into()
+                            } else {
+                                format!("{updated_status} {path_for_task}").into()
+                            };
+
+                            if let Some(diff_view) = this.diff_view.as_ref() {
+                                if diff_view.path.as_deref() == Some(path_for_task.as_str()) {
+                                    let mut next = DiffViewState::new(
+                                        title,
+                                        Some(path_for_task.clone()),
+                                        (!updated_status.is_empty())
+                                            .then(|| updated_status.clone()),
+                                        compare_target,
+                                        old_text,
+                                        new_text,
+                                        this.diff_options,
+                                        this.view_mode,
+                                    );
+                                    next.scroll_handle = scroll_handle.clone();
+                                    next.scroll_state = scroll_state.clone();
+                                    next.current_hunk =
+                                        current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                                    this.diff_view = Some(next);
+                                }
+                            }
+                        }
+
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn stage_current_hunk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_current_hunk(HunkApplyAction::Stage, window, cx);
+    }
+
+    fn unstage_current_hunk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_current_hunk(HunkApplyAction::Unstage, window, cx);
+    }
+
+    fn revert_current_hunk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_current_hunk(HunkApplyAction::Revert, window, cx);
+    }
+
+    fn apply_current_hunk(
+        &mut self,
+        action: HunkApplyAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(diff_view) = self.diff_view.as_ref() else {
+            return;
+        };
+
+        let required_target = action.required_compare_target();
+        if diff_view.compare_target != required_target {
+            window.push_notification(
+                Notification::new().message(format!(
+                    "当前对比为 {}，请切换到 {} 再执行 {}",
+                    compare_target_label(diff_view.compare_target),
+                    compare_target_label(required_target),
+                    action.label()
+                )),
+                cx,
+            );
+            return;
+        }
+
+        let Some(path) = diff_view.path.clone() else {
+            return;
+        };
+
+        let hunk_count = diff_view.diff_model.hunks.len();
+        if hunk_count == 0 {
+            return;
+        }
+        let hunk_index = diff_view.current_hunk.min(hunk_count.saturating_sub(1));
+        let patch = unified_patch_for_hunk(&path, &diff_view.diff_model.hunks[hunk_index]);
+
+        let compare_target = diff_view.compare_target;
+        let scroll_handle = diff_view.scroll_handle.clone();
+        let scroll_state = diff_view.scroll_state.clone();
+        let current_hunk = diff_view.current_hunk;
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path_for_task = path.clone();
+
+        window.push_notification(
+            Notification::new().message(format!(
+                "{} hunk {}/{}: {path_for_task}",
+                action.label(),
+                hunk_index + 1,
+                hunk_count
+            )),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let apply_result = run_git_with_stdin(repo_root.as_path(), action.git_args(), &patch);
+            let (entries, status_err, updated_status) = match fetch_git_status(&repo_root) {
+                Ok(entries) => {
+                    let updated_status = entries
+                        .iter()
+                        .find(|entry| entry.path == path_for_task)
+                        .map(|entry| entry.status.clone())
+                        .unwrap_or_default();
+                    (Some(entries), None, updated_status)
+                }
+                Err(err) => (None, Some(err.to_string()), String::new()),
+            };
+
+            let (old_text, old_err) = match compare_target {
+                CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
+                    match read_head_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::IndexToWorktree => {
+                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            let (new_text, new_err) = match compare_target {
+                CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
+                    match read_working_file(&repo_root, &path_for_task) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+                CompareTarget::HeadToIndex => {
+                    match read_index_file(&repo_root, &path_for_task, &updated_status) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    }
+                }
+            };
+
+            window
+                .update(|window, cx| {
+                    if let Err(err) = apply_result {
+                        window.push_notification(
+                            Notification::new().message(format!("{} 失败：{err}", action.label())),
+                            cx,
+                        );
+                        return;
+                    }
+
+                    window.push_notification(
+                        Notification::new().message(format!("{} 成功", action.label())),
+                        cx,
+                    );
+
+                    if let Some(err) = status_err {
+                        window.push_notification(
+                            Notification::new().message(format!("刷新 git 状态失败：{err}")),
+                            cx,
+                        );
+                    }
+
+                    if let Some(err) = old_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(compare_target, Side::Old)
+                            )),
+                            cx,
+                        );
+                    }
+                    if let Some(err) = new_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(compare_target, Side::New)
+                            )),
+                            cx,
+                        );
+                    }
+
+                    this.update(cx, |this, cx| {
+                        if let Some(entries) = entries {
+                            this.files = entries;
+                        }
+
+                        let title: SharedString = if updated_status.is_empty() {
+                            path_for_task.clone().into()
+                        } else {
+                            format!("{updated_status} {path_for_task}").into()
+                        };
+
+                        if let Some(diff_view) = this.diff_view.as_ref() {
+                            if diff_view.path.as_deref() == Some(path_for_task.as_str()) {
+                                let mut next = DiffViewState::new(
+                                    title,
+                                    Some(path_for_task.clone()),
+                                    (!updated_status.is_empty()).then(|| updated_status.clone()),
+                                    compare_target,
+                                    old_text,
+                                    new_text,
+                                    this.diff_options,
+                                    this.view_mode,
+                                );
+                                next.scroll_handle = scroll_handle.clone();
+                                next.scroll_state = scroll_state.clone();
+                                next.current_hunk =
+                                    current_hunk.min(next.hunk_rows.len().saturating_sub(1));
+                                this.diff_view = Some(next);
+                            }
+                        }
+
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
     fn render_status_list(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let counts = StatusCounts::from_entries(&self.files);
+        let filtered_count = self
+            .files
+            .iter()
+            .filter(|entry| matches_filter(entry, self.status_filter))
+            .count();
+
         let header: SharedString = if self.loading {
             "正在加载 git 状态…".into()
         } else {
-            format!("发现 {} 个变更文件", self.files.len()).into()
+            format!("显示 {} / {} 个文件", filtered_count, counts.all).into()
         };
 
         let demo_button = Button::new("open-demo")
@@ -362,6 +1283,60 @@ impl GitViewerApp {
                 cx.notify();
             }));
 
+        let conflict_demo_button = Button::new("open-conflict-demo")
+            .label("打开 Conflict Demo")
+            .ghost()
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.open_conflict_demo();
+                cx.notify();
+            }));
+
+        let filter_button = |filter: StatusFilter, id: &'static str, label: String| {
+            let mut button = Button::new(id).label(label);
+            if self.status_filter == filter {
+                button = button.primary();
+            } else {
+                button = button
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.status_filter = filter;
+                        cx.notify();
+                    }));
+            }
+            button
+        };
+
+        let filter_bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .child(filter_button(
+                StatusFilter::All,
+                "filter-all",
+                format!("All {}", counts.all),
+            ))
+            .child(filter_button(
+                StatusFilter::Conflicts,
+                "filter-conflicts",
+                format!("Conflicts {}", counts.conflicts),
+            ))
+            .child(filter_button(
+                StatusFilter::Staged,
+                "filter-staged",
+                format!("Staged {}", counts.staged),
+            ))
+            .child(filter_button(
+                StatusFilter::Unstaged,
+                "filter-unstaged",
+                format!("Unstaged {}", counts.unstaged),
+            ))
+            .child(filter_button(
+                StatusFilter::Untracked,
+                "filter-untracked",
+                format!("Untracked {}", counts.untracked),
+            ));
+
         let list: Vec<AnyElement> = if self.loading {
             vec![div().child("加载中…").into_any_element()]
         } else if self.files.is_empty() {
@@ -369,6 +1344,7 @@ impl GitViewerApp {
         } else {
             self.files
                 .iter()
+                .filter(|entry| matches_filter(entry, self.status_filter))
                 .enumerate()
                 .map(|(index, entry)| {
                     let path = entry.path.clone();
@@ -377,8 +1353,8 @@ impl GitViewerApp {
                         .label(format!("{status} {path}"))
                         .w_full()
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            println!("[git-viewer] 打开 diff: {status} {path}");
-                            this.open_file_diff(path.clone(), status.clone(), window, cx);
+                            println!("[git-viewer] 打开文件: {status} {path}");
+                            this.open_file(path.clone(), status.clone(), window, cx);
                             cx.notify();
                         }))
                         .into_any_element()
@@ -399,8 +1375,16 @@ impl GitViewerApp {
                     .justify_between()
                     .gap(px(8.))
                     .child(div().child(header))
-                    .child(demo_button),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.))
+                            .child(demo_button)
+                            .child(conflict_demo_button),
+                    ),
             )
+            .child(filter_bar)
             .child(div().flex_col().gap(px(6.)).children(list))
     }
 
@@ -413,11 +1397,27 @@ impl GitViewerApp {
         let inline_mode = view_mode == DiffViewMode::Inline;
         let two_pane = matches!(self.split_layout, SplitLayout::TwoPane);
         let title = diff_view.title.clone();
+        let compare_target = diff_view.compare_target;
         let ignore_whitespace = diff_view.ignore_whitespace;
         let context_lines = diff_view.context_lines;
         let hunk_count = diff_view.hunk_rows.len();
         let can_prev_hunk = diff_view.current_hunk > 0;
         let can_next_hunk = diff_view.current_hunk + 1 < diff_view.hunk_rows.len();
+        let file_status = diff_view.status.as_deref().unwrap_or_default();
+        let has_file_path = diff_view.path.is_some();
+        let can_stage = has_file_path
+            && (is_untracked_status(file_status)
+                || status_xy(file_status).is_some_and(|(_, y)| y != ' ' && y != '?' && y != '!'));
+        let can_unstage = has_file_path
+            && status_xy(file_status).is_some_and(|(x, _)| x != ' ' && x != '?' && x != '!');
+        let has_hunks = hunk_count > 0;
+        let can_stage_hunk = has_file_path
+            && has_hunks
+            && !is_untracked_status(file_status)
+            && compare_target == CompareTarget::IndexToWorktree;
+        let can_revert_hunk = can_stage_hunk;
+        let can_unstage_hunk =
+            has_file_path && has_hunks && compare_target == CompareTarget::HeadToIndex;
         let rows_len = diff_view.rows.len();
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
@@ -425,10 +1425,8 @@ impl GitViewerApp {
 
         let toolbar = div()
             .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(12.))
+            .flex_col()
+            .gap(px(8.))
             .p(px(12.))
             .border_b_1()
             .border_color(cx.theme().border)
@@ -447,7 +1445,7 @@ impl GitViewerApp {
                                 cx.notify();
                             })),
                     )
-                    .child(div().child(title)),
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(title)),
             )
             .child(
                 div()
@@ -455,6 +1453,7 @@ impl GitViewerApp {
                     .flex_row()
                     .items_center()
                     .gap(px(12.))
+                    .flex_wrap()
                     .child(
                         div()
                             .flex()
@@ -482,6 +1481,71 @@ impl GitViewerApp {
                                         cx.notify();
                                     }))
                                 }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().text_color(cx.theme().muted_foreground).child("对比:"))
+                            .child({
+                                let mut button =
+                                    Button::new("compare-head-worktree").label("HEAD↔工作区");
+                                if compare_target == CompareTarget::HeadToWorktree {
+                                    button = button.primary();
+                                } else {
+                                    button = button.ghost().on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.set_compare_target(
+                                                CompareTarget::HeadToWorktree,
+                                                window,
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        },
+                                    ));
+                                }
+                                button
+                            })
+                            .child({
+                                let mut button =
+                                    Button::new("compare-index-worktree").label("暂存↔工作区");
+                                if compare_target == CompareTarget::IndexToWorktree {
+                                    button = button.primary();
+                                } else {
+                                    button = button.ghost().on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.set_compare_target(
+                                                CompareTarget::IndexToWorktree,
+                                                window,
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        },
+                                    ));
+                                }
+                                button
+                            })
+                            .child({
+                                let mut button =
+                                    Button::new("compare-head-index").label("HEAD↔暂存");
+                                if compare_target == CompareTarget::HeadToIndex {
+                                    button = button.primary();
+                                } else {
+                                    button = button.ghost().on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.set_compare_target(
+                                                CompareTarget::HeadToIndex,
+                                                window,
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        },
+                                    ));
+                                }
+                                button
                             }),
                     )
                     .child(div().child(format!("hunks: {hunk_count} / rows: {rows_len}")))
@@ -577,6 +1641,56 @@ impl GitViewerApp {
                             })),
                     )
                     .child(
+                        Button::new("stage-file")
+                            .label("Stage")
+                            .ghost()
+                            .disabled(!can_stage)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.stage_current_file(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("stage-hunk")
+                            .label("Stage hunk")
+                            .ghost()
+                            .disabled(!can_stage_hunk)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.stage_current_hunk(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("revert-hunk")
+                            .label("Revert hunk")
+                            .ghost()
+                            .disabled(!can_revert_hunk)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.revert_current_hunk(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("unstage-file")
+                            .label("Unstage")
+                            .ghost()
+                            .disabled(!can_unstage)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.unstage_current_file(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("unstage-hunk")
+                            .label("Unstage hunk")
+                            .ghost()
+                            .disabled(!can_unstage_hunk)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.unstage_current_hunk(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Switch::new("ignore-whitespace")
                             .label("忽略空白")
                             .checked(ignore_whitespace)
@@ -655,7 +1769,7 @@ impl GitViewerApp {
                         .bg(theme.muted.alpha(0.2))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child("HEAD");
+                        .child(compare_target_side_label(compare_target, Side::Old));
                     let new_header = div()
                         .h(pane_header_height)
                         .px(px(12.))
@@ -664,7 +1778,7 @@ impl GitViewerApp {
                         .bg(theme.muted.alpha(0.2))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child("工作区");
+                        .child(compare_target_side_label(compare_target, Side::New));
 
                     div()
                         .flex()
@@ -709,7 +1823,7 @@ impl GitViewerApp {
                 .child("视图: Split")
                 .child(format!("布局: {}", if two_pane { "分栏" } else { "对齐" }))
                 .child(div().truncate().child(format!("文件: {}", diff_view.title)))
-                .child("对比: HEAD ↔ 工作区")
+                .child(format!("对比: {}", compare_target_label(compare_target)))
                 .child(format!("上下文: {context_lines}"))
                 .child(format!(
                     "忽略空白: {}",
@@ -722,7 +1836,7 @@ impl GitViewerApp {
                 .gap(px(12.))
                 .child("视图: Inline")
                 .child(div().truncate().child(format!("文件: {}", diff_view.title)))
-                .child("对比: HEAD ↔ 工作区")
+                .child(format!("对比: {}", compare_target_label(compare_target)))
                 .child(format!("上下文: {context_lines}"))
                 .child(format!(
                     "忽略空白: {}",
@@ -751,22 +1865,844 @@ impl GitViewerApp {
             .child(status_left)
             .child(status_right);
 
+        let diff_scroll_ruler = if rows_len > 0 && hunk_count > 0 {
+            let theme = cx.theme();
+            let total_rows = rows_len.max(1) as f32;
+            let right_inset = px(14.);
+            let width = px(8.);
+
+            let mut ruler = div()
+                .id("diff-scroll-ruler")
+                .absolute()
+                .top(px(6.))
+                .bottom(px(6.))
+                .right(right_inset)
+                .w(width)
+                .rounded(px(999.))
+                .bg(theme.muted.alpha(0.1))
+                .border_1()
+                .border_color(theme.border.alpha(0.35))
+                .relative();
+
+            for (hunk_index, row_index) in diff_view.hunk_rows.iter().copied().enumerate() {
+                let fraction = (row_index as f32 / total_rows).clamp(0.0, 1.0);
+                let is_current = hunk_index == diff_view.current_hunk;
+                let color = if is_current {
+                    theme.blue
+                } else {
+                    theme.blue.alpha(0.65)
+                };
+                let height = if is_current { px(6.) } else { px(3.) };
+                let radius = if is_current { px(6.) } else { px(4.) };
+
+                ruler = ruler.child(
+                    div()
+                        .id(("diff-ruler-marker", hunk_index))
+                        .absolute()
+                        .top(relative(fraction))
+                        .left(px(1.))
+                        .right(px(1.))
+                        .h(height)
+                        .rounded(radius)
+                        .bg(color)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                if let Some(diff_view) = this.diff_view.as_mut() {
+                                    if hunk_index < diff_view.hunk_rows.len() {
+                                        diff_view.current_hunk = hunk_index;
+                                        diff_view
+                                            .scroll_handle
+                                            .scroll_to_item(row_index, ScrollStrategy::Top);
+                                    }
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+
+            Some(ruler)
+        } else {
+            None
+        };
+
+        let mut viewport = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .relative()
+            .overflow_hidden()
+            .child(list)
+            .child(Scrollbar::uniform_scroll(&scroll_state, &scroll_handle));
+
+        if let Some(ruler) = diff_scroll_ruler {
+            viewport = viewport.child(ruler);
+        }
+
         div()
             .flex()
             .flex_col()
             .size_full()
             .child(toolbar)
+            .child(viewport)
+            .child(status_bar)
+    }
+
+    fn render_conflict_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let Some(conflict_view) = self.conflict_view.as_ref() else {
+            return div().p(px(12.)).child("No conflict view");
+        };
+
+        let two_pane = matches!(self.split_layout, SplitLayout::TwoPane);
+        let title = conflict_view.title.clone();
+        let conflicts_count = conflict_view.conflicts.len();
+        let can_prev = conflict_view.current_conflict > 0;
+        let can_next = conflict_view.current_conflict + 1 < conflict_view.conflict_rows.len();
+        let has_path = conflict_view.path.is_some();
+        let can_save = has_path && conflicts_count == 0;
+        let rows_len = conflict_view.rows.len();
+        let scroll_handle = conflict_view.scroll_handle.clone();
+        let scroll_state = conflict_view.scroll_state.clone();
+        let row_height = window.line_height() + px(4.);
+
+        let toolbar = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(12.))
+            .border_b_1()
+            .border_color(cx.theme().border)
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .relative()
-                    .overflow_hidden()
-                    .child(list)
-                    .child(Scrollbar::uniform_scroll(&scroll_state, &scroll_handle)),
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(Button::new("conflict-back").label("返回").ghost().on_click(
+                        cx.listener(|this, _, _window, cx| {
+                            this.close_conflict_view();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(title)),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.))
+                    .flex_wrap()
+                    .child(div().child(format!("conflicts: {conflicts_count} / rows: {rows_len}")))
+                    .child(
+                        Button::new("conflict-prev")
+                            .label("上一冲突")
+                            .ghost()
+                            .disabled(!can_prev)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.jump_conflict(-1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("conflict-next")
+                            .label("下一冲突")
+                            .ghost()
+                            .disabled(!can_next)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.jump_conflict(1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Switch::new("conflict-two-pane")
+                            .label("分栏")
+                            .checked(two_pane)
+                            .on_click(cx.listener(|this, checked, _window, cx| {
+                                this.split_layout = if *checked {
+                                    SplitLayout::TwoPane
+                                } else {
+                                    SplitLayout::Aligned
+                                };
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("conflict-save")
+                            .label("保存到文件")
+                            .ghost()
+                            .disabled(!can_save)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_conflict_to_working_tree(false, window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("conflict-save-add")
+                            .label("保存并 git add")
+                            .primary()
+                            .disabled(!can_save)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_conflict_to_working_tree(true, window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
+
+        let item_sizes = Rc::new(vec![size(px(0.), row_height); rows_len]);
+        let list = match self.split_layout {
+            SplitLayout::Aligned => v_virtual_list(
+                cx.entity(),
+                "conflict-aligned-list",
+                item_sizes,
+                move |this, visible_range, window, cx| {
+                    visible_range
+                        .map(|index| this.render_conflict_row(index, row_height, window, cx))
+                        .collect::<Vec<_>>()
+                },
+            )
+            .track_scroll(&scroll_handle)
+            .into_any_element(),
+            SplitLayout::TwoPane => {
+                let show_base = conflict_view
+                    .conflicts
+                    .iter()
+                    .any(|conflict| conflict.base.is_some());
+
+                let ours_list = v_virtual_list(
+                    cx.entity(),
+                    "conflict-pane-ours",
+                    item_sizes.clone(),
+                    move |this, visible_range, window, cx| {
+                        visible_range
+                            .map(|index| {
+                                this.render_conflict_pane_row(
+                                    ConflictPane::Ours,
+                                    index,
+                                    row_height,
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .track_scroll(&scroll_handle)
+                .into_any_element();
+
+                let base_list = show_base.then(|| {
+                    v_virtual_list(
+                        cx.entity(),
+                        "conflict-pane-base",
+                        item_sizes.clone(),
+                        move |this, visible_range, window, cx| {
+                            visible_range
+                                .map(|index| {
+                                    this.render_conflict_pane_row(
+                                        ConflictPane::Base,
+                                        index,
+                                        row_height,
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    .track_scroll(&scroll_handle)
+                    .into_any_element()
+                });
+
+                let theirs_list = v_virtual_list(
+                    cx.entity(),
+                    "conflict-pane-theirs",
+                    item_sizes,
+                    move |this, visible_range, window, cx| {
+                        visible_range
+                            .map(|index| {
+                                this.render_conflict_pane_row(
+                                    ConflictPane::Theirs,
+                                    index,
+                                    row_height,
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .track_scroll(&scroll_handle)
+                .into_any_element();
+
+                let theme = cx.theme();
+                let pane_header_height = window.line_height() + px(6.);
+                let ours_label = conflict_view
+                    .conflicts
+                    .first()
+                    .map(|c| c.ours_branch_name.clone())
+                    .unwrap_or_else(|| "Ours".to_string());
+                let theirs_label = conflict_view
+                    .conflicts
+                    .first()
+                    .map(|c| c.theirs_branch_name.clone())
+                    .unwrap_or_else(|| "Theirs".to_string());
+
+                let old_header = div()
+                    .h(pane_header_height)
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .bg(theme.muted.alpha(0.2))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Ours: {ours_label}"));
+                let base_header = div()
+                    .h(pane_header_height)
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .bg(theme.muted.alpha(0.2))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Base（diff3）");
+                let theirs_header = div()
+                    .h(pane_header_height)
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .bg(theme.muted.alpha(0.2))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Theirs: {theirs_label}"));
+
+                let border_color = theme.border.alpha(0.6);
+                let mut row = div().flex().flex_row().size_full().child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .border_r_1()
+                        .border_color(border_color)
+                        .child(old_header)
+                        .child(div().flex_1().min_h(px(0.)).child(ours_list)),
+                );
+
+                if let Some(base_list) = base_list {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .border_r_1()
+                            .border_color(border_color)
+                            .child(base_header)
+                            .child(div().flex_1().min_h(px(0.)).child(base_list)),
+                    );
+                }
+
+                row.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(theirs_header)
+                        .child(div().flex_1().min_h(px(0.)).child(theirs_list)),
+                )
+                .into_any_element()
+            }
+        };
+
+        let status_bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .px(px(12.))
+            .py(px(6.))
+            .border_t_1()
+            .border_color(cx.theme().border.alpha(0.6))
+            .bg(cx.theme().muted.alpha(0.12))
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().child(format!(
+                "文件: {}",
+                conflict_view.path.as_deref().unwrap_or("<demo>")
+            )))
+            .child(div().child(if can_save {
+                "状态: 可保存".to_string()
+            } else if has_path {
+                "状态: 仍有冲突未解决".to_string()
+            } else {
+                "状态: demo（不可保存）".to_string()
+            }));
+
+        let conflict_scroll_ruler = if rows_len > 0 && !conflict_view.conflict_rows.is_empty() {
+            let theme = cx.theme();
+            let total_rows = rows_len.max(1) as f32;
+            let right_inset = px(14.);
+            let width = px(8.);
+
+            let mut ruler = div()
+                .id("conflict-scroll-ruler")
+                .absolute()
+                .top(px(6.))
+                .bottom(px(6.))
+                .right(right_inset)
+                .w(width)
+                .rounded(px(999.))
+                .bg(theme.muted.alpha(0.1))
+                .border_1()
+                .border_color(theme.border.alpha(0.35))
+                .relative();
+
+            for (conflict_index, row_index) in
+                conflict_view.conflict_rows.iter().copied().enumerate()
+            {
+                let fraction = (row_index as f32 / total_rows).clamp(0.0, 1.0);
+                let is_current = conflict_index == conflict_view.current_conflict;
+                let color = if is_current {
+                    theme.red
+                } else {
+                    theme.red.alpha(0.65)
+                };
+                let height = if is_current { px(6.) } else { px(3.) };
+                let radius = if is_current { px(6.) } else { px(4.) };
+
+                ruler = ruler.child(
+                    div()
+                        .id(("conflict-ruler-marker", conflict_index))
+                        .absolute()
+                        .top(relative(fraction))
+                        .left(px(1.))
+                        .right(px(1.))
+                        .h(height)
+                        .rounded(radius)
+                        .bg(color)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                if let Some(conflict_view) = this.conflict_view.as_mut() {
+                                    if conflict_index < conflict_view.conflict_rows.len() {
+                                        conflict_view.current_conflict = conflict_index;
+                                        conflict_view
+                                            .scroll_handle
+                                            .scroll_to_item(row_index, ScrollStrategy::Top);
+                                    }
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+
+            Some(ruler)
+        } else {
+            None
+        };
+
+        let mut viewport = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .relative()
+            .overflow_hidden()
+            .child(list)
+            .child(Scrollbar::uniform_scroll(&scroll_state, &scroll_handle));
+
+        if let Some(ruler) = conflict_scroll_ruler {
+            viewport = viewport.child(ruler);
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(toolbar)
+            .child(viewport)
             .child(status_bar)
+    }
+
+    fn render_conflict_row(
+        &mut self,
+        index: usize,
+        height: Pixels,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme();
+        let show_base = self.conflict_view.as_ref().is_some_and(|view| {
+            view.conflicts
+                .iter()
+                .any(|conflict| conflict.base.is_some())
+        });
+        let Some(row) = self
+            .conflict_view
+            .as_ref()
+            .and_then(|view| view.rows.get(index))
+            .cloned()
+        else {
+            return div();
+        };
+
+        match row {
+            ConflictRow::EmptyState { text } => div()
+                .h(height)
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text),
+            ConflictRow::BlockHeader {
+                conflict_index,
+                ours_branch_name,
+                theirs_branch_name,
+                has_base,
+            } => {
+                let base_button = if has_base {
+                    Button::new(("conflict-base", conflict_index))
+                        .label("采纳 base")
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.resolve_conflict(conflict_index, ConflictResolution::Base);
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                };
+
+                div()
+                    .h(height)
+                    .px(px(12.))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .bg(theme.muted.alpha(0.35))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .font_family(theme.mono_font_family.clone())
+                            .text_sm()
+                            .child(format!(
+                                "CONFLICT #{}  ours: {}  theirs: {}",
+                                conflict_index + 1,
+                                ours_branch_name,
+                                theirs_branch_name
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                Button::new(("conflict-ours", conflict_index))
+                                    .label("采纳 ours")
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.resolve_conflict(
+                                            conflict_index,
+                                            ConflictResolution::Ours,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("conflict-theirs", conflict_index))
+                                    .label("采纳 theirs")
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.resolve_conflict(
+                                            conflict_index,
+                                            ConflictResolution::Theirs,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("conflict-both", conflict_index))
+                                    .label("保留两侧")
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.resolve_conflict(
+                                            conflict_index,
+                                            ConflictResolution::Both,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(base_button),
+                    )
+            }
+            ConflictRow::Code {
+                kind,
+                ours_segments,
+                base_segments,
+                theirs_segments,
+            } => {
+                let border = theme.border;
+                let mono = theme.mono_font_family.clone();
+                let mut row = div()
+                    .h(height)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(border.alpha(0.35))
+                    .child(
+                        render_side(Side::Old, kind, None, &ours_segments, mono.clone(), theme)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    if let Some(view) = this.conflict_view.as_ref() {
+                                        view.scroll_handle
+                                            .scroll_to_item(index, ScrollStrategy::Top);
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(div().w(px(1.)).h_full().bg(border.alpha(0.6)));
+
+                if show_base {
+                    row = row
+                        .child(
+                            render_side(
+                                Side::Old,
+                                diffview::DiffRowKind::Unchanged,
+                                None,
+                                &base_segments,
+                                mono.clone(),
+                                theme,
+                            )
+                            .bg(theme.muted.alpha(0.06))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    if let Some(view) = this.conflict_view.as_ref() {
+                                        view.scroll_handle
+                                            .scroll_to_item(index, ScrollStrategy::Top);
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                        )
+                        .child(div().w(px(1.)).h_full().bg(border.alpha(0.6)));
+                }
+
+                row.child(
+                    render_side(Side::New, kind, None, &theirs_segments, mono, theme)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                if let Some(view) = this.conflict_view.as_ref() {
+                                    view.scroll_handle
+                                        .scroll_to_item(index, ScrollStrategy::Top);
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                )
+            }
+        }
+    }
+
+    fn render_conflict_pane_row(
+        &mut self,
+        pane: ConflictPane,
+        index: usize,
+        height: Pixels,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = cx.theme();
+        let Some(row) = self
+            .conflict_view
+            .as_ref()
+            .and_then(|view| view.rows.get(index))
+            .cloned()
+        else {
+            return div();
+        };
+
+        match row {
+            ConflictRow::EmptyState { text } => div()
+                .h(height)
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(text),
+            ConflictRow::BlockHeader {
+                conflict_index,
+                ours_branch_name,
+                theirs_branch_name,
+                has_base,
+            } => match pane {
+                ConflictPane::Ours => {
+                    let base_button = if has_base {
+                        Button::new(("conflict-base", conflict_index))
+                            .label("采纳 base")
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.resolve_conflict(conflict_index, ConflictResolution::Base);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    };
+
+                    div()
+                        .h(height)
+                        .px(px(12.))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .bg(theme.muted.alpha(0.35))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_sm()
+                                .child(format!(
+                                    "CONFLICT #{}  ours: {}",
+                                    conflict_index + 1,
+                                    ours_branch_name
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.))
+                                .flex_wrap()
+                                .child(
+                                    Button::new(("conflict-ours", conflict_index))
+                                        .label("采纳 ours")
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.resolve_conflict(
+                                                conflict_index,
+                                                ConflictResolution::Ours,
+                                            );
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new(("conflict-theirs", conflict_index))
+                                        .label("采纳 theirs")
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.resolve_conflict(
+                                                conflict_index,
+                                                ConflictResolution::Theirs,
+                                            );
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new(("conflict-both", conflict_index))
+                                        .label("保留两侧")
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.resolve_conflict(
+                                                conflict_index,
+                                                ConflictResolution::Both,
+                                            );
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(base_button),
+                        )
+                }
+                ConflictPane::Base => div()
+                    .h(height)
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .bg(theme.muted.alpha(0.35))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(if has_base {
+                        format!("CONFLICT #{}  base（diff3）", conflict_index + 1)
+                    } else {
+                        format!("CONFLICT #{}  base（无）", conflict_index + 1)
+                    }),
+                ConflictPane::Theirs => div()
+                    .h(height)
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .bg(theme.muted.alpha(0.35))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_sm()
+                    .child(format!(
+                        "CONFLICT #{}  theirs: {}",
+                        conflict_index + 1,
+                        theirs_branch_name
+                    )),
+            },
+            ConflictRow::Code {
+                kind,
+                ours_segments,
+                base_segments,
+                theirs_segments,
+            } => {
+                let border = theme.border;
+                let mono = theme.mono_font_family.clone();
+                let (side, kind, segments, base_bg) = match pane {
+                    ConflictPane::Ours => (Side::Old, kind, ours_segments, None),
+                    ConflictPane::Theirs => (Side::New, kind, theirs_segments, None),
+                    ConflictPane::Base => (
+                        Side::Old,
+                        diffview::DiffRowKind::Unchanged,
+                        base_segments,
+                        Some(theme.muted.alpha(0.06)),
+                    ),
+                };
+
+                div()
+                    .h(height)
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(border.alpha(0.35))
+                    .child({
+                        let mut cell = render_side(side, kind, None, &segments, mono, theme);
+                        if let Some(bg) = base_bg {
+                            cell = cell.bg(bg);
+                        }
+                        cell.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                if let Some(view) = this.conflict_view.as_ref() {
+                                    view.scroll_handle
+                                        .scroll_to_item(index, ScrollStrategy::Top);
+                                }
+                                cx.notify();
+                            }),
+                        )
+                    })
+            }
+        }
     }
 
     fn render_demo_row(
@@ -1147,6 +3083,7 @@ impl Render for GitViewerApp {
         match self.screen {
             AppScreen::StatusList => self.render_status_list(window, cx).into_any_element(),
             AppScreen::DiffView => self.render_diff_view(window, cx).into_any_element(),
+            AppScreen::ConflictView => self.render_conflict_view(window, cx).into_any_element(),
         }
     }
 }
@@ -1155,6 +3092,13 @@ impl Render for GitViewerApp {
 enum Side {
     Old,
     New,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConflictPane {
+    Ours,
+    Base,
+    Theirs,
 }
 
 fn render_side(
@@ -1258,12 +3202,15 @@ fn preserve_spaces(text: &str) -> String {
 impl DiffViewState {
     fn new(
         title: SharedString,
+        path: Option<String>,
+        status: Option<String>,
+        compare_target: CompareTarget,
         old_text: String,
         new_text: String,
         options: DiffViewOptions,
         view_mode: DiffViewMode,
     ) -> Self {
-        let (old_lines, new_lines, rows) = build_display_rows(
+        let (diff_model, old_lines, new_lines, rows) = build_display_rows(
             &old_text,
             &new_text,
             options.ignore_whitespace,
@@ -1272,12 +3219,16 @@ impl DiffViewState {
         );
         let mut this = Self {
             title,
+            path,
+            status,
+            compare_target,
             old_text,
             new_text,
             ignore_whitespace: options.ignore_whitespace,
             context_lines: options.context_lines,
             old_lines,
             new_lines,
+            diff_model,
             rows,
             hunk_rows: Vec::new(),
             current_hunk: 0,
@@ -1300,6 +3251,47 @@ impl DiffViewState {
 
         if self.current_hunk >= self.hunk_rows.len() {
             self.current_hunk = self.hunk_rows.len().saturating_sub(1);
+        }
+    }
+}
+
+impl ConflictViewState {
+    fn new(title: SharedString, path: Option<String>, text: String) -> Self {
+        let conflicts = diffview::parse_conflicts(&text);
+        let rows = build_conflict_rows(&text, &conflicts);
+        let mut this = Self {
+            title,
+            path,
+            text,
+            conflicts,
+            rows,
+            conflict_rows: Vec::new(),
+            current_conflict: 0,
+            scroll_handle: VirtualListScrollHandle::new(),
+            scroll_state: ScrollbarState::default(),
+        };
+        this.recalc_conflict_rows();
+        this
+    }
+
+    fn rebuild(&mut self) {
+        self.conflicts = diffview::parse_conflicts(&self.text);
+        self.rows = build_conflict_rows(&self.text, &self.conflicts);
+        self.recalc_conflict_rows();
+    }
+
+    fn recalc_conflict_rows(&mut self) {
+        self.conflict_rows = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                matches!(row, ConflictRow::BlockHeader { .. }).then_some(index)
+            })
+            .collect();
+
+        if self.current_conflict >= self.conflict_rows.len() {
+            self.current_conflict = self.conflict_rows.len().saturating_sub(1);
         }
     }
 }
@@ -1363,13 +3355,42 @@ fn demo_texts() -> (String, String) {
     (old.to_string(), new.to_string())
 }
 
+fn conflict_demo_text() -> String {
+    r#"fn main() {
+    println!("before");
+<<<<<<< HEAD
+    println!("ours 1");
+=======
+    println!("theirs 1");
+>>>>>>> feature
+
+    println!("between");
+<<<<<<< ours
+    println!("ours 2");
+||||||| base
+    println!("base 2");
+=======
+    println!("theirs 2");
+>>>>>>> theirs
+
+    println!("after");
+}
+"#
+    .to_string()
+}
+
 fn build_display_rows(
     old_text: &str,
     new_text: &str,
     ignore_whitespace: bool,
     context_lines: usize,
     view_mode: DiffViewMode,
-) -> (Vec<String>, Vec<String>, Vec<DisplayRow>) {
+) -> (
+    diffview::DiffModel,
+    Vec<String>,
+    Vec<String>,
+    Vec<DisplayRow>,
+) {
     let old_doc = diffview::Document::from_str(old_text);
     let new_doc = diffview::Document::from_str(new_text);
     let old_lines = old_doc.lines();
@@ -1387,7 +3408,7 @@ fn build_display_rows(
     let mut old_pos = 0usize;
     let mut new_pos = 0usize;
 
-    for hunk in model.hunks {
+    for hunk in &model.hunks {
         let gap_old = hunk.old_start.saturating_sub(old_pos);
         let gap_new = hunk.new_start.saturating_sub(new_pos);
         let gap_len = gap_old.min(gap_new);
@@ -1410,12 +3431,20 @@ fn build_display_rows(
             .into(),
         });
 
-        for row in hunk.rows {
+        for row in &hunk.rows {
             let kind = row.kind();
             let old_line = row.old.as_ref().map(|l| l.line_index + 1);
             let new_line = row.new.as_ref().map(|l| l.line_index + 1);
-            let old_segments = row.old.map(|l| l.segments).unwrap_or_default();
-            let new_segments = row.new.map(|l| l.segments).unwrap_or_default();
+            let old_segments = row
+                .old
+                .as_ref()
+                .map(|l| l.segments.clone())
+                .unwrap_or_default();
+            let new_segments = row
+                .new
+                .as_ref()
+                .map(|l| l.segments.clone())
+                .unwrap_or_default();
 
             match view_mode {
                 DiffViewMode::Split => rows.push(DisplayRow::Code {
@@ -1482,7 +3511,95 @@ fn build_display_rows(
         });
     }
 
-    (old_lines, new_lines, rows)
+    (model, old_lines, new_lines, rows)
+}
+
+fn build_conflict_rows(text: &str, conflicts: &[diffview::ConflictRegion]) -> Vec<ConflictRow> {
+    if conflicts.is_empty() {
+        return vec![ConflictRow::EmptyState {
+            text: "没有检测到冲突标记（<<<<<<< / ======= / >>>>>>>）".into(),
+        }];
+    }
+
+    let mut rows = Vec::new();
+    for (conflict_index, region) in conflicts.iter().enumerate() {
+        rows.push(ConflictRow::BlockHeader {
+            conflict_index,
+            ours_branch_name: region.ours_branch_name.clone().into(),
+            theirs_branch_name: region.theirs_branch_name.clone().into(),
+            has_base: region.base.is_some(),
+        });
+
+        let ours_text = &text[region.ours.clone()];
+        let theirs_text = &text[region.theirs.clone()];
+        let base_text = region
+            .base
+            .as_ref()
+            .map(|range| &text[range.clone()])
+            .unwrap_or("");
+
+        let ours_lines = diffview::Document::from_str(ours_text).lines();
+        let base_lines = diffview::Document::from_str(base_text).lines();
+        let theirs_lines = diffview::Document::from_str(theirs_text).lines();
+        let max_len = ours_lines
+            .len()
+            .max(base_lines.len())
+            .max(theirs_lines.len())
+            .max(1);
+
+        for idx in 0..max_len {
+            let ours_line = ours_lines.get(idx).cloned();
+            let base_line = base_lines.get(idx).cloned();
+            let theirs_line = theirs_lines.get(idx).cloned();
+
+            let kind = match (&ours_line, &theirs_line) {
+                (None, None) => diffview::DiffRowKind::Unchanged,
+                (None, Some(_)) => diffview::DiffRowKind::Added,
+                (Some(_), None) => diffview::DiffRowKind::Removed,
+                (Some(a), Some(b)) => {
+                    if a == b {
+                        diffview::DiffRowKind::Unchanged
+                    } else {
+                        diffview::DiffRowKind::Modified
+                    }
+                }
+            };
+
+            let ours_segments = ours_line
+                .map(|line| {
+                    vec![diffview::DiffSegment {
+                        kind: diffview::DiffSegmentKind::Unchanged,
+                        text: line,
+                    }]
+                })
+                .unwrap_or_default();
+            let base_segments = base_line
+                .map(|line| {
+                    vec![diffview::DiffSegment {
+                        kind: diffview::DiffSegmentKind::Unchanged,
+                        text: line,
+                    }]
+                })
+                .unwrap_or_default();
+            let theirs_segments = theirs_line
+                .map(|line| {
+                    vec![diffview::DiffSegment {
+                        kind: diffview::DiffSegmentKind::Unchanged,
+                        text: line,
+                    }]
+                })
+                .unwrap_or_default();
+
+            rows.push(ConflictRow::Code {
+                kind,
+                ours_segments,
+                base_segments,
+                theirs_segments,
+            });
+        }
+    }
+
+    rows
 }
 
 fn read_working_file(repo_root: &Path, path: &str) -> Result<String> {
@@ -1516,6 +3633,95 @@ fn read_head_file(repo_root: &Path, path: &str, status: &str) -> Result<String> 
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn read_index_file(repo_root: &Path, path: &str, status: &str) -> Result<String> {
+    if status == "??" {
+        return Ok(String::new());
+    }
+
+    if let Some((x, _)) = status_xy(status) {
+        if x == 'D' {
+            return Ok(String::new());
+        }
+    }
+
+    let spec = format!(":{path}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["show", &spec])
+        .output()
+        .with_context(|| format!("执行 git show 失败：{spec}"))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git show 返回非零（{}）：{}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_git<I, S>(repo_root: &Path, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .context("执行 git 命令失败")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "git 命令返回非零（{}）：{}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn run_git_with_stdin<I, S>(repo_root: &Path, args: I, stdin: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("执行 git 命令失败")?;
+
+    if let Some(mut input) = child.stdin.take() {
+        input
+            .write_all(stdin.as_bytes())
+            .context("写入 git stdin 失败")?;
+    }
+
+    let output = child.wait_with_output().context("等待 git 进程失败")?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "git 命令返回非零（{}）：{}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }
 
 fn fetch_git_status(repo_root: &Path) -> Result<Vec<FileEntry>> {
@@ -1633,6 +3839,183 @@ fn parse_unmerged_record(record: &str) -> Option<FileEntry> {
     let status = parts.next()?.to_string();
     let path = parts.nth(8)?.to_string();
     Some(FileEntry { path, status })
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StatusCounts {
+    all: usize,
+    conflicts: usize,
+    staged: usize,
+    unstaged: usize,
+    untracked: usize,
+}
+
+impl StatusCounts {
+    fn from_entries(entries: &[FileEntry]) -> Self {
+        let mut counts = Self::default();
+        counts.all = entries.len();
+
+        for entry in entries {
+            let status = entry.status.as_str();
+            if is_untracked_status(status) {
+                counts.untracked += 1;
+                continue;
+            }
+            if is_conflict_status(status) {
+                counts.conflicts += 1;
+                continue;
+            }
+
+            if let Some((x, y)) = status_xy(status) {
+                if x != ' ' && x != '?' && x != '!' {
+                    counts.staged += 1;
+                }
+                if y != ' ' && y != '?' && y != '!' {
+                    counts.unstaged += 1;
+                }
+            }
+        }
+
+        counts
+    }
+}
+
+fn matches_filter(entry: &FileEntry, filter: StatusFilter) -> bool {
+    match filter {
+        StatusFilter::All => true,
+        StatusFilter::Conflicts => is_conflict_status(&entry.status),
+        StatusFilter::Untracked => is_untracked_status(&entry.status),
+        StatusFilter::Staged => {
+            if is_conflict_status(&entry.status) || is_untracked_status(&entry.status) {
+                return false;
+            }
+            status_xy(&entry.status).is_some_and(|(x, _)| x != ' ' && x != '?' && x != '!')
+        }
+        StatusFilter::Unstaged => {
+            if is_conflict_status(&entry.status) || is_untracked_status(&entry.status) {
+                return false;
+            }
+            status_xy(&entry.status).is_some_and(|(_, y)| y != ' ' && y != '?' && y != '!')
+        }
+    }
+}
+
+fn status_xy(status: &str) -> Option<(char, char)> {
+    let mut chars = status.chars();
+    Some((chars.next()?, chars.next()?))
+}
+
+fn is_untracked_status(status: &str) -> bool {
+    status == "??"
+}
+
+fn is_conflict_status(status: &str) -> bool {
+    status.contains('U') || status == "AA" || status == "DD"
+}
+
+fn default_compare_target(status: &str) -> CompareTarget {
+    if is_untracked_status(status) {
+        return CompareTarget::HeadToWorktree;
+    }
+
+    let Some((x, y)) = status_xy(status) else {
+        return CompareTarget::HeadToWorktree;
+    };
+
+    if y != ' ' && y != '?' && y != '!' {
+        return CompareTarget::IndexToWorktree;
+    }
+    if x != ' ' && x != '?' && x != '!' {
+        return CompareTarget::HeadToIndex;
+    }
+
+    CompareTarget::HeadToWorktree
+}
+
+fn compare_target_label(target: CompareTarget) -> &'static str {
+    match target {
+        CompareTarget::HeadToWorktree => "HEAD ↔ 工作区",
+        CompareTarget::IndexToWorktree => "暂存 ↔ 工作区",
+        CompareTarget::HeadToIndex => "HEAD ↔ 暂存",
+    }
+}
+
+fn compare_target_side_label(target: CompareTarget, side: Side) -> &'static str {
+    match (target, side) {
+        (CompareTarget::HeadToWorktree, Side::Old) => "HEAD",
+        (CompareTarget::HeadToWorktree, Side::New) => "工作区",
+        (CompareTarget::IndexToWorktree, Side::Old) => "暂存",
+        (CompareTarget::IndexToWorktree, Side::New) => "工作区",
+        (CompareTarget::HeadToIndex, Side::Old) => "HEAD",
+        (CompareTarget::HeadToIndex, Side::New) => "暂存",
+    }
+}
+
+fn unified_patch_for_hunk(path: &str, hunk: &diffview::DiffHunk) -> String {
+    fn start_number(start: usize, len: usize) -> usize {
+        if len == 0 { start } else { start + 1 }
+    }
+
+    let old_start = start_number(hunk.old_start, hunk.old_len);
+    let new_start = start_number(hunk.new_start, hunk.new_len);
+
+    let mut out = String::new();
+    out.push_str(&format!("--- a/{path}\n"));
+    out.push_str(&format!("+++ b/{path}\n"));
+    out.push_str(&format!(
+        "@@ -{old_start},{} +{new_start},{} @@\n",
+        hunk.old_len, hunk.new_len
+    ));
+
+    for row in &hunk.rows {
+        match row.kind() {
+            diffview::DiffRowKind::Unchanged => {
+                let text = row
+                    .old
+                    .as_ref()
+                    .map(|line| line.text.as_str())
+                    .or_else(|| row.new.as_ref().map(|line| line.text.as_str()))
+                    .unwrap_or_default();
+                out.push(' ');
+                out.push_str(text);
+                out.push('\n');
+            }
+            diffview::DiffRowKind::Removed => {
+                let text = row
+                    .old
+                    .as_ref()
+                    .map(|line| line.text.as_str())
+                    .unwrap_or_default();
+                out.push('-');
+                out.push_str(text);
+                out.push('\n');
+            }
+            diffview::DiffRowKind::Added => {
+                let text = row
+                    .new
+                    .as_ref()
+                    .map(|line| line.text.as_str())
+                    .unwrap_or_default();
+                out.push('+');
+                out.push_str(text);
+                out.push('\n');
+            }
+            diffview::DiffRowKind::Modified => {
+                if let Some(old) = row.old.as_ref() {
+                    out.push('-');
+                    out.push_str(&old.text);
+                    out.push('\n');
+                }
+                if let Some(new) = row.new.as_ref() {
+                    out.push('+');
+                    out.push_str(&new.text);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    out
 }
 
 fn main() {

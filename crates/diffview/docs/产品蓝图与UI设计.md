@@ -5,6 +5,16 @@
 - MVP：文件列表（含冲突过滤）；二方 diff（unified/split）；三方冲突视图；冲突块采纳 ours/theirs/base；上一/下一冲突导航；折叠上下文；忽略空白；hunk 级 stage/unstage/revert；同步滚动与行高；性能友好的虚拟化。
 - 进阶：历史/任意 commit 对比；评论；键盘驱动命令；外部修改检测与重载；多仓库；未解决计数；辅助标尺与摘要；AI 建议（可选）。
 
+## 阶段性进展（当前实现）
+- 可运行 demo app：`crates/git-viewer`（`cargo run -p git-viewer`）。
+- Git 集成方式：**调用系统 `git` 命令**（`std::process::Command`），当前未引入 `libgit2/gix` 等 Rust git 库（便于快速覆盖真实工作流与保持行为一致）。
+- 文件列表：`git status --porcelain=v2 -z` 拉取；过滤 All/Conflicts/Staged/Unstaged/Untracked；点击文件进入 diff 或冲突视图。
+- 二方 diff：Split/Inline；Split 支持“对齐(单滚动)”与“分栏(真双/多 pane + 同步滚动)”两种布局；支持折叠上下文、展开全部、忽略空白、上一/下一 hunk。
+- 右侧标尺：diff hunk / 冲突块分布标记 + 点击跳转（基础版）。
+- 对比目标：支持 `HEAD↔工作区 / 暂存↔工作区 / HEAD↔暂存` 切换（为部分暂存/回滚语义服务）。
+- Git 操作：文件级 stage/unstage；**当前 hunk** 级 stage/unstage/revert（基于 patch 生成 + `git apply`/`git apply --cached`）。
+- 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
+
 ## 信息架构与流程
 - 根布局：左侧文件面板 + 顶部工具条 + 主视图 + 右侧标尺/辅助（可折叠） + 底部状态栏。
 - 文件面板：按仓库显示 Modified/Conflicts/Staged/Untracked；支持过滤、分组、批量操作；点击打开主视图。
@@ -89,6 +99,7 @@
   - [x] 应用骨架：gpui 入口、窗口、`Root` 挂载
   - [x] 仓库与状态服务（MVP）：`git status --porcelain=v2 -z` 拉取与解析
   - [x] RepoFileList（只读态）：列表渲染 + 点击日志
+  - [x] RepoFileList（增强）：过滤（All/Conflicts/Staged/Unstaged/Untracked）
   - [x] 文件内容读取（MVP）：点击项触发读取并反馈（notification）
 
 ### 2) 文本模型与二方 diff 数据层
@@ -167,12 +178,13 @@
   - 交互：采纳 ours/theirs/base、保留两侧、进入编辑；维护块的 resolved 状态。
 - 验收：
   - 提供冲突样例（内置字符串或测试仓库）：
-    - 冲突块可见且可导航；采纳按钮能更新结果栏；resolved 状态可见并可切换。
+    - 冲突块可见且可导航；采纳按钮能替换文本并减少冲突数量；冲突清零后可保存并 `git add`。
 - 本步 TODO：
-  - [ ] 三方 merge 计算：生成冲突块（含忽略空白策略预留）
-  - [ ] ConflictBlock 渲染：三栏对齐 + 结果栏可编辑
-  - [ ] 冲突块交互：采纳 ours/theirs/base/保留两侧 + resolved 状态
-  - [ ] 视图模式：冲突文件进入 Conflict 模式
+  - [x] 冲突标记解析：生成冲突块（基于 marker，非完整三方 merge）
+  - [x] ConflictBlock 渲染：三栏对齐（Ours/Base/Theirs，Base 仅在 diff3 存在时显示）
+  - [ ] Result 栏：可编辑合并结果（内置编辑器）
+  - [x] 冲突块交互（MVP）：采纳 ours/theirs/base/保留两侧（替换文本并重解析）
+  - [x] 视图模式：冲突文件自动进入 Conflict 视图
 
 ### 7) 冲突导航与摘要
 - 实现目标：提供 JetBrains 风格的“冲突/变更概览与快速跳转”。
@@ -183,8 +195,8 @@
 - 验收：
   - 冲突 demo 中：计数正确、跳转准确；解决/取消解决后计数实时更新；标尺点击定位正确。
 - 本步 TODO：
-  - [ ] 冲突导航与计数：上一/下一冲突 + 统计
-  - [ ] ScrollRuler：冲突分布显示与点击跳转
+  - [x] 冲突导航与计数：上一/下一冲突 + 统计
+  - [x] ScrollRuler：冲突/变更分布显示与点击跳转（基础版：hunk/冲突标记）
   - [ ] StatusBar（增强）：未解决计数展示
 
 ### 8) Git 操作集成（hunk 级）
@@ -198,9 +210,10 @@
     - stage/unstage/revert 对选中 hunk 生效且 `git status`/`git diff` 匹配预期。
     - 冲突文件解决并写回后，`git status` 不再显示 unmerged。
 - 本步 TODO：
-  - [ ] Git 操作集成：stage/unstage/revert（文件与 hunk）
-  - [ ] 冲突解决写回：保存结果 + `git add` + 状态刷新
-  - [ ] RepoFileList（刷新）：操作后列表实时更新
+  - [x] Git 操作集成（文件级）：stage/unstage（diff 视图工具条）
+  - [x] Git 操作集成（hunk 级）：stage/unstage/revert（patch 生成与 apply，当前 hunk）
+  - [x] 冲突解决写回（MVP）：保存结果 + `git add` + 状态刷新
+  - [x] RepoFileList（刷新）：操作后列表实时更新
 
 ### 9) 体验与性能优化
 - 实现目标：大文件/大 diff 场景可用，交互顺滑，细节贴近 JetBrains。
