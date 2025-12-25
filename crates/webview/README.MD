@@ -71,6 +71,8 @@ Notes:
 
 This section tracks known gaps between this "mini-Tauri" implementation and upstream Tauri behavior.
 
+Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
+
 ### P0 — Compatibility / Security
 
 - [ ] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
