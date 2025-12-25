@@ -1,10 +1,8 @@
 use gpui::{
     App, AppContext, Application, Bounds, Context, Entity, WindowBounds, WindowOptions, px, size,
 };
-use gpui_manos_webview::command_handlers;
 use gpui_manos_webview::webview::WebView;
 use gpui_manos_webview::wry::WebViewId;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 fn main() {
@@ -27,12 +25,13 @@ fn main() {
 
 fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
     app.new(|cx: &mut Context<WebView>| {
-        let static_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/webview-app/dist");
+        let static_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/webview-app/dist");
         let index_html = static_root.join("index.html");
 
         let builder = gpui_manos_webview::Builder::new()
             .with_webview_id(WebViewId::from("webview"))
-            .serve_apis(command_handlers![greet]);
+            .invoke_handler(gpui_manos_webview::generate_handler![greet]);
 
         let builder = if index_html.exists() {
             builder.serve_static(static_root.to_string_lossy().to_string())
@@ -42,140 +41,10 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
                 index_html.to_string_lossy()
             );
 
-            let expected = index_html.to_string_lossy();
-            let html = format!(
-                r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Web assets missing</title>
-    <style>
-      :root {{ color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }}
-      body {{ margin: 0; padding: 24px; }}
-      .center {{ display: flex; justify-content: center; }}
-      .card {{ max-width: 860px; border: 1px solid rgba(127, 127, 127, 0.35); border-radius: 12px; padding: 16px; }}
-      .banner {{
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
-        padding: 12px 14px;
-        border-radius: 12px;
-        border: 1px solid rgba(255, 0, 0, 0.35);
-        background: rgba(255, 0, 0, 0.08);
-        color: rgb(220, 38, 38);
-        font-weight: 800;
-        letter-spacing: 0.2px;
-        margin-bottom: 14px;
-        text-align: center;
-      }}
-      .banner .icon {{
-        width: 22px;
-        height: 22px;
-        border-radius: 999px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid rgba(255, 0, 0, 0.35);
-        background: rgba(255, 0, 0, 0.12);
-        line-height: 1;
-      }}
-      code, pre {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
-      pre {{ margin: 12px 0 0; padding: 12px; border-radius: 10px; border: 1px solid rgba(127, 127, 127, 0.35); white-space: pre-wrap; word-break: break-word; }}
-      .row {{ display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }}
-      input {{ padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127, 127, 127, 0.35); min-width: 240px; }}
-      button {{ padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127, 127, 127, 0.35); cursor: pointer; }}
-      .hint {{ opacity: 0.75; font-size: 12px; margin-top: 10px; }}
-      .terminal {{
-        margin-top: 12px;
-        border-radius: 12px;
-        border: 1px solid rgba(127, 127, 127, 0.35);
-        overflow: hidden;
-      }}
-      .terminal .title {{
-        padding: 10px 12px;
-        font-size: 12px;
-        opacity: 0.75;
-        border-bottom: 1px solid rgba(127, 127, 127, 0.25);
-        background: rgba(127, 127, 127, 0.06);
-      }}
-      .terminal .body {{
-        padding: 12px;
-        background: rgba(0, 0, 0, 0.15);
-      }}
-      .terminal .line {{
-        display: flex;
-        gap: 10px;
-        align-items: baseline;
-        line-height: 1.6;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }}
-      .terminal .prompt {{
-        opacity: 0.7;
-        user-select: none;
-      }}
-    </style>
-  </head>
-  <body>
-    <div class="center">
-      <div class="card">
-        <div class="banner">
-          <span class="icon">!</span>
-          <span>Web assets not found</span>
-        </div>
-
-        <div>Expected file:</div>
-        <pre><code>{expected}</code></pre>
-
-        <div class="terminal">
-          <div class="title">Build webview-app [at crates/story/examples/webview-app]</div>
-          <div class="body">
-            <div class="line"><span class="prompt">$</span><code>cd crates/story/examples/webview-app</code></div>
-            <div class="line"><span class="prompt">$</span><code>pnpm install</code></div>
-            <div class="line"><span class="prompt">$</span><code>pnpm build</code></div>
-          </div>
-        </div>
-
-        <div class="terminal">
-          <div class="title">Build webview-app [at root]</div>
-          <div class="body">
-            <div class="line"><span class="prompt">$</span><code>cargo run --example webview</code></div>
-          </div>
-        </div>
-
-      <hr style="margin: 16px 0; border: none; border-top: 1px solid rgba(127, 127, 127, 0.25)" />
-      <div><strong>IPC sanity check</strong> (still works without static assets):</div>
-      <div class="row">
-        <input id="name" placeholder="Type a name…" value="Manos" />
-        <button id="btn">Invoke greet</button>
-      </div>
-      <pre id="out">Ready.</pre>
-      <script>
-        const $ = (id) => document.getElementById(id)
-        async function invokeGreet() {{
-          const out = $('out')
-          out.textContent = 'Invoking…'
-          const name = $('name').value
-          if (!window.__TAURI_INTERNALS__ || !window.__TAURI_INTERNALS__.invoke) {{
-            out.textContent = 'Missing __TAURI_INTERNALS__.invoke(). Check initialization scripts.'
-            return
-          }}
-          try {{
-            const result = await window.__TAURI_INTERNALS__.invoke('greet', {{ name }})
-            out.textContent = String(result)
-          }} catch (e) {{
-            out.textContent = 'Error: ' + e
-          }}
-        }}
-        $('btn').addEventListener('click', invokeGreet)
-      </script>
-      </div>
-    </div>
-  </body>
-</html>
-"#
+            let template = include_str!("webview-assets-missing.html");
+            let html = template.replace(
+                "__EXPECTED_PATH__",
+                &escape_html(&index_html.to_string_lossy()),
             );
 
             builder.apply(|b| b.with_html(html))
@@ -187,11 +56,16 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
     })
 }
 
-#[derive(Deserialize, Serialize)]
-struct Namer {
-    name: String,
+#[gpui_manos_webview::command]
+fn greet(name: String) -> Result<String, String> {
+    Ok(format!("Hello, {}! (from GPUI)", name))
 }
 
-fn greet(namer: Namer) -> Result<String, String> {
-    Ok(format!("Hello, {}! (from GPUI)", namer.name))
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
