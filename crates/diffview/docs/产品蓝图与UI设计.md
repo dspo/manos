@@ -13,7 +13,8 @@
 - 右侧标尺：diff hunk / 冲突块分布标记 + 点击跳转（基础版）。
 - 对比目标：支持 `HEAD↔工作区 / 暂存↔工作区 / HEAD↔暂存` 切换（为部分暂存/回滚语义服务）。
 - Git 操作：文件级 stage/unstage；**当前 hunk** 级 stage/unstage/revert（基于 patch 生成 + `git apply`/`git apply --cached`）。
-- 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
+- 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；底部“合并结果”编辑器（编辑后点击“应用”刷新冲突检测）；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
+- 小窗口适配：工具条 `flex-wrap`，减少信息密度后在窄窗口仍可操作。
 
 ## 信息架构与流程
 - 根布局：左侧文件面板 + 顶部工具条 + 主视图 + 右侧标尺/辅助（可折叠） + 底部状态栏。
@@ -182,7 +183,7 @@
 - 本步 TODO：
   - [x] 冲突标记解析：生成冲突块（基于 marker，非完整三方 merge）
   - [x] ConflictBlock 渲染：三栏对齐（Ours/Base/Theirs，Base 仅在 diff3 存在时显示）
-  - [ ] Result 栏：可编辑合并结果（内置编辑器）
+  - [x] Result 栏：可编辑合并结果（底部 code editor + “应用”刷新冲突检测）
   - [x] 冲突块交互（MVP）：采纳 ours/theirs/base/保留两侧（替换文本并重解析）
   - [x] 视图模式：冲突文件自动进入 Conflict 视图
 
@@ -197,7 +198,7 @@
 - 本步 TODO：
   - [x] 冲突导航与计数：上一/下一冲突 + 统计
   - [x] ScrollRuler：冲突/变更分布显示与点击跳转（基础版：hunk/冲突标记）
-  - [ ] StatusBar（增强）：未解决计数展示
+  - [x] StatusBar（增强）：未解决计数展示
 
 ### 8) Git 操作集成（hunk 级）
 - 实现目标：把 UI 操作落到真实 git 工作流（部分暂存/还原/解决冲突后 add）。

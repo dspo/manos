@@ -8,6 +8,7 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, TitleBar, VirtualListScrollHandle, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    input::{Input, InputState},
     notification::Notification,
     scroll::{Scrollbar, ScrollbarState},
     switch::Switch,
@@ -166,6 +167,8 @@ struct ConflictViewState {
     title: SharedString,
     path: Option<String>,
     text: String,
+    result_input: Entity<InputState>,
+    show_result_editor: bool,
     conflicts: Vec<diffview::ConflictRegion>,
     rows: Vec<ConflictRow>,
     conflict_rows: Vec<usize>,
@@ -242,9 +245,15 @@ impl GitViewerApp {
         );
     }
 
-    fn open_conflict_demo(&mut self) {
+    fn open_conflict_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = conflict_demo_text();
-        self.open_conflict_view("Conflict Demo".into(), None, text);
+        let initial_text = text.clone();
+        let result_input = cx.new(move |cx| {
+            InputState::new(window, cx)
+                .code_editor("text")
+                .default_value(initial_text)
+        });
+        self.open_conflict_view("Conflict Demo".into(), None, text, result_input);
     }
 
     fn open_diff_view(
@@ -270,9 +279,15 @@ impl GitViewerApp {
         self.screen = AppScreen::DiffView;
     }
 
-    fn open_conflict_view(&mut self, title: SharedString, path: Option<String>, text: String) {
+    fn open_conflict_view(
+        &mut self,
+        title: SharedString,
+        path: Option<String>,
+        text: String,
+        result_input: Entity<InputState>,
+    ) {
         self.diff_view = None;
-        self.conflict_view = Some(ConflictViewState::new(title, path, text));
+        self.conflict_view = Some(ConflictViewState::new(title, path, text, result_input));
         self.screen = AppScreen::ConflictView;
     }
 
@@ -453,11 +468,18 @@ impl GitViewerApp {
                         );
                     }
 
+                    let initial_text = text.clone();
+                    let result_input = cx.new(move |cx| {
+                        InputState::new(window, cx)
+                            .code_editor("text")
+                            .default_value(initial_text)
+                    });
                     this.update(cx, |this, _cx| {
                         this.open_conflict_view(
                             format!("{status_for_task} {path_for_task}").into(),
                             Some(path_for_task),
                             text,
+                            result_input,
                         );
                     });
                 })
@@ -613,7 +635,13 @@ impl GitViewerApp {
         diff_view.recalc_hunk_rows();
     }
 
-    fn resolve_conflict(&mut self, conflict_index: usize, resolution: ConflictResolution) {
+    fn resolve_conflict(
+        &mut self,
+        conflict_index: usize,
+        resolution: ConflictResolution,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(conflict_view) = self.conflict_view.as_mut() else {
             return;
         };
@@ -646,6 +674,11 @@ impl GitViewerApp {
 
         conflict_view.text = next;
         conflict_view.rebuild();
+        let updated_text = conflict_view.text.clone();
+        let result_input = conflict_view.result_input.clone();
+        result_input.update(cx, move |state, cx| {
+            state.set_value(updated_text, window, cx);
+        });
     }
 
     fn jump_conflict(&mut self, direction: i32) {
@@ -670,18 +703,50 @@ impl GitViewerApp {
             .scroll_to_item(row_index, ScrollStrategy::Top);
     }
 
+    fn apply_conflict_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conflict_view) = self.conflict_view.as_mut() else {
+            return;
+        };
+
+        let edited_text = conflict_view.result_input.read(cx).value().to_string();
+        if edited_text == conflict_view.text {
+            window.push_notification(Notification::new().message("结果编辑器无改动"), cx);
+            return;
+        }
+
+        conflict_view.text = edited_text;
+        conflict_view.rebuild();
+
+        let remaining = conflict_view.conflicts.len();
+        window.push_notification(
+            Notification::new().message(if remaining == 0 {
+                "已应用编辑：冲突已清零".to_string()
+            } else {
+                format!("已应用编辑：仍有 {remaining} 处冲突")
+            }),
+            cx,
+        );
+        cx.notify();
+    }
+
     fn save_conflict_to_working_tree(
         &mut self,
         add_to_index: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(conflict_view) = self.conflict_view.as_ref() else {
+        let Some(conflict_view) = self.conflict_view.as_mut() else {
             return;
         };
         let Some(path) = conflict_view.path.clone() else {
             return;
         };
+
+        let edited_text = conflict_view.result_input.read(cx).value().to_string();
+        if edited_text != conflict_view.text {
+            conflict_view.text = edited_text;
+            conflict_view.rebuild();
+        }
 
         if !conflict_view.conflicts.is_empty() {
             window.push_notification(
@@ -1286,8 +1351,8 @@ impl GitViewerApp {
         let conflict_demo_button = Button::new("open-conflict-demo")
             .label("打开 Conflict Demo")
             .ghost()
-            .on_click(cx.listener(|this, _, _window, cx| {
-                this.open_conflict_demo();
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_conflict_demo(window, cx);
                 cx.notify();
             }));
 
@@ -1548,7 +1613,7 @@ impl GitViewerApp {
                                 button
                             }),
                     )
-                    .child(div().child(format!("hunks: {hunk_count} / rows: {rows_len}")))
+                    .child(div().child(format!("hunks: {hunk_count}")))
                     .child(
                         Button::new("prev-hunk")
                             .label("上一 hunk")
@@ -1848,8 +1913,7 @@ impl GitViewerApp {
             .flex_row()
             .items_center()
             .gap(px(12.))
-            .child(format!("hunk: {hunk_position}"))
-            .child(format!("rows: {rows_len}"));
+            .child(format!("hunk: {hunk_position}"));
         let status_bar = div()
             .flex()
             .flex_row()
@@ -1955,16 +2019,23 @@ impl GitViewerApp {
         };
 
         let two_pane = matches!(self.split_layout, SplitLayout::TwoPane);
+        let show_result_editor = conflict_view.show_result_editor;
         let title = conflict_view.title.clone();
         let conflicts_count = conflict_view.conflicts.len();
         let can_prev = conflict_view.current_conflict > 0;
-        let can_next = conflict_view.current_conflict + 1 < conflict_view.conflict_rows.len();
+        let conflict_total = conflict_view.conflict_rows.len();
+        let can_next = conflict_view.current_conflict + 1 < conflict_total;
         let has_path = conflict_view.path.is_some();
         let can_save = has_path && conflicts_count == 0;
         let rows_len = conflict_view.rows.len();
         let scroll_handle = conflict_view.scroll_handle.clone();
         let scroll_state = conflict_view.scroll_state.clone();
         let row_height = window.line_height() + px(4.);
+        let conflict_position = if conflict_total == 0 {
+            "0/0".to_string()
+        } else {
+            format!("{}/{}", conflict_view.current_conflict + 1, conflict_total)
+        };
 
         let toolbar = div()
             .flex()
@@ -1994,7 +2065,7 @@ impl GitViewerApp {
                     .items_center()
                     .gap(px(12.))
                     .flex_wrap()
-                    .child(div().child(format!("conflicts: {conflicts_count} / rows: {rows_len}")))
+                    .child(div().child(format!("冲突: {conflict_position}")))
                     .child(
                         Button::new("conflict-prev")
                             .label("上一冲突")
@@ -2025,6 +2096,17 @@ impl GitViewerApp {
                                 } else {
                                     SplitLayout::Aligned
                                 };
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Switch::new("conflict-result-editor")
+                            .label("结果")
+                            .checked(show_result_editor)
+                            .on_click(cx.listener(|this, checked, _window, cx| {
+                                if let Some(view) = this.conflict_view.as_mut() {
+                                    view.show_result_editor = *checked;
+                                }
                                 cx.notify();
                             })),
                     )
@@ -2216,6 +2298,23 @@ impl GitViewerApp {
             }
         };
 
+        let status_left = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .child(div().truncate().child(format!(
+                "文件: {}",
+                conflict_view.path.as_deref().unwrap_or("<demo>")
+            )))
+            .child(format!("未解决: {conflicts_count}"));
+        let status_right = div().child(if can_save {
+            "可保存并标记已解决".to_string()
+        } else if has_path {
+            "仍有冲突未解决（编辑后点“应用”）".to_string()
+        } else {
+            "demo（不可保存）".to_string()
+        });
         let status_bar = div()
             .flex()
             .flex_row()
@@ -2228,17 +2327,8 @@ impl GitViewerApp {
             .bg(cx.theme().muted.alpha(0.12))
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(div().child(format!(
-                "文件: {}",
-                conflict_view.path.as_deref().unwrap_or("<demo>")
-            )))
-            .child(div().child(if can_save {
-                "状态: 可保存".to_string()
-            } else if has_path {
-                "状态: 仍有冲突未解决".to_string()
-            } else {
-                "状态: demo（不可保存）".to_string()
-            }));
+            .child(status_left)
+            .child(status_right);
 
         let conflict_scroll_ruler = if rows_len > 0 && !conflict_view.conflict_rows.is_empty() {
             let theme = cx.theme();
@@ -2317,13 +2407,58 @@ impl GitViewerApp {
             viewport = viewport.child(ruler);
         }
 
-        div()
+        let result_panel = show_result_editor.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .h(px(220.))
+                .border_t_1()
+                .border_color(cx.theme().border.alpha(0.6))
+                .bg(cx.theme().muted.alpha(0.06))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(px(12.))
+                        .py(px(8.))
+                        .child(div().text_sm().child("合并结果（可编辑）"))
+                        .child(
+                            div().flex().flex_row().items_center().gap(px(6.)).child(
+                                Button::new("conflict-apply-editor-inline")
+                                    .label("应用")
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.apply_conflict_editor(window, cx);
+                                    })),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .p(px(12.))
+                        .child(Input::new(&conflict_view.result_input).h_full().w_full()),
+                )
+        });
+
+        let mut root = div()
             .flex()
             .flex_col()
             .size_full()
             .child(toolbar)
-            .child(viewport)
-            .child(status_bar)
+            .child(viewport);
+
+        if let Some(panel) = result_panel {
+            root = root.child(panel);
+        }
+
+        root.child(status_bar)
     }
 
     fn render_conflict_row(
@@ -2367,8 +2502,13 @@ impl GitViewerApp {
                     Button::new(("conflict-base", conflict_index))
                         .label("采纳 base")
                         .ghost()
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.resolve_conflict(conflict_index, ConflictResolution::Base);
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.resolve_conflict(
+                                conflict_index,
+                                ConflictResolution::Base,
+                                window,
+                                cx,
+                            );
                             cx.notify();
                         }))
                         .into_any_element()
@@ -2409,10 +2549,12 @@ impl GitViewerApp {
                                 Button::new(("conflict-ours", conflict_index))
                                     .label("采纳 ours")
                                     .ghost()
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.resolve_conflict(
                                             conflict_index,
                                             ConflictResolution::Ours,
+                                            window,
+                                            cx,
                                         );
                                         cx.notify();
                                     })),
@@ -2421,10 +2563,12 @@ impl GitViewerApp {
                                 Button::new(("conflict-theirs", conflict_index))
                                     .label("采纳 theirs")
                                     .ghost()
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.resolve_conflict(
                                             conflict_index,
                                             ConflictResolution::Theirs,
+                                            window,
+                                            cx,
                                         );
                                         cx.notify();
                                     })),
@@ -2433,10 +2577,12 @@ impl GitViewerApp {
                                 Button::new(("conflict-both", conflict_index))
                                     .label("保留两侧")
                                     .ghost()
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.resolve_conflict(
                                             conflict_index,
                                             ConflictResolution::Both,
+                                            window,
+                                            cx,
                                         );
                                         cx.notify();
                                     })),
@@ -2555,8 +2701,13 @@ impl GitViewerApp {
                         Button::new(("conflict-base", conflict_index))
                             .label("采纳 base")
                             .ghost()
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.resolve_conflict(conflict_index, ConflictResolution::Base);
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.resolve_conflict(
+                                    conflict_index,
+                                    ConflictResolution::Base,
+                                    window,
+                                    cx,
+                                );
                                 cx.notify();
                             }))
                             .into_any_element()
@@ -2597,10 +2748,12 @@ impl GitViewerApp {
                                     Button::new(("conflict-ours", conflict_index))
                                         .label("采纳 ours")
                                         .ghost()
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             this.resolve_conflict(
                                                 conflict_index,
                                                 ConflictResolution::Ours,
+                                                window,
+                                                cx,
                                             );
                                             cx.notify();
                                         })),
@@ -2609,10 +2762,12 @@ impl GitViewerApp {
                                     Button::new(("conflict-theirs", conflict_index))
                                         .label("采纳 theirs")
                                         .ghost()
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             this.resolve_conflict(
                                                 conflict_index,
                                                 ConflictResolution::Theirs,
+                                                window,
+                                                cx,
                                             );
                                             cx.notify();
                                         })),
@@ -2621,10 +2776,12 @@ impl GitViewerApp {
                                     Button::new(("conflict-both", conflict_index))
                                         .label("保留两侧")
                                         .ghost()
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             this.resolve_conflict(
                                                 conflict_index,
                                                 ConflictResolution::Both,
+                                                window,
+                                                cx,
                                             );
                                             cx.notify();
                                         })),
@@ -3256,13 +3413,20 @@ impl DiffViewState {
 }
 
 impl ConflictViewState {
-    fn new(title: SharedString, path: Option<String>, text: String) -> Self {
+    fn new(
+        title: SharedString,
+        path: Option<String>,
+        text: String,
+        result_input: Entity<InputState>,
+    ) -> Self {
         let conflicts = diffview::parse_conflicts(&text);
         let rows = build_conflict_rows(&text, &conflicts);
         let mut this = Self {
             title,
             path,
             text,
+            result_input,
+            show_result_editor: true,
             conflicts,
             rows,
             conflict_rows: Vec::new(),
