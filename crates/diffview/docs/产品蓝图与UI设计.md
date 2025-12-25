@@ -103,10 +103,10 @@
     - 输入两段字符串，输出 hunk 数量、每个 hunk 的范围、以及某个修改行的 spans。
     - 打开/关闭忽略空白时，hunk 或 spans 有可观察差异。
 - 本步 TODO：
-  - [ ] `crates/diffview`：创建/完善为 library crate（可被 `git-viewer` 依赖）
-  - [ ] 文本模型与数据层：rope 文档加载、行访问抽象
-  - [ ] Diff 计算管线：二方 diff -> hunks + 行内 spans；支持忽略空白
-  - [ ] 基础示例/测试：验证数据层输出稳定可复现
+  - [x] `crates/diffview`：创建/完善为 library crate（可被 `git-viewer` 依赖）
+  - [x] 文本模型与数据层：rope 文档加载、行访问抽象
+  - [x] Diff 计算管线：二方 diff -> hunks + 行内 spans；支持忽略空白
+  - [x] 基础示例/测试：验证数据层输出稳定可复现
 
 ### 3) Split 视图 MVP（只读）
 - 实现目标：实现 JetBrains 风格的 split diff “能用版”（滚动同步、gutter、hunk 展示、折叠上下文）。
@@ -122,12 +122,13 @@
     - 能看到左右两列、行号、变更背景色。
     - 滚动同步；点击 gutter 跳转；折叠/展开上下文工作；切换忽略空白可刷新。
 - 本步 TODO：
-  - [ ] DiffViewport + 虚拟化：窗口化渲染、行高缓存
-  - [ ] Split 视图渲染：左右列绑定同步滚动
-  - [ ] Gutter：双行号、变更标记、点击跳转
-  - [ ] HunkControls（基础）：折叠/展开上下文、跳转
-  - [ ] TopToolbar（部分）：忽略空白/折叠大小开关
-  - [ ] StatusBar（基础）：显示当前模式/统计
+  - [x] DiffViewport + 虚拟化：窗口化渲染（v_virtual_list，固定行高）
+  - [x] Split 视图渲染：单滚动视图中左右对齐
+  - [x] Gutter：双行号、变更标记、点击跳转（点击行可滚动定位）
+  - [x] HunkControls（基础）：折叠/展开上下文（Fold 占位行 + 展开全部）、跳转（滚动定位）
+  - [x] TopToolbar（部分）：忽略空白开关
+  - [x] TopToolbar（部分）：上下文折叠大小开关
+  - [x] StatusBar（基础）：显示当前模式/统计
 
 ### 4) Inline 视图
 - 实现目标：提供 unified/inline diff（单列流式），与 split 共享同一套数据模型与折叠逻辑。
@@ -138,8 +139,8 @@
 - 验收：
   - 在 demo 中添加模式切换（Split/Inline），切换后布局变化正确且滚动/跳转仍可用。
 - 本步 TODO：
-  - [ ] Inline 视图渲染：单列流 + 双行号 gutter
-  - [ ] TopToolbar：模式切换入口（Split/Inline）
+  - [x] Inline 视图渲染：单列流 + 双行号 gutter
+  - [x] TopToolbar：模式切换入口（Split/Inline）
 
 ### 5) 文件列表联动与基本导航
 - 实现目标：从“文件列表”进入“文件 diff”，并具备 hunk 级导航与基本工具条。
@@ -152,10 +153,11 @@
     - 点击任一变更文件能看到 diff 视图。
     - 上一/下一 hunk 能跳转；忽略空白/折叠大小生效。
 - 本步 TODO：
-  - [ ] RepoFileList（增强）：打开文件进入 diff 视图（而非仅点击日志）
-  - [ ] TopToolbar（基础）：模式切换、忽略空白、折叠大小、hunk 导航
-  - [ ] HunkControls（导航）：上一/下一 hunk、跳转定位
-  - [ ] StatusBar：显示当前文件/统计信息
+  - [x] RepoFileList（增强）：打开文件进入 diff 视图（而非仅点击日志）
+  - [x] TopToolbar（基础）：忽略空白、折叠大小
+  - [x] Hunk 导航（基础）：上一/下一 hunk 跳转（工具条）
+  - [x] TopToolbar（基础）：模式切换（Split/Inline）
+  - [x] StatusBar：显示当前文件/统计信息
 
 ### 6) 三方 merge 数据与 ConflictBlock（读写）
 - 实现目标：冲突文件进入三方视图并完成“逐块采纳/编辑”闭环。
