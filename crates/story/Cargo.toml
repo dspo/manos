@@ -10,4 +10,6 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui-manos-components.workspace = true
 gpui-manos-plate.workspace = true
+gpui-dnd-list.workspace = true
+gpui-dnd-tree.workspace = true
 serde_json.workspace = true

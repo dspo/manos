@@ -1,0 +1,12 @@
+[package]
+name = "gpui-dnd-tree"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
