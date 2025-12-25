@@ -4,7 +4,7 @@ use gpui::{AssetSource, Result, SharedString};
 
 /// Asset source for `gpui-manos-components`.
 ///
-/// Currently only includes the SVG icon set used by `plate_toolbar`.
+/// Includes the SVG icon set used by `plate_toolbar` and story demos (e.g. DnD tree).
 pub struct ExtrasAssetSource;
 
 impl ExtrasAssetSource {
@@ -119,10 +119,18 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/paint-bucket.svg"),
     ),
     ("icons/pen.svg", include_bytes!("../assets/icons/pen.svg")),
+    (
+        "icons/pen-line.svg",
+        include_bytes!("../assets/icons/pen-line.svg"),
+    ),
     ("icons/plus.svg", include_bytes!("../assets/icons/plus.svg")),
     (
         "icons/redo-2.svg",
         include_bytes!("../assets/icons/redo-2.svg"),
+    ),
+    (
+        "icons/square-library.svg",
+        include_bytes!("../assets/icons/square-library.svg"),
     ),
     (
         "icons/smile.svg",
@@ -135,6 +143,10 @@ const ASSETS: &[(&str, &[u8])] = &[
     (
         "icons/table.svg",
         include_bytes!("../assets/icons/table.svg"),
+    ),
+    (
+        "icons/text-align-start.svg",
+        include_bytes!("../assets/icons/text-align-start.svg"),
     ),
     (
         "icons/underline.svg",
@@ -151,6 +163,10 @@ const ASSETS: &[(&str, &[u8])] = &[
     (
         "icons/wrap-text.svg",
         include_bytes!("../assets/icons/wrap-text.svg"),
+    ),
+    (
+        "icons/library.svg",
+        include_bytes!("../assets/icons/library.svg"),
     ),
 ];
 

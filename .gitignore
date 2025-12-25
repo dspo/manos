@@ -1,8 +1,6 @@
 /target
 **/target
 .DS_Store
-/.idea/.gitignore
-/.idea/gpui-component-extras.iml
-/.idea/modules.xml
-/.idea/vcs.xml
-/.idea/gpui-component-diffview.iml
+/.idea
+/crates/story/examples/webview-app/node_modules
+

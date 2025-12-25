@@ -26,7 +26,7 @@ use crate::app_menus::{About, Open, Save, SaveAs};
 fn demo_richtext_value(_theme: &gpui_component::Theme) -> RichTextValue {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../richtext.example.json");
     let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| include_str!("../../../richtext.example.json").to_string());
+        .unwrap_or_else(|_| include_str!("../richtext.example.json").to_string());
     RichTextExample::parse_richtext_value(&content).0
 }
 
