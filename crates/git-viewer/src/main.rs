@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -12,6 +13,7 @@ use gpui::{KeyBinding, actions};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, TitleBar, VirtualListScrollHandle, WindowExt as _,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     input::{Input, InputState},
     notification::Notification,
     popover::Popover,
@@ -87,6 +89,21 @@ enum AppScreen {
     StatusList,
     DiffView,
     ConflictView,
+}
+
+#[derive(Clone, Debug)]
+enum ChangeTreeRow {
+    Directory {
+        path: String,
+        name: String,
+        depth: usize,
+        file_count: usize,
+        collapsed: bool,
+    },
+    File {
+        entry: FileEntry,
+        depth: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -348,6 +365,10 @@ struct GitViewerApp {
     files: Vec<FileEntry>,
     loading: bool,
     git_available: bool,
+    changes_collapsed_dirs: HashSet<String>,
+    commit_message_input: Entity<InputState>,
+    commit_amend: bool,
+    committing: bool,
     focus_handle: FocusHandle,
     screen: AppScreen,
     diff_view: Option<DiffViewState>,
@@ -415,11 +436,22 @@ impl GitViewerApp {
                 .default_value("")
         });
 
+        let commit_message_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("text")
+                .placeholder("Commit message")
+                .default_value("")
+        });
+
         Self {
             repo_root,
             files: Vec::new(),
             loading: git_available,
             git_available,
+            changes_collapsed_dirs: HashSet::new(),
+            commit_message_input,
+            commit_amend: false,
+            committing: false,
             focus_handle,
             screen: AppScreen::StatusList,
             diff_view: None,
@@ -925,6 +957,162 @@ impl GitViewerApp {
             state.set_value(left_ref.clone(), window, cx);
         });
         cx.notify();
+    }
+
+    fn toggle_changes_dir(&mut self, dir: &str) {
+        if self.changes_collapsed_dirs.contains(dir) {
+            self.changes_collapsed_dirs.remove(dir);
+        } else {
+            self.changes_collapsed_dirs.insert(dir.to_string());
+        }
+    }
+
+    fn commit_from_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法提交"),
+                cx,
+            );
+            return;
+        }
+
+        if self.committing {
+            return;
+        }
+
+        let message = self.commit_message_input.read(cx).value().to_string();
+        if message.trim().is_empty() {
+            window.push_notification(Notification::new().message("Commit message 不能为空"), cx);
+            return;
+        }
+
+        let counts = StatusCounts::from_entries(&self.files);
+        if counts.staged == 0 && !self.commit_amend {
+            window.push_notification(
+                Notification::new().message("没有已暂存变更（Staged=0），请先 Stage 再提交"),
+                cx,
+            );
+            return;
+        }
+
+        let amend = self.commit_amend;
+        self.committing = true;
+        cx.notify();
+
+        window.push_notification(
+            Notification::new().message(if amend {
+                "正在提交（--amend）…".to_string()
+            } else {
+                "正在提交…".to_string()
+            }),
+            cx,
+        );
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        cx.spawn_in(window, async move |_, window| {
+            let repo_root_bg = repo_root.clone();
+            let message_bg = message.clone();
+            let (commit_result, status_result) = window
+                .background_executor()
+                .spawn(async move {
+                    let mut args: Vec<&str> = vec!["commit", "-F", "-"];
+                    if amend {
+                        args.insert(1, "--amend");
+                    }
+                    let commit_result =
+                        run_git_with_stdin(repo_root_bg.as_path(), args, &message_bg);
+                    let status_result = fetch_git_status(&repo_root_bg);
+                    (commit_result, status_result)
+                })
+                .await;
+
+            window
+                .update(|window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.committing = false;
+                        if commit_result.is_ok() {
+                            this.commit_amend = false;
+                            this.commit_message_input.update(cx, |state, cx| {
+                                state.set_value(String::new(), window, cx);
+                            });
+                        }
+
+                        if let Ok(entries) = &status_result {
+                            this.files = entries.clone();
+                        }
+                        cx.notify();
+                    });
+
+                    match commit_result {
+                        Ok(_) => {
+                            window.push_notification(Notification::new().message("提交成功"), cx)
+                        }
+                        Err(err) => window.push_notification(
+                            Notification::new().message(format!("提交失败：{err:#}")),
+                            cx,
+                        ),
+                    }
+
+                    if let Err(err) = status_result {
+                        window.push_notification(
+                            Notification::new().message(format!("刷新 git 状态失败：{err:#}")),
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn refresh_git_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法刷新状态"),
+                cx,
+            );
+            return;
+        }
+
+        if self.loading {
+            return;
+        }
+
+        self.loading = true;
+        cx.notify();
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        cx.spawn_in(window, async move |_, window| {
+            let repo_root_bg = repo_root.clone();
+            let entries = window
+                .background_executor()
+                .spawn(async move {
+                    fetch_git_status(&repo_root_bg)
+                        .map_err(|err| {
+                            eprintln!("git status failed: {err:?}");
+                            err
+                        })
+                        .unwrap_or_default()
+                })
+                .await;
+
+            window
+                .update(|_window, cx| {
+                    this.update(cx, |this, cx| {
+                        this.loading = false;
+                        this.files = entries;
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
     }
 
     fn open_file_history_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2583,6 +2771,7 @@ impl GitViewerApp {
         .detach();
     }
 
+    #[allow(dead_code)]
     fn render_status_list(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let counts = StatusCounts::from_entries(&self.files);
         let filtered_count = self
@@ -2719,6 +2908,479 @@ impl GitViewerApp {
             )
             .child(filter_bar)
             .child(div().flex_col().gap(px(6.)).children(list))
+    }
+
+    fn render_main_placeholder(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap(px(10.))
+            .text_color(theme.muted_foreground)
+            .child(div().text_lg().child("选择一个文件以查看 diff"))
+            .child(
+                div()
+                    .text_sm()
+                    .child("左侧 Changes 面板选择文件；Cmd/Ctrl+K 打开命令面板"),
+            )
+    }
+
+    fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let changes_panel = self.render_changes_panel(window, cx);
+        let commit_panel = self.render_commit_panel(window, cx);
+        let theme = cx.theme();
+
+        div()
+            .id("git-viewer-sidebar")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(360.))
+            .min_w(px(280.))
+            .border_r_1()
+            .border_color(theme.border.alpha(0.7))
+            .bg(theme.background)
+            .child(changes_panel.flex_1().min_h(px(0.)))
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(240.))
+                    .border_t_1()
+                    .border_color(theme.border.alpha(0.7))
+                    .bg(theme.background)
+                    .child(commit_panel),
+            )
+            .into_any_element()
+    }
+
+    fn render_changes_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let counts = StatusCounts::from_entries(&self.files);
+        let filtered_files: Vec<FileEntry> = self
+            .files
+            .iter()
+            .filter(|entry| matches_filter(entry, self.status_filter))
+            .cloned()
+            .collect();
+
+        let header: SharedString = if !self.git_available {
+            "Changes（git 不可用）".into()
+        } else if self.loading {
+            "Changes（加载中…）".into()
+        } else {
+            format!("Changes {} files", filtered_files.len()).into()
+        };
+
+        let app = cx.entity();
+        let refresh_button = Button::new("sidebar-refresh")
+            .label("刷新")
+            .ghost()
+            .disabled(!self.git_available || self.loading)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.refresh_git_status(window, cx);
+                cx.notify();
+            }));
+
+        let demo_menu = {
+            let app_for_menu = app.clone();
+            Popover::new("sidebar-demo-menu")
+                .appearance(false)
+                .trigger(
+                    Button::new("sidebar-demo-trigger")
+                        .label("Demo")
+                        .ghost()
+                        .on_click(|_, _, _| {}),
+                )
+                .content(move |_, _window, cx| {
+                    let theme = cx.theme();
+                    let popover = cx.entity();
+
+                    let make_action = move |id: &'static str,
+                                            label: SharedString,
+                                            action: Rc<dyn Fn(&mut Window, &mut App) + 'static>| {
+                        let popover = popover.clone();
+                        Button::new(id)
+                            .label(label)
+                            .ghost()
+                            .w_full()
+                            .on_click({
+                                let action = action.clone();
+                                move |_, window, cx| {
+                                    action(window, cx);
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                            })
+                            .into_any_element()
+                    };
+
+                    let app_for_demo = app_for_menu.clone();
+                    let open_demo = Rc::new(move |_window: &mut Window, cx: &mut App| {
+                        app_for_demo.update(cx, |this, cx| {
+                            this.open_demo();
+                            cx.notify();
+                        });
+                    });
+
+                    let app_for_large = app_for_menu.clone();
+                    let open_large = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_large.update(cx, |this, cx| {
+                            this.open_large_demo(window, cx);
+                        });
+                    });
+
+                    let app_for_conflict = app_for_menu.clone();
+                    let open_conflict = Rc::new(move |window: &mut Window, cx: &mut App| {
+                        app_for_conflict.update(cx, |this, cx| {
+                            this.open_conflict_demo(window, cx);
+                        });
+                    });
+
+                    div()
+                        .p(px(8.))
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius)
+                        .shadow_md()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(make_action(
+                            "sidebar-demo-diff",
+                            "Diff Demo".into(),
+                            open_demo,
+                        ))
+                        .child(make_action(
+                            "sidebar-demo-large",
+                            "Large Diff Demo".into(),
+                            open_large,
+                        ))
+                        .child(make_action(
+                            "sidebar-demo-conflict",
+                            "Conflict Demo".into(),
+                            open_conflict,
+                        ))
+                })
+        };
+
+        let filter_button = |filter: StatusFilter, id: &'static str, label: String| {
+            let mut button = Button::new(id).label(label);
+            if self.status_filter == filter {
+                button = button.primary();
+            } else {
+                button = button
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.status_filter = filter;
+                        cx.notify();
+                    }));
+            }
+            button
+        };
+
+        let filter_bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .flex_wrap()
+            .child(filter_button(
+                StatusFilter::All,
+                "sidebar-filter-all",
+                format!("All {}", counts.all),
+            ))
+            .child(filter_button(
+                StatusFilter::Conflicts,
+                "sidebar-filter-conflicts",
+                format!("Conflicts {}", counts.conflicts),
+            ))
+            .child(filter_button(
+                StatusFilter::Staged,
+                "sidebar-filter-staged",
+                format!("Staged {}", counts.staged),
+            ))
+            .child(filter_button(
+                StatusFilter::Unstaged,
+                "sidebar-filter-unstaged",
+                format!("Unstaged {}", counts.unstaged),
+            ))
+            .child(filter_button(
+                StatusFilter::Untracked,
+                "sidebar-filter-untracked",
+                format!("Untracked {}", counts.untracked),
+            ));
+
+        let selected_path = self
+            .diff_view
+            .as_ref()
+            .and_then(|view| view.path.clone())
+            .or_else(|| {
+                self.conflict_view
+                    .as_ref()
+                    .and_then(|view| view.path.clone())
+            });
+
+        let rows = build_changes_tree_rows(&filtered_files, &self.changes_collapsed_dirs);
+        let list_children: Vec<AnyElement> = if self.loading {
+            vec![
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("加载中…")
+                    .into_any_element(),
+            ]
+        } else if rows.is_empty() {
+            vec![
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("没有变更文件")
+                    .into_any_element(),
+            ]
+        } else {
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, row)| match row {
+                    ChangeTreeRow::Directory {
+                        path,
+                        name,
+                        depth,
+                        file_count,
+                        collapsed,
+                    } => {
+                        let is_selected = selected_path
+                            .as_deref()
+                            .is_some_and(|p| p == path || p.starts_with(&format!("{path}/")));
+                        let indent = px(10. + (depth as f32) * 14.);
+                        let label = format!("{name}  ({file_count})");
+                        div()
+                            .id(("changes-dir-row", index))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h(px(28.))
+                            .px(px(6.))
+                            .rounded(px(6.))
+                            .when(is_selected, |this| this.bg(theme.muted.alpha(0.18)))
+                            .hover(|this| this.bg(theme.muted.alpha(0.12)))
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, {
+                                let path = path.clone();
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.toggle_changes_dir(&path);
+                                    cx.notify();
+                                })
+                            })
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .ml(indent)
+                                    .text_color(theme.muted_foreground)
+                                    .child(if collapsed { "▸" } else { "▾" }),
+                            )
+                            .child(div().truncate().child(label))
+                            .into_any_element()
+                    }
+                    ChangeTreeRow::File { entry, depth } => {
+                        let path = entry.path.clone();
+                        let status = entry.status.clone();
+                        let status_for_click = status.clone();
+                        let is_selected = selected_path.as_deref() == Some(path.as_str());
+                        let name = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
+                        let indent = px(24. + (depth as f32) * 14.);
+                        let badge_color = if status.contains('U') {
+                            theme.red
+                        } else if status_xy(&status).is_some_and(|(x, _)| x != ' ' && x != '?') {
+                            theme.blue
+                        } else if status_xy(&status).is_some_and(|(_, y)| y != ' ' && y != '?') {
+                            theme.green
+                        } else {
+                            theme.muted_foreground
+                        };
+
+                        div()
+                            .id(("changes-file-row", index))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h(px(28.))
+                            .px(px(6.))
+                            .rounded(px(6.))
+                            .when(is_selected, |this| {
+                                this.bg(theme.accent).text_color(theme.accent_foreground)
+                            })
+                            .when(!is_selected, |this| {
+                                this.bg(theme.transparent)
+                                    .text_color(theme.popover_foreground)
+                            })
+                            .hover(|this| this.bg(theme.accent.alpha(0.15)))
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, {
+                                cx.listener(move |this, _, window, cx| {
+                                    this.open_file(
+                                        path.clone(),
+                                        status_for_click.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                    cx.notify();
+                                })
+                            })
+                            .child(div().ml(indent).w(px(14.)).child(""))
+                            .child(
+                                div()
+                                    .w(px(44.))
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(badge_color)
+                                    .child(status.clone()),
+                            )
+                            .child(div().truncate().child(name))
+                            .into_any_element()
+                    }
+                })
+                .collect()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .p(px(12.))
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(header),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(refresh_button)
+                            .child(demo_menu),
+                    ),
+            )
+            .child(filter_bar)
+            .child(
+                div()
+                    .id("changes-tree-scroll")
+                    .flex()
+                    .flex_col()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(8.))
+                    .gap(px(2.))
+                    .children(list_children),
+            )
+    }
+
+    fn render_commit_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let git_available = self.git_available;
+        let committing = self.committing;
+        let counts = StatusCounts::from_entries(&self.files);
+
+        let can_commit = git_available && !committing && (counts.staged > 0 || self.commit_amend);
+        let commit_label: SharedString = if !git_available {
+            "Commit（git 不可用）".into()
+        } else if committing {
+            "Commit（提交中…）".into()
+        } else {
+            "Commit".into()
+        };
+
+        let commit_btn = Button::new("commit-button")
+            .label(commit_label)
+            .primary()
+            .disabled(!can_commit)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.commit_from_panel(window, cx);
+                cx.notify();
+            }));
+
+        div()
+            .flex()
+            .flex_col()
+            .p(px(12.))
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(div().text_sm().child("Commit"))
+                    .child(commit_btn),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        Checkbox::new("commit-amend")
+                            .label("Amend")
+                            .checked(self.commit_amend)
+                            .disabled(!git_available || committing)
+                            .on_click({
+                                let app = cx.entity();
+                                move |checked, _window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.commit_amend = *checked;
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "Staged {} · Unstaged {} · Untracked {}",
+                                counts.staged, counts.unstaged, counts.untracked
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .border_1()
+                    .border_color(theme.border.alpha(0.6))
+                    .rounded(theme.radius)
+                    .p(px(6.))
+                    .child(Input::new(&self.commit_message_input).h_full().w_full()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("提示：Commit 只提交已暂存内容；可在 Diff 工具条中 Stage/Unstage"),
+            )
     }
 
     fn render_diff_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -3022,7 +3684,7 @@ impl GitViewerApp {
             "快捷键：\n",
             "Esc 返回\n",
             "Alt+N / Alt+P 下一/上一 hunk\n",
-            "Alt+V 切换 Split/Inline\n",
+            "Alt+V 切换 Side-by-side/Unified\n",
             "Alt+L 切换对齐/分栏\n",
             "Alt+W 忽略空白\n",
             "Alt+E 展开全部\n",
@@ -3324,7 +3986,7 @@ impl GitViewerApp {
                             .items_center()
                             .gap(px(6.))
                             .child({
-                                let button = Button::new("mode-split").label("Split");
+                                let button = Button::new("mode-split").label("Side-by-side");
                                 if view_mode == DiffViewMode::Split {
                                     button.primary()
                                 } else {
@@ -3335,7 +3997,7 @@ impl GitViewerApp {
                                 }
                             })
                             .child({
-                                let button = Button::new("mode-inline").label("Inline");
+                                let button = Button::new("mode-inline").label("Unified");
                                 if view_mode == DiffViewMode::Inline {
                                     button.primary()
                                 } else {
@@ -3490,7 +4152,7 @@ impl GitViewerApp {
                 .flex_row()
                 .items_center()
                 .gap(px(12.))
-                .child("视图: Split")
+                .child("视图: Side-by-side")
                 .child(format!("布局: {}", if two_pane { "分栏" } else { "对齐" }))
                 .child(div().truncate().child(format!("文件: {}", diff_view.title)))
                 .child(format!("对比: {}", compare_target_label(&compare_target)))
@@ -3504,7 +4166,7 @@ impl GitViewerApp {
                 .flex_row()
                 .items_center()
                 .gap(px(12.))
-                .child("视图: Inline")
+                .child("视图: Unified")
                 .child(div().truncate().child(format!("文件: {}", diff_view.title)))
                 .child(format!("对比: {}", compare_target_label(&compare_target)))
                 .child(format!("上下文: {context_lines}"))
@@ -5510,11 +6172,29 @@ impl GitViewerApp {
 
 impl Render for GitViewerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.screen {
-            AppScreen::StatusList => self.render_status_list(window, cx).into_any_element(),
+        let main_content = match self.screen {
+            AppScreen::StatusList => self.render_main_placeholder(cx).into_any_element(),
             AppScreen::DiffView => self.render_diff_view(window, cx).into_any_element(),
             AppScreen::ConflictView => self.render_conflict_view(window, cx).into_any_element(),
         };
+
+        let sidebar = self.render_sidebar(window, cx);
+
+        let content = div()
+            .id("git-viewer-layout")
+            .flex()
+            .flex_row()
+            .size_full()
+            .child(sidebar)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(main_content),
+            )
+            .into_any_element();
 
         let file_history_overlay = self.render_file_history_overlay(window, cx);
         let command_palette_overlay = self.render_command_palette_overlay(window, cx);
@@ -6681,6 +7361,103 @@ fn default_compare_target(status: &str) -> CompareTarget {
     }
 
     CompareTarget::HeadToWorktree
+}
+
+#[derive(Default)]
+struct ChangesTreeNode {
+    dirs: BTreeMap<String, ChangesTreeNode>,
+    files: Vec<FileEntry>,
+}
+
+fn build_changes_tree_rows(
+    files: &[FileEntry],
+    collapsed_dirs: &HashSet<String>,
+) -> Vec<ChangeTreeRow> {
+    fn insert_node(root: &mut ChangesTreeNode, entry: FileEntry) {
+        let mut node = root;
+        let mut parts = entry.path.split('/').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                node.files.push(entry);
+                return;
+            }
+            node = node.dirs.entry(part.to_string()).or_default();
+        }
+    }
+
+    fn total_files(node: &ChangesTreeNode) -> usize {
+        node.files.len() + node.dirs.values().map(total_files).sum::<usize>()
+    }
+
+    fn walk_dir(
+        rows: &mut Vec<ChangeTreeRow>,
+        node: &ChangesTreeNode,
+        path: String,
+        name: String,
+        depth: usize,
+        collapsed_dirs: &HashSet<String>,
+    ) {
+        let file_count = total_files(node);
+        let collapsed = collapsed_dirs.contains(&path);
+        rows.push(ChangeTreeRow::Directory {
+            path: path.clone(),
+            name,
+            depth,
+            file_count,
+            collapsed,
+        });
+
+        if collapsed {
+            return;
+        }
+
+        for (child_name, child_node) in node.dirs.iter() {
+            let child_path = format!("{}/{}", path, child_name);
+            walk_dir(
+                rows,
+                child_node,
+                child_path,
+                child_name.clone(),
+                depth + 1,
+                collapsed_dirs,
+            );
+        }
+
+        let mut files = node.files.clone();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        for entry in files {
+            rows.push(ChangeTreeRow::File {
+                entry,
+                depth: depth + 1,
+            });
+        }
+    }
+
+    let mut root = ChangesTreeNode::default();
+    for entry in files.iter().cloned() {
+        insert_node(&mut root, entry);
+    }
+
+    let mut rows = Vec::new();
+
+    for (dir_name, dir_node) in root.dirs.iter() {
+        walk_dir(
+            &mut rows,
+            dir_node,
+            dir_name.clone(),
+            dir_name.clone(),
+            0,
+            collapsed_dirs,
+        );
+    }
+
+    let mut root_files = root.files.clone();
+    root_files.sort_by(|a, b| a.path.cmp(&b.path));
+    for entry in root_files {
+        rows.push(ChangeTreeRow::File { entry, depth: 0 });
+    }
+
+    rows
 }
 
 fn filter_commits<'a>(commits: &'a [CommitEntry], query: &str) -> Vec<&'a CommitEntry> {
