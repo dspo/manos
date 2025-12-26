@@ -417,12 +417,8 @@ impl<'a> Builder<'a> {
                         }
                     }
 
-                    let invoke_key = request
-                        .headers()
-                        .get("Tauri-Invoke-Key")
-                        .and_then(|value| value.to_str().ok());
-                    if invoke_key != Some(INVOKE_KEY) {
-                        respond(responder, ipc::bad_request("invalid invoke key"));
+                    if let Err(response) = ipc::validate_custom_protocol_request(&request) {
+                        respond(responder, response);
                         return;
                     }
 
@@ -511,6 +507,11 @@ pub mod ipc {
     pub const IPC_CHANNEL_PREFIX: &str = "__CHANNEL__:";
     pub const FETCH_CHANNEL_DATA_COMMAND: &str = "plugin:__TAURI_CHANNEL__|fetch";
 
+    const TAURI_CALLBACK_HEADER_NAME: &str = "Tauri-Callback";
+    const TAURI_ERROR_HEADER_NAME: &str = "Tauri-Error";
+    const TAURI_INVOKE_KEY_HEADER_NAME: &str = "Tauri-Invoke-Key";
+    const ORIGIN_HEADER_NAME: &str = "Origin";
+
     const CHANNEL_ID_HEADER_NAME: &str = "Tauri-Channel-Id";
     const MAX_JSON_DIRECT_EXECUTE_THRESHOLD: usize = 8192;
     const MAX_RAW_DIRECT_EXECUTE_THRESHOLD: usize = 1024;
@@ -585,6 +586,77 @@ pub mod ipc {
         runnable.schedule();
         task.detach();
         Ok(())
+    }
+
+    pub(crate) fn validate_custom_protocol_request(
+        request: &http::Request<Vec<u8>>,
+    ) -> std::result::Result<(), http::Response<Vec<u8>>> {
+        fn parse_u32_header(
+            headers: &http::HeaderMap,
+            name: &'static str,
+        ) -> std::result::Result<u32, http::Response<Vec<u8>>> {
+            let value = headers
+                .get(name)
+                .ok_or_else(|| bad_request(format!("missing {name} header")))?
+                .to_str()
+                .map_err(|_| bad_request(format!("{name} header value must be a string")))?;
+
+            value
+                .parse()
+                .map_err(|_| bad_request(format!("{name} header value must be a numeric string")))
+        }
+
+        let headers = request.headers();
+
+        let invoke_key = headers
+            .get(TAURI_INVOKE_KEY_HEADER_NAME)
+            .ok_or_else(|| bad_request(format!("missing {TAURI_INVOKE_KEY_HEADER_NAME} header")))?
+            .to_str()
+            .map_err(|_| {
+                bad_request(format!(
+                    "{TAURI_INVOKE_KEY_HEADER_NAME} header value must be a string"
+                ))
+            })?;
+        if invoke_key != INVOKE_KEY {
+            return Err(bad_request("invalid invoke key"));
+        }
+
+        let origin = headers
+            .get(ORIGIN_HEADER_NAME)
+            .ok_or_else(|| bad_request(format!("missing {ORIGIN_HEADER_NAME} header")))?
+            .to_str()
+            .map_err(|_| {
+                bad_request(format!(
+                    "{ORIGIN_HEADER_NAME} header value must be a string"
+                ))
+            })?;
+        if origin != "null" && origin.parse::<http::Uri>().is_err() {
+            return Err(bad_request("Origin header is not a valid URL"));
+        }
+
+        let _ = parse_u32_header(headers, TAURI_CALLBACK_HEADER_NAME)?;
+        let _ = parse_u32_header(headers, TAURI_ERROR_HEADER_NAME)?;
+
+        let content_type = headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let content_type = content_type.split(',').next().unwrap_or_default();
+        let content_type = content_type.split(';').next().unwrap_or_default().trim();
+
+        match content_type {
+            "" | "application/octet-stream" => Ok(()),
+            "application/json" => {
+                if !request.body().is_empty() {
+                    serde_json::from_slice::<serde_json::Value>(request.body())
+                        .map_err(|err| bad_request(format!("invalid JSON body: {err}")))?;
+                }
+                Ok(())
+            }
+            other => Err(bad_request(format!(
+                "content type `{other}` is not implemented"
+            ))),
+        }
     }
 
     #[derive(Debug, Clone)]

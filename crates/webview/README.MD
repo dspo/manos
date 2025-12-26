@@ -84,7 +84,7 @@ Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
 ### P0 — Compatibility / Security
 
 - [x] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
-- [ ] IPC request validation: (partial) enforce `Tauri-Invoke-Key`; still missing `Origin`, `Tauri-Callback`, `Tauri-Error`, and request body decoding based on `Content-Type` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [x] IPC request validation: enforce `Tauri-Invoke-Key`, `Origin`, `Tauri-Callback`, `Tauri-Error`, and validate JSON bodies for `application/json` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
 - [x] IPC preflight & method handling: support `OPTIONS` and restrict to `POST/OPTIONS` like Tauri (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
 - [x] postMessage fallback: implement the `window.ipc.postMessage` bridge when custom-protocol IPC fails (Tauri JS falls back; Rust handler is missing here).
 

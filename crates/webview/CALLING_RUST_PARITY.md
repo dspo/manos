@@ -80,6 +80,7 @@ JS 侧（注入脚本）
 建议任务
 - [x] IPC custom protocol：支持 `OPTIONS` 预检，并限制只允许 `POST/OPTIONS`（对齐 Tauri 行为）。
 - [x] `Tauri-Response`/`Access-Control-Expose-Headers` 等 header 行为对齐（目前部分已实现，但需要补全一致性）。
+- [x] IPC 请求校验：custom-protocol 路径校验 `Tauri-Invoke-Key`/`Origin`/`Tauri-Callback`/`Tauri-Error`，并对 `application/json` body 做基本校验（参考 Tauri `ipc/protocol.rs`）。
 - [x] postMessage fallback：当 custom protocol fetch 失败时，提供可用的 `window.ipc.postMessage` 路径（当前缺失）。
 - [x] 协议对齐：当前 `convertFileSrc()` 默认 `asset://`，但静态资源注册的是 `wry://`；需要统一（至少避免前端调用走到不存在的 scheme）。
 
