@@ -8,54 +8,51 @@
 
 ---
 
-## 1. 现状复盘（以代码为准）
+## 1. 现状复盘（最终架构，已落地）
 
-### 1.1 文档模型：扁平 blocks + text leaf
+### 1.1 文档模型：树模型 + marks + path-based selection
 
-- 文档：`RichTextDocument { blocks: Vec<BlockNode> }`（按“行”拆成 blocks）。
-- 块：`BlockNode { format: BlockFormat, inlines: Vec<InlineNode> }`。
-- inline 目前只有 `InlineNode::Text(TextNode { text, style })`，样式为 `InlineStyle`（bold/italic/underline/strikethrough/code/fg/bg/link）。
-- 位置/选区：`Selection` 使用 UTF-8 byte offset（`start/end`），并用 Rope 进行 offset ↔ row/col、UTF-16 转换（IME 相关）。
-
-对应文件：
-- `crates/rich_text/src/document.rs`
-- `crates/rich_text/src/style.rs`
-- `crates/rich_text/src/selection.rs`
-- `crates/rich_text/src/rope_ext.rs`
-
-### 1.2 内核：RichTextState 集中承载命令、输入、undo、IME
-
-`RichTextState` 是编辑器事实上的“内核”：
-- KeyBinding 注册与 Action handler（backspace/enter/undo/redo/toggle_* 等）：`crates/rich_text/src/state.rs`
-- 内容编辑：`replace_bytes_range`、按行增删 block、inline split/merge、`BlockNode::normalize`
-- 块级能力：list/quote/todo/toggle/divider/columns/indent/align/size/link 等均为 state 方法
-- undo/redo：快照只包含 `{document, selection, active_style}`（未覆盖所有“编辑结果相关状态”）
-- IME：`EntityInputHandler` 实现，入口为 `replace_text_in_range / replace_and_mark_text_in_range`
-
-### 1.3 渲染：element.rs 里按 BlockKind 特判 + 分组
-
-渲染采取“按行渲染”的策略：
-- `RichTextState` 实现 `Render`，遍历 `document.blocks` 输出 gpui element tree
-- `RichTextLineElement` 负责一行文本 runs（inline 样式、链接下划线、code 字体），并绘制 selection/caret
-- 复杂块特判：`BlockKind` 决定列表前缀、todo checkbox、toggle chevron、divider、quote 容器化、columns 分组 + resize handle
-- toggle collapsed 通过“隐藏缩进栈”实现对子块的跳过渲染（属于“分组/布局规则”）
+- 文档：`gpui-plate-core::Document { children: Vec<Node> }`
+- 节点：`Node = Element { kind, attrs, children } | Text { text, marks } | Void { kind, attrs }`
+- 选区：`Selection { anchor: Point { path, offset }, focus: ... }`（path-based）
 
 对应文件：
-- `crates/rich_text/src/element.rs`
+- `crates/plate-core/src/core.rs`
+- `crates/plate-core/src/serde_value.rs`
 
-### 1.4 序列化：Slate 兼容 JSON 的互转层
+### 1.2 内核：Editor + PluginRegistry（schema / normalize / command / query）
 
-`RichTextValue` 实现版本化包装与 Slate 风格节点（`SlateElement.kind` 字符串）互转：
-- `RichTextValue::from_document`：将 blocks/inlines 转为 Slate 结构
-- `RichTextValue::into_document`：将 Slate 结构解析回 blocks/inlines
-- 对未知 `element.kind` 的处理：会降级到 Paragraph（信息丢失风险）
+- `Editor` 统一承载：transaction apply、normalize、undo/redo、command/query dispatch
+- `PluginRegistry` 收集插件贡献：
+  - `NodeSpec`（schema/children 约束、void/inline/block）
+  - `NormalizePass`（输出修复 ops）
+  - `CommandSpec` / `QuerySpec`（稳定字符串 ID，供工具层调用）
+- 内置 richtext 组合插件：paragraph/divider、marks、list、table、mention…
 
 对应文件：
-- `crates/rich_text/src/value.rs`
+- `crates/plate-core/src/core.rs`
+- `crates/plate-core/src/ops.rs`
+- `crates/plate-core/src/plugin.rs`
 
-### 1.5 UI 工具：story 示例硬编码调用 state 方法
+### 1.3 视图：gpui-manos-plate 的 RichTextState（输入/IME/hit-test/渲染）
 
-toolbar、dialog 等目前在 `crates/story/src/richtext.rs` 中直接调用 `RichTextState` 的各种方法，尚未形成“工具插件贡献”机制。
+- `gpui-manos-plate::RichTextState` 将 gpui 输入映射为 `Editor` 的 command/transaction，并渲染为 gpui elements
+- `layout_cache` 以 `block_path: Vec<usize>` 为 key：统一支撑 hit-test/caret/selection/IME bounds
+- keybindings & actions：`gpui_manos_plate::init` 绑定到 `RichText` key context
+
+对应文件：
+- `crates/rich_text/src/state.rs`
+
+### 1.4 序列化：无损 versioned JSON（PlateValue）
+
+- `PlateValue` 负责 versioned JSON ↔ `Document` 互转；未知节点/attrs 可 round-trip
+
+对应文件：
+- `crates/plate-core/src/serde_value.rs`
+
+### 1.5 工具层：story 示例只依赖 command/query
+
+- `crates/story/src/richtext.rs` 的 toolbar/menu/dialog 只调用 `RichTextState` 的 command/query 接口（底层仍走 command id），避免直连内部树结构。
 
 ---
 
@@ -64,12 +61,12 @@ toolbar、dialog 等目前在 `crates/story/src/richtext.rs` 中直接调用 `Ri
 ### 2.1 现有结构的扩展成本会随功能线性甚至超线性增长
 
 新增一个能力（例如：新块、新输入规则、新序列化字段、新渲染容器）通常会同时涉及：
-- `state.rs`：编辑命令/输入行为/undo 一致性
-- `element.rs`：渲染与交互 hit-test
-- `value.rs`：读写格式与版本兼容
-- `story`：UI 工具接入
+- `crates/plate-core/src/plugin.rs`：schema/normalize/commands/queries（能力的“可组合本体”）
+- `crates/rich_text/src/state.rs`：仅当涉及 gpui 输入/IME/hit-test/渲染时才需要扩展（尽量保持通用）
+- `crates/plate-core/src/serde_value.rs`：仅当涉及持久化字段/格式升级时需要修改
+- `crates/story/src/richtext.rs`：示例 UI 入口与验收
 
-随着能力增多，`match BlockKind` 与“特例规则”会持续堆叠，代码维护成本快速上升。
+目标：让新增能力尽量收敛到“一个插件 + 少量 view 适配 + 一份验收样例”，避免特例在单体文件中持续堆叠。
 
 ### 2.2 undo/redo 与“状态归属”边界需要被系统化
 
@@ -81,9 +78,9 @@ toolbar、dialog 等目前在 `crates/story/src/richtext.rs` 中直接调用 `Ri
 
 ### 3.1 可行性：你们已有插件系统所需的三大“骨架”
 
-- 内核命令集合（`RichTextState` 方法）
-- 渲染管线（`Render for RichTextState` + per-line element）
-- 序列化层（Slate-compatible 的互转）
+- 内核命令集合（`PluginRegistry` 的 commands/queries + `Editor::run_command`）
+- 渲染管线（`gpui-manos-plate::RichTextState`：block_path 布局缓存 + per-line element）
+- 序列化层（`PlateValue` 的 versioned JSON，无损 round-trip）
 
 插件化主要是把这些能力抽成“可注册、可组合、可覆写”的扩展点，并将内置功能迁移为“内置插件集合”。
 
@@ -299,12 +296,12 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 1) **每一步都产出一个“端到端可运行”的编辑器体验**（哪怕功能集不大，但闭环完整：输入/选择/撤销/渲染/保存加载/插件组合）。
 2) **每一步都处于最终架构之内**（同构验证），不会引入未来要推翻的临时框架。
 
-> 新内核已以独立 crate 落地：`crates/plate-core`（crate 名称：`gpui-plate-core`），并通过 `crates/story/examples/richtext_next.rs` 提供验收入口；通过后再替换现有 `crates/rich_text` 的 public API 壳层。
+> 新内核已以独立 crate 落地：`crates/plate-core`（crate 名称：`gpui-plate-core`），并通过 `crates/story/examples/richtext.rs` 提供验收入口；并已完成 `gpui-manos-plate`（`crates/rich_text`）的一次性替换壳层。
 
 本项目采用的落地位置与命名约定：
 - 新内核 crate：`crates/plate-core`
 - crate 名称：`gpui-plate-core`
-- 建议示例入口：`cargo run --example richtext_next`（位于 `crates/story/examples/richtext_next.rs`）
+- 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
 - Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.set_link`、`marks.unset_link`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
@@ -313,12 +310,12 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 ### 当前进度（阶段性）
 
-截至目前，新内核与 `richtext_next` 示例已完成（或待验收）的主要能力：
+截至目前，新内核与 `richtext` 示例已完成（或待验收）的主要能力：
 - 已完成（可验收）：Iteration 1 ~ Iteration 5（树模型/ops/normalize/插件命令、EditorView 输入与 IME、List/Link/Marks、Inline runs 与范围 marks、Inline Void mention）。
 - 已补齐（架构对齐）：工具层状态已通过 `Query API` 获取（与 “CommandRegistry + Query API” 约束一致），并校准了多行选区渲染与三击选段行为。
-- 已记录问题：双击选词对中文边界不理想，见 [`docs/richtext-next-known-issues.md`](richtext-next-known-issues.md)。
-- Iteration 6（Table）已实现，待验收：TablePlugin（schema + normalize + commands + query）与 `richtext_next` 的 table 可编辑闭环。
-- 下一阶段优先项：Iteration 6 验收通过后进入 Iteration 7（一次性替换现有实现）。
+- 已记录问题：双击选词对中文边界不理想，见 [`docs/richtext-known-issues.md`](richtext-known-issues.md)。
+- Iteration 6（Table）已实现：TablePlugin（schema + normalize + commands + query）与 `richtext` 的 table 可编辑闭环。
+- Iteration 7（壳层替换）已实现：`gpui-manos-plate` 已从旧 `crates/rich_text` monolith 切换为 `gpui-plate-core` 驱动的最终架构实现。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -344,8 +341,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 所有编辑都必须通过 `Transaction { ops }` 应用；禁止在 core 里提供“直接 mutate 树”的后门 API（避免绕过 normalize/undo）。
 
 **要验收什么**
-- 能运行一个新的示例：`crates/story/examples/richtext_next.rs`
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext_next`
+- 能运行一个新的示例：`crates/story/examples/richtext.rs`
+- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
 - 手动验收清单（Iteration 1 通过标准）：
   - **可输入**：启动后无需点击即可直接输入（英文/符号），文本出现在首段（paragraph）。
   - **IME 中文**：拼音预编辑时显示下划线；选字提交后不残留拼音字母。
@@ -368,7 +365,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 ### Iteration 2：EditorView（gpui 输入/IME/hit-test）与“文本布局 → path/offset”映射闭环
 
 **要实现什么**
-- `richtext_next` 示例的 EditorView 体验补齐（仍然处于同一套最终架构：tree+selection+ops+normalize）：
+- `richtext` 示例的 EditorView 体验补齐（仍然处于同一套最终架构：tree+selection+ops+normalize）：
   - gpui `EntityInputHandler` 的 IME 集成完整可用（marked range、replace_text、replace_and_mark、bounds_for_range…）。
   - hit-test：鼠标点位 → `{path, offset}`（覆盖 paragraph/list_item 内的多 Text leaf，并保证 row byte offset ↔ leaf `{path, offset}` 的互转正确）。
   - selection/caret：单段与跨段选区渲染；双击选词、三击选段；Shift+点击/拖拽扩展选区。
@@ -382,7 +379,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - **scroll-to-caret**：EditorState 持有 `ScrollHandle` 与 `viewport_bounds`；根据 `TextLayout.position_for_index` 得到 caret bounds，用与旧版一致的 margin 规则计算并更新 `scroll_handle.set_offset(...)`。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext_next`
+- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
 - 手动验收清单（Iteration 2 通过标准）：
   - **滚动可用**：
     - 连续 Enter 生成大量段落后，编辑区出现纵向滚动条；滚轮/触控板滚动可用。
@@ -405,7 +402,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - **IME bounds**：
     - 中文拼音预编辑下划线正常；候选框位置跟随 caret（依赖 `bounds_for_range`），提交后不残留拼音字母。
   - **已知问题**：
-    - 双击选词对中文边界目前不理想（已记录）：[`docs/richtext-next-known-issues.md`](richtext-next-known-issues.md)
+    - 双击选词对中文边界目前不理想（已记录）：[`docs/richtext-known-issues.md`](richtext-known-issues.md)
 
 ### Iteration 3：插件化能力集扩展（List + Link + Marks + 工具层对接）
 
@@ -423,8 +420,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 规范化全部走 normalize pass：例如 list 的“段落 → list item 包裹”、退出列表、合并/拆分列表等，都用 ops 表达并可撤销。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext_next`
-- 回归样本：`richtext_next.example.json`（建议用 Open 打开并 Save/Reload 验证 round-trip）
+- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
+- 回归样本：`plate-core.example.json`（建议用 Open 打开并 Save/Reload 验证 round-trip）
   - 手动验收清单（Iteration 3 通过标准）：
   - **Toolbar（命令化）**：
     - Bold：点击或快捷键 `Cmd/Ctrl+B` 可切换粗体（Undo/Redo 生效）。
@@ -435,7 +432,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - 在 list item 起始处按 Backspace 会退出列表（变回 paragraph）。
   - **JSON round-trip**：
     - 含 list/link/bold 的文档保存后再次打开，结构与样式保持（`list_item.attrs.list_type/list_index`、`text.marks`）。
-  - **已知问题**：见 [`docs/richtext-next-known-issues.md`](richtext-next-known-issues.md)。
+  - **已知问题**：见 [`docs/richtext-known-issues.md`](richtext-known-issues.md)。
 
 ### Iteration 4：Inline Text Runs（多 Text leaf）+ 选区范围 marks（bold/link）
 
@@ -443,7 +440,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 结构表达：paragraph/list_item 允许包含多个 `Text` leaf（inline runs），以支持“同一段内的局部 marks”。
 - normalize：合并相邻 `Text` leaf（marks 相同则合并），防止编辑后碎片化。
 - 命令：`marks.toggle_bold / marks.set_link / marks.unset_link` 对**选区范围**生效（跨 runs、跨段落可组合）。
-- `richtext_next`：
+- `richtext`：
   - 渲染按 runs 输出 `StyledText` runs（同一行/段内多样式共存）。
   - hit-test/selection/IME 统一采用 “row byte offset ↔ leaf `{path, offset}`” 的互转，不再假设 `selection.path == [row, 0]`。
 - undo/redo：修复/覆盖 multi-op transaction 的可逆性与顺序正确性（典型：replace、paste、normalize merge）。
@@ -454,7 +451,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - view 层：所有 gpui `TextLayout` index 都先映射到 row offset，再映射到 leaf path；IME 的 replace/marked 也走 row-level replace。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext_next`
+- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
 - 手动验收清单（Iteration 4 通过标准）：
   - **范围粗体**：选中部分文本点击 Bold/`Cmd/Ctrl+B`，仅选区变粗；再次 toggle 恢复；Undo/Redo 生效。
   - **范围链接**：选中部分文本 Set Link，仅选区呈现链接；Unlink 仅移除选区链接；Undo/Redo 生效。
@@ -470,7 +467,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - kind：`mention`
   - 命令：`mention.insert`（参数：`{ "label": "Alice" }`）
   - JSON round-trip：保存/加载不丢失（`node: "void", kind: "mention", attrs.label`）
-- `richtext_next`：
+- `richtext`：
   - 渲染：把 inline void 映射为显示文本（例如 `@Alice`）参与 `TextLayout`。
   - 交互：将 mention 视为**原子单元**：
     - 光标左右移动可跨过 mention（不进入内部字符）。
@@ -488,7 +485,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 光标移动/删除使用 `prev/next_cursor_offset_in_row` 跳过 void；replace/split 时保持 void 不可分割。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext_next`
+- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
 - 手动验收清单（Iteration 5 通过标准）：
   - **插入 mention**：点击工具栏按钮或按 `Cmd/Ctrl+Shift+M` 插入 `@Alice`，光标落在其后。
   - **原子导航**：左右方向键跨过 mention；Backspace/Delete 一次删除整个 mention；Undo/Redo 生效。
@@ -511,7 +508,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - `table.delete_col`
   - queries：
     - `table.is_active`：selection 是否位于 table 内（用于工具栏 enable/disable）
-- `richtext_next`：支持 table 的“可编辑”闭环
+- `richtext`：支持 table 的“可编辑”闭环
   - 渲染：表格以网格容器渲染，cell 内允许多个 text block（paragraph/list_item）纵向堆叠
   - 输入/选区：view 以 `block_path: Vec<usize>` 识别任意深度 text block（使 cell 内编辑成立）
   - 工具栏：提供插入表格/增删行列入口
@@ -521,13 +518,13 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - `TablePlugin` 位于 `crates/plate-core/src/plugin.rs`；normalize pass：`table.normalize_structure`
   - 命令统一生成 `Transaction { ops }` 并交由 `editor.apply(tx)` 应用（确保 normalize/undo 一致）
   - 单测锁定结构与命令行为：`crates/plate-core/tests/table.rs`
-- view（`richtext_next`）：
+- view（`richtext`）：
   - 用 `text_block_paths()` 生成 DFS 顺序的 text block 列表，作为跨 block 导航/复制/全选的统一“线性视图”
   - `layout_cache` 以 `block_path` 为 key 缓存 `TextLayout`，hit-test/IME ↔ path/offset 统一走这份映射
   - 粘贴/全选等命令改为基于 `block_path`（保证 table cell 内行为正确）
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext_next`
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 6 通过标准）：
   - **插入表格**：点击工具栏 Table 插入 2×2，光标落在左上 cell 可输入。
@@ -542,25 +539,24 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - **Select All**：`Cmd/Ctrl+A` 会包含 table cell 内文本。
   - **JSON round-trip**：Save As → Open 后 table 结构不漂移（normalize 后稳定），cell 不会变空。
 
-### Iteration 7：一次性替换现有实现（对外 API 兼容壳层）
+### Iteration 7：一次性替换现有实现（壳层替换，已完成）
 
 **要实现什么**
-- 将现有对外入口（`gpui_manos_plate::RichTextEditor/RichTextState/RichTextValue` 等）替换为新内核驱动：
-  - 可以保留类型名，但内部不再使用旧 `RichTextDocument/BlockKind` 模型
-  - 提供兼容的序列化适配器（Slate JSON ↔ 新 JSON ↔ 旧 `RichTextValue` 的过渡策略由“适配器插件”承担）
-- 移除旧 monolith 或至少从默认构建路径移出，避免双轨继续存在。
+- 将 `gpui-manos-plate`（`crates/rich_text`）从旧 monolith 一次性切换为 `gpui-plate-core` 驱动：
+  - 对外保留 `RichTextState/RichTextEditor`（以及 `RichTextValue = PlateValue`），但内部不再使用旧 blocks 模型
+  - 旧实现源码直接移除，避免双轨继续存在
+- 将验收入口统一到：`cargo run -p gpui-manos-components-story --example richtext`
 
 **怎么实现（关键做法）**
-- 替换应当是“功能上不回退”的：以你们认为必须支持的能力集为准（建议至少包含 Iteration 5 的能力）。
-- 旧格式兼容建议：
-  - Slate 兼容作为插件：启用则支持 Slate JSON 导入导出；不启用也不影响内核。
+- 不为“兼容旧格式/旧模型”牺牲底层：旧 Slate JSON 如需支持，应以**独立适配器插件/独立 crate**实现（不进入内核默认路径）
+- 壳层只做 gpui 视图适配与命令/查询桥接；结构约束与编辑语义全部留在 core（schema/normalize/ops）
 
 **要验收什么**
-- 原有示例可继续工作（或提供等价新示例并更新 README）：
-  - `cargo run --example richtext`（若保留该入口）
-  - 或 `cargo run --example richtext_next` 成为新的主入口并更新 `README.md`
-- `docs` 与示例同步更新：
-  - `docs/richtext-extensibility.md`、`docs/richtext-plugin-system-plan.md` 的链接与入口说明准确
+- 编译：`cargo check -p gpui-manos-plate`
+- 示例：`cargo run -p gpui-manos-components-story --example richtext`
+  - app menu 的 Edit actions（Undo/Redo/Cut/Copy/Paste/SelectAll）在编辑器聚焦时可用
+  - Open/Save/Save As 能读写 `gpui-plate` JSON（例如 `plate-core.example.json`）
+- 文档：`docs/richtext-extensibility.md`、`docs/richtext-plugin-system-plan.md`、`docs/richtext-known-issues.md` 链接与入口说明准确
 
 ---
 

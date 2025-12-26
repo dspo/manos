@@ -2276,10 +2276,10 @@ name = "gpui-manos-plate"
 version = "0.1.0"
 dependencies = [
  "gpui",
- "ropey",
+ "gpui-component",
+ "gpui-plate-core",
  "serde",
  "serde_json",
- "zed-sum-tree",
 ]
 
 [[package]]

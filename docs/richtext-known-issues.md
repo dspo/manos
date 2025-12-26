@@ -1,8 +1,8 @@
-# RichText Next：已知问题（Tracked Issues）
+# RichText：已知问题（Tracked Issues）
 
-本文件用于记录 `richtext_next` 示例与 `gpui-plate-core` 内核在当前阶段的已知问题，便于验收与后续迭代排期。
+本文件用于记录 `richtext` 示例（`gpui-manos-plate` + `gpui-plate-core`）在当前阶段的已知问题，便于验收与后续迭代排期。
 
-运行入口：`cargo run -p gpui-manos-components-story --example richtext_next`
+运行入口：`cargo run -p gpui-manos-components-story --example richtext`
 
 相关文档：
 - [RichText：插件系统与未来架构计划（激进重构版）](richtext-plugin-system-plan.md)

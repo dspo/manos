@@ -1,57 +1,37 @@
-use std::{collections::HashMap, ops::Range};
+use std::collections::HashMap;
+use std::ops::Range;
 
-use gpui::{
-    Action, App, Bounds, ClipboardItem, Context, EntityInputHandler, FocusHandle, FontStyle,
-    FontWeight, HighlightStyle, KeyBinding, Pixels, Point, ScrollHandle, SharedString,
-    StrikethroughStyle, UTF16Selection, UnderlineStyle, Window, actions, point, px,
+use gpui::actions;
+use gpui::prelude::FluentBuilder as _;
+use gpui::*;
+use gpui_component::ActiveTheme as _;
+use gpui_plate_core::{
+    Document, Editor, ElementNode, Marks, Node, PlateValue, Point as CorePoint, Selection, TextNode,
 };
-use ropey::Rope;
-use serde::Deserialize;
-use sum_tree::Bias;
-
-use crate::RichTextTheme;
-use crate::document::{
-    BlockAlign, BlockKind, BlockNode, BlockTextSize, InlineNode, OrderedListStyle,
-    RichTextDocument, TextNode,
-};
-use crate::rope_ext::RopeExt as _;
-use crate::selection::Selection;
-use crate::value::RichTextValue;
-
-use super::style::InlineStyle;
 
 pub(super) const CONTEXT: &str = "RichText";
-
-#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
-#[action(namespace = rich_text, no_json)]
-pub struct Enter {
-    pub secondary: bool,
-}
 
 actions!(
     rich_text,
     [
         Backspace,
         Delete,
-        Escape,
+        Enter,
         MoveLeft,
         MoveRight,
-        MoveUp,
-        MoveDown,
         SelectLeft,
         SelectRight,
-        SelectUp,
-        SelectDown,
         SelectAll,
         Copy,
         Cut,
         Paste,
         Undo,
         Redo,
+        InsertDivider,
+        InsertMention,
         ToggleBold,
-        ToggleItalic,
-        ToggleUnderline,
-        ToggleStrikethrough,
+        ToggleBulletedList,
+        ToggleOrderedList,
     ]
 );
 
@@ -59,21 +39,39 @@ pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
         KeyBinding::new("delete", Delete, Some(CONTEXT)),
-        KeyBinding::new("enter", Enter { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new("secondary-enter", Enter { secondary: true }, Some(CONTEXT)),
-        KeyBinding::new("escape", Escape, Some(CONTEXT)),
+        KeyBinding::new("enter", Enter, Some(CONTEXT)),
         KeyBinding::new("left", MoveLeft, Some(CONTEXT)),
         KeyBinding::new("right", MoveRight, Some(CONTEXT)),
-        KeyBinding::new("up", MoveUp, Some(CONTEXT)),
-        KeyBinding::new("down", MoveDown, Some(CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(CONTEXT)),
-        KeyBinding::new("shift-up", SelectUp, Some(CONTEXT)),
-        KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("cmd-z", Undo, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("ctrl-z", Undo, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-z", Redo, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-z", Redo, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-d", InsertDivider, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-d", InsertDivider, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-m", InsertMention, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-m", InsertMention, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-b", ToggleBold, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-b", ToggleBold, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-8", ToggleBulletedList, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-8", ToggleBulletedList, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-7", ToggleOrderedList, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-7", ToggleOrderedList, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -87,921 +85,1405 @@ pub(crate) fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-v", Paste, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-z", Undo, Some(CONTEXT)),
+        KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-z", Undo, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-z", Redo, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-shift-z", Redo, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-b", ToggleBold, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-b", ToggleBold, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-i", ToggleItalic, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-i", ToggleItalic, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-u", ToggleUnderline, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-u", ToggleUnderline, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-x", ToggleStrikethrough, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-shift-x", ToggleStrikethrough, Some(CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
     ]);
 }
 
+fn node_at_path<'a>(doc: &'a Document, path: &[usize]) -> Option<&'a Node> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut node = doc.children.get(path[0])?;
+    for &ix in path.iter().skip(1) {
+        node = match node {
+            Node::Element(el) => el.children.get(ix)?,
+            Node::Text(_) | Node::Void(_) => return None,
+        };
+    }
+    Some(node)
+}
+
+fn element_at_path<'a>(doc: &'a Document, path: &[usize]) -> Option<&'a ElementNode> {
+    match node_at_path(doc, path)? {
+        Node::Element(el) => Some(el),
+        _ => None,
+    }
+}
+
+fn text_block_paths(doc: &Document) -> Vec<Vec<usize>> {
+    fn walk(nodes: &[Node], path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        for (ix, node) in nodes.iter().enumerate() {
+            let Node::Element(el) = node else {
+                continue;
+            };
+
+            path.push(ix);
+
+            if el.kind == "paragraph" || el.kind == "list_item" {
+                out.push(path.clone());
+            } else {
+                walk(&el.children, path, out);
+            }
+
+            path.pop();
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&doc.children, &mut Vec::new(), &mut out);
+    out
+}
+
 #[derive(Clone)]
-struct Snapshot {
-    document: RichTextDocument,
-    selection: Selection,
-    active_style: InlineStyle,
-}
-
-#[derive(Clone, Debug)]
-struct ColumnResize {
-    group: u64,
-    handle: usize,
-    start_x: Pixels,
-    start_weights: Vec<f32>,
+pub enum InlineTextSegmentKind {
+    Text,
+    Void { kind: SharedString },
 }
 
 #[derive(Clone)]
-pub(crate) struct LineLayoutCache {
-    pub(crate) bounds: Bounds<Pixels>,
-    pub(crate) start_offset: usize,
-    pub(crate) line_len: usize,
-    pub(crate) text_layout: gpui::TextLayout,
+pub struct InlineTextSegment {
+    pub child_ix: usize,
+    pub start: usize,
+    pub len: usize,
+    pub marks: Marks,
+    pub kind: InlineTextSegmentKind,
 }
 
-#[derive(Clone, Debug)]
-pub struct ActiveLinkOverlay {
-    pub url: String,
-    /// Anchor position in window coordinates.
-    pub anchor: Point<Pixels>,
+#[derive(Clone)]
+pub struct LineLayoutCache {
+    pub bounds: Bounds<Pixels>,
+    pub text_layout: gpui::TextLayout,
+    pub text: SharedString,
+    pub segments: Vec<InlineTextSegment>,
 }
 
 pub struct RichTextState {
-    pub(crate) focus_handle: FocusHandle,
-    pub(crate) scroll_handle: ScrollHandle,
-    pub(crate) theme: RichTextTheme,
-    read_only: bool,
-
-    pub(crate) document: RichTextDocument,
-    pub(crate) text: Rope,
-    pub(crate) active_style: InlineStyle,
-
-    /// Selection in UTF-8 byte offsets (anchor..focus).
-    pub(crate) selection: Selection,
-    pub(crate) ime_marked_range: Option<Selection>,
-    pub(crate) selecting: bool,
-    pub(crate) preferred_x: Option<Pixels>,
-
-    pub(crate) viewport_bounds: Bounds<Pixels>,
-    pub(crate) layout_cache: Vec<Option<LineLayoutCache>>,
-
-    undo_stack: Vec<Snapshot>,
-    redo_stack: Vec<Snapshot>,
-    next_columns_group_id: u64,
-
-    column_widths: HashMap<u64, Vec<f32>>,
-    column_resize: Option<ColumnResize>,
+    focus_handle: FocusHandle,
+    scroll_handle: ScrollHandle,
+    editor: Editor,
+    selecting: bool,
+    selection_anchor: Option<CorePoint>,
+    viewport_bounds: Bounds<Pixels>,
+    layout_cache: HashMap<Vec<usize>, LineLayoutCache>,
+    text_block_order: Vec<Vec<usize>>,
+    ime_marked_range: Option<Range<usize>>,
+    did_auto_focus: bool,
 }
 
 impl RichTextState {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle().tab_stop(true);
-
-        let document = RichTextDocument::default();
-        let text = Rope::from(document.to_plain_text().as_str());
-        let layout_cache = vec![None; document.blocks.len().max(1)];
-
+        let editor = Editor::with_richtext_plugins();
+        let text_block_order = text_block_paths(editor.doc());
         Self {
             focus_handle,
             scroll_handle: ScrollHandle::new(),
-            theme: RichTextTheme::default(),
-            read_only: false,
-            document,
-            text,
-            active_style: InlineStyle::default(),
-            selection: Selection::default(),
-            ime_marked_range: None,
+            editor,
             selecting: false,
-            preferred_x: None,
+            selection_anchor: None,
             viewport_bounds: Bounds::default(),
-            layout_cache,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            next_columns_group_id: 1,
-            column_widths: HashMap::new(),
-            column_resize: None,
+            layout_cache: HashMap::new(),
+            text_block_order,
+            ime_marked_range: None,
+            did_auto_focus: false,
         }
-    }
-
-    pub fn theme(mut self, theme: RichTextTheme) -> Self {
-        self.theme = theme;
-        self
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
 
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
+    pub fn can_undo(&self) -> bool {
+        self.editor.can_undo()
     }
 
-    pub fn set_read_only(&mut self, read_only: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only == read_only {
-            return;
-        }
-        self.read_only = read_only;
-        if read_only {
-            self.ime_marked_range = None;
-            self.selecting = false;
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
+    pub fn can_redo(&self) -> bool {
+        self.editor.can_redo()
     }
 
-    pub fn default_richtext_value(mut self, value: RichTextValue) -> Self {
-        self.document = value.into_document();
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.selection = Selection::default();
-        self.ime_marked_range = None;
-        self.active_style = InlineStyle::default();
-        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-        self.column_widths.clear();
-        self.column_resize = None;
-        self.next_columns_group_id = self
-            .document
-            .blocks
-            .iter()
-            .filter_map(|block| block.format.columns.map(|cols| cols.group))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        self
+    pub fn plate_value(&self) -> PlateValue {
+        PlateValue::from_document(self.editor.doc().clone())
     }
 
-    pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
-        let value: SharedString = value.into();
-        self.document = RichTextDocument::from_plain_text(value.as_str());
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.selection = Selection::default();
-        self.ime_marked_range = None;
-        self.active_style = InlineStyle::default();
-        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-        self.next_columns_group_id = 1;
-        self.column_widths.clear();
-        self.column_resize = None;
-        self
-    }
-
-    pub fn value(&self) -> SharedString {
-        SharedString::new(self.text.to_string())
-    }
-
-    pub fn richtext_value(&self) -> RichTextValue {
-        RichTextValue::from_document(&self.document)
-    }
-
-    pub fn set_richtext_value(
-        &mut self,
-        value: RichTextValue,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.push_undo_snapshot();
-        self.apply_loaded_richtext_value(value, true, window, cx);
-    }
-
-    pub fn load_richtext_value(
-        &mut self,
-        value: RichTextValue,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_loaded_richtext_value(value, false, window, cx);
-    }
-
-    pub fn set_value(
-        &mut self,
-        value: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.push_undo_snapshot();
-        let value: SharedString = value.into();
-        self.document = RichTextDocument::from_plain_text(value.as_str());
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.selection = Selection::default();
-        self.active_style = InlineStyle::default();
-        self.ime_marked_range = None;
-        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-        self.column_widths.clear();
-        self.column_resize = None;
+    pub fn load_plate_value(&mut self, value: PlateValue, cx: &mut Context<Self>) {
+        let selection = Selection::collapsed(CorePoint::new(vec![0, 0], 0));
+        self.editor = Editor::new(
+            value.into_document(),
+            selection,
+            gpui_plate_core::PluginRegistry::richtext(),
+        );
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
-        self.preferred_x = None;
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    fn apply_loaded_richtext_value(
-        &mut self,
-        value: RichTextValue,
-        keep_undo: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.document = value.into_document();
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.selection = Selection::default();
-        self.active_style = InlineStyle::default();
+        self.layout_cache.clear();
+        self.text_block_order = text_block_paths(self.editor.doc());
         self.ime_marked_range = None;
-        self.selecting = false;
-        self.preferred_x = None;
-        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-        self.column_widths.clear();
-        self.column_resize = None;
-        self.next_columns_group_id = self
-            .document
-            .blocks
-            .iter()
-            .filter_map(|block| block.format.columns.map(|cols| cols.group))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        self.scroll_handle.set_offset(point(px(0.), px(0.)));
-
-        if !keep_undo {
-            self.undo_stack.clear();
-            self.redo_stack.clear();
-        }
-
         cx.notify();
-        self.scroll_cursor_into_view(window, cx);
     }
 
-    pub(crate) fn column_weights_for_group(&self, group: u64, count: u8) -> Vec<f32> {
-        let count = count.max(2) as usize;
-        self.column_widths
-            .get(&group)
-            .filter(|weights| weights.len() == count)
-            .cloned()
-            .unwrap_or_else(|| vec![1.0; count])
+    fn active_text_block_path(&self) -> Option<Vec<usize>> {
+        self.editor
+            .selection()
+            .focus
+            .path
+            .split_last()
+            .map(|(_, p)| p.to_vec())
     }
 
-    pub(crate) fn start_column_resize(
+    fn set_selection_points(
         &mut self,
-        group: u64,
-        count: u8,
-        handle: usize,
-        start_x: Pixels,
+        anchor: CorePoint,
+        focus: CorePoint,
         cx: &mut Context<Self>,
     ) {
-        let count = count.clamp(2, 4) as usize;
-        if handle + 1 >= count {
-            return;
-        }
-
-        let weights = self
-            .column_widths
-            .entry(group)
-            .or_insert_with(|| vec![1.0; count]);
-
-        if weights.len() != count {
-            *weights = vec![1.0; count];
-        }
-
-        self.selecting = false;
-        self.column_resize = Some(ColumnResize {
-            group,
-            handle,
-            start_x,
-            start_weights: weights.clone(),
-        });
+        self.editor.set_selection(Selection { anchor, focus });
+        _ = self.scroll_cursor_into_view();
+        self.ime_marked_range = None;
         cx.notify();
     }
 
-    pub(crate) fn update_column_resize(&mut self, position_x: Pixels, cx: &mut Context<Self>) {
-        let Some(resize) = self.column_resize.clone() else {
+    fn active_text(&self) -> SharedString {
+        let Some(block_path) = self.active_text_block_path() else {
+            return SharedString::default();
+        };
+        if let Some(cache) = self.layout_cache.get(&block_path) {
+            return cache.text.clone();
+        }
+        self.text_block_text(&block_path).unwrap_or_default()
+    }
+
+    fn active_marks(&self) -> Marks {
+        let path = &self.editor.selection().focus.path;
+        match node_at_path(self.editor.doc(), path) {
+            Some(Node::Text(t)) => t.marks.clone(),
+            _ => Marks::default(),
+        }
+    }
+
+    fn row_offset_for_point(&self, point: &CorePoint) -> Option<usize> {
+        let (child_ix, block_path) = point.path.split_last()?;
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return None;
+        };
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+
+        let mut global = 0usize;
+        for (ix, child) in el.children.iter().enumerate() {
+            match child {
+                Node::Text(t) => {
+                    if ix == *child_ix {
+                        return Some(global + point.offset.min(t.text.len()));
+                    }
+                    global += t.text.len();
+                }
+                Node::Void(v) => {
+                    global += v.inline_text_len();
+                }
+                Node::Element(_) => {}
+            }
+        }
+
+        Some(global)
+    }
+
+    fn point_for_block_offset(&self, block_path: &[usize], offset: usize) -> Option<CorePoint> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+
+        Some(Self::point_for_block_offset_in_children(
+            block_path,
+            &el.children,
+            offset,
+        ))
+    }
+
+    fn active_list_type(&self) -> Option<SharedString> {
+        self.editor
+            .run_query::<Option<String>>("list.active_type", None)
+            .ok()
+            .flatten()
+            .map(SharedString::new)
+    }
+
+    fn set_selection_in_active_block(
+        &mut self,
+        anchor: usize,
+        focus: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(block_path) = self.active_text_block_path() else {
             return;
         };
-
-        let count = resize.start_weights.len();
-        if count < 2 || resize.handle + 1 >= count {
-            return;
-        }
-
-        let viewport_width = self.viewport_bounds.size.width;
-        if viewport_width <= px(0.) {
-            return;
-        }
-
-        let gutter = px(12.);
-        let available = viewport_width - gutter * (count.saturating_sub(1) as f32);
-        if available <= px(0.) {
-            return;
-        }
-
-        let total_weight: f32 = resize.start_weights.iter().copied().sum();
-        if total_weight <= 0.0001 {
-            return;
-        }
-
-        let left_ix = resize.handle;
-        let right_ix = resize.handle + 1;
-
-        let left_width = available * (resize.start_weights[left_ix] / total_weight);
-        let right_width = available * (resize.start_weights[right_ix] / total_weight);
-
-        let min_width = px(80.);
-        let mut dx = position_x - resize.start_x;
-
-        let min_dx = min_width - left_width;
-        let max_dx = right_width - min_width;
-        if dx < min_dx {
-            dx = min_dx;
-        } else if dx > max_dx {
-            dx = max_dx;
-        }
-
-        let left_new = left_width + dx;
-        let right_new = right_width - dx;
-        if left_new < px(1.) || right_new < px(1.) {
-            return;
-        }
-
-        let left_weight = (left_new / available) * total_weight;
-        let right_weight = (right_new / available) * total_weight;
-
-        let weights = self
-            .column_widths
-            .entry(resize.group)
-            .or_insert_with(|| resize.start_weights.clone());
-        if weights.len() != count {
-            *weights = resize.start_weights.clone();
-        }
-        weights[left_ix] = left_weight.max(0.001);
-        weights[right_ix] = right_weight.max(0.001);
-
+        let anchor_point = self
+            .point_for_block_offset(&block_path, anchor)
+            .unwrap_or_else(|| {
+                let mut path = block_path.clone();
+                path.push(0);
+                CorePoint::new(path, 0)
+            });
+        let focus_point = self
+            .point_for_block_offset(&block_path, focus)
+            .unwrap_or_else(|| {
+                let mut path = block_path.clone();
+                path.push(0);
+                CorePoint::new(path, 0)
+            });
+        let sel = Selection {
+            anchor: anchor_point,
+            focus: focus_point,
+        };
+        self.editor.set_selection(sel);
+        _ = self.scroll_cursor_into_view();
+        self.ime_marked_range = None;
         cx.notify();
     }
 
-    pub(crate) fn stop_column_resize(&mut self, cx: &mut Context<Self>) {
-        if self.column_resize.take().is_some() {
+    fn ordered_active_range(&self) -> Range<usize> {
+        let sel = self.editor.selection();
+        let Some(active_block) = self.active_text_block_path() else {
+            return 0..0;
+        };
+        let anchor_block = sel.anchor.path.split_last().map(|(_, p)| p);
+        let focus_block = sel.focus.path.split_last().map(|(_, p)| p);
+        if anchor_block != Some(active_block.as_slice())
+            || focus_block != Some(active_block.as_slice())
+        {
+            let focus = self.row_offset_for_point(&sel.focus).unwrap_or(0);
+            return focus..focus;
+        }
+        let mut a = self.row_offset_for_point(&sel.anchor).unwrap_or(0);
+        let mut b = self.row_offset_for_point(&sel.focus).unwrap_or(0);
+        if b < a {
+            std::mem::swap(&mut a, &mut b);
+        }
+        a..b
+    }
+
+    fn text_block_text(&self, block_path: &[usize]) -> Option<SharedString> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+        let mut out = String::new();
+        for child in &el.children {
+            match child {
+                Node::Text(t) => out.push_str(&t.text),
+                Node::Void(v) => out.push_str(&v.inline_text()),
+                Node::Element(_) => {}
+            }
+        }
+        Some(out.into())
+    }
+
+    fn prev_boundary(text: &str, offset: usize) -> usize {
+        if offset == 0 {
+            return 0;
+        }
+        let mut ix = (offset - 1).min(text.len());
+        while ix > 0 && !text.is_char_boundary(ix) {
+            ix -= 1;
+        }
+        ix
+    }
+
+    fn next_boundary(text: &str, offset: usize) -> usize {
+        if offset >= text.len() {
+            return text.len();
+        }
+        let mut ix = (offset + 1).min(text.len());
+        while ix < text.len() && !text.is_char_boundary(ix) {
+            ix += 1;
+        }
+        ix
+    }
+
+    fn inline_void_ranges_in_block(&self, block_path: &[usize]) -> Vec<Range<usize>> {
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return Vec::new();
+        };
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return Vec::new();
+        }
+
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        let mut cursor = 0usize;
+        for child in &el.children {
+            match child {
+                Node::Text(t) => cursor += t.text.len(),
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    if len > 0 {
+                        ranges.push(cursor..cursor + len);
+                        cursor += len;
+                    }
+                }
+                Node::Element(_) => {}
+            }
+        }
+        ranges
+    }
+
+    fn prev_cursor_offset_in_block(
+        &self,
+        block_path: &[usize],
+        text: &str,
+        offset: usize,
+    ) -> usize {
+        if offset == 0 {
+            return 0;
+        }
+
+        let void_ranges = self.inline_void_ranges_in_block(block_path);
+        for range in &void_ranges {
+            if offset > range.start && offset <= range.end {
+                return range.start;
+            }
+        }
+
+        let mut prev = Self::prev_boundary(text, offset);
+        for range in &void_ranges {
+            if prev >= range.start && prev < range.end {
+                prev = range.start;
+                break;
+            }
+        }
+        prev
+    }
+
+    fn next_cursor_offset_in_block(
+        &self,
+        block_path: &[usize],
+        text: &str,
+        offset: usize,
+    ) -> usize {
+        if offset >= text.len() {
+            return text.len();
+        }
+
+        let void_ranges = self.inline_void_ranges_in_block(block_path);
+        for range in &void_ranges {
+            if offset >= range.start && offset < range.end {
+                return range.end;
+            }
+        }
+
+        let mut next = Self::next_boundary(text, offset);
+        for range in &void_ranges {
+            if next > range.start && next <= range.end {
+                next = range.end;
+                break;
+            }
+        }
+        next
+    }
+
+    fn is_word_char(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    fn word_range(text: &str, offset: usize) -> Range<usize> {
+        if text.is_empty() {
+            return 0..0;
+        }
+
+        let offset = offset.min(text.len());
+        let mut start = offset;
+        while start > 0 && !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = offset;
+        while end < text.len() && !text.is_char_boundary(end) {
+            end += 1;
+        }
+
+        let probe_ix = if start == text.len() {
+            Self::prev_boundary(text, start)
+        } else if start == end && start > 0 {
+            Self::prev_boundary(text, start)
+        } else {
+            start
+        };
+        let probe = text.get(probe_ix..).and_then(|s| s.chars().next());
+        let Some(probe) = probe else {
+            return 0..0;
+        };
+
+        if probe.is_whitespace() {
+            let mut a = probe_ix;
+            while a > 0 {
+                let prev = Self::prev_boundary(text, a);
+                let Some(ch) = text.get(prev..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !ch.is_whitespace() {
+                    break;
+                }
+                a = prev;
+            }
+            let mut b = probe_ix + probe.len_utf8();
+            while b < text.len() {
+                let next = Self::next_boundary(text, b);
+                let Some(ch) = text.get(b..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !ch.is_whitespace() {
+                    break;
+                }
+                b = next;
+            }
+            return a..b;
+        }
+
+        if Self::is_word_char(probe) {
+            let mut a = probe_ix;
+            while a > 0 {
+                let prev = Self::prev_boundary(text, a);
+                let Some(ch) = text.get(prev..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                a = prev;
+            }
+            let mut b = probe_ix + probe.len_utf8();
+            while b < text.len() {
+                let next = Self::next_boundary(text, b);
+                let Some(ch) = text.get(b..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
+                if !Self::is_word_char(ch) {
+                    break;
+                }
+                b = next;
+            }
+            return a..b;
+        }
+
+        probe_ix..probe_ix + probe.len_utf8()
+    }
+
+    fn word_or_void_range_in_block(
+        &self,
+        block_path: &[usize],
+        text: &str,
+        offset: usize,
+    ) -> Range<usize> {
+        for range in self.inline_void_ranges_in_block(block_path) {
+            if offset >= range.start && offset < range.end {
+                return range;
+            }
+        }
+        Self::word_range(text, offset)
+    }
+
+    fn clamp_to_char_boundary(s: &str, mut ix: usize) -> usize {
+        ix = ix.min(s.len());
+        while ix > 0 && !s.is_char_boundary(ix) {
+            ix -= 1;
+        }
+        ix
+    }
+
+    fn split_inline_children_at_offset(children: &[Node], offset: usize) -> (Vec<Node>, Vec<Node>) {
+        let mut left: Vec<Node> = Vec::new();
+        let mut right: Vec<Node> = Vec::new();
+
+        let mut cursor = 0usize;
+        let mut splitting = false;
+
+        for child in children {
+            if splitting {
+                right.push(child.clone());
+                continue;
+            }
+
+            match child {
+                Node::Text(text) => {
+                    let len = text.text.len();
+                    if cursor + len <= offset {
+                        left.push(Node::Text(text.clone()));
+                        cursor += len;
+                        continue;
+                    }
+
+                    if cursor >= offset {
+                        splitting = true;
+                        right.push(Node::Text(text.clone()));
+                        continue;
+                    }
+
+                    let local = offset.saturating_sub(cursor).min(len);
+                    let local = Self::clamp_to_char_boundary(&text.text, local);
+
+                    let prefix = text.text.get(..local).unwrap_or("").to_string();
+                    let suffix = text.text.get(local..).unwrap_or("").to_string();
+
+                    if !prefix.is_empty() {
+                        left.push(Node::Text(TextNode {
+                            text: prefix,
+                            marks: text.marks.clone(),
+                        }));
+                    }
+                    if !suffix.is_empty() {
+                        right.push(Node::Text(TextNode {
+                            text: suffix,
+                            marks: text.marks.clone(),
+                        }));
+                    }
+                    splitting = true;
+                }
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    if cursor + len <= offset {
+                        left.push(child.clone());
+                        cursor += len;
+                        continue;
+                    }
+
+                    if cursor >= offset {
+                        splitting = true;
+                        right.push(child.clone());
+                        continue;
+                    }
+
+                    // Offset fell "inside" a void segment. Snap to the nearest boundary so the
+                    // void stays atomic.
+                    let local = offset.saturating_sub(cursor).min(len);
+                    if local <= len / 2 {
+                        splitting = true;
+                        right.push(child.clone());
+                    } else {
+                        left.push(child.clone());
+                        cursor += len;
+                        splitting = true;
+                    }
+                }
+                Node::Element(_) => {
+                    left.push(child.clone());
+                }
+            }
+        }
+
+        (left, right)
+    }
+
+    fn merge_adjacent_text_nodes(nodes: Vec<Node>) -> Vec<Node> {
+        let mut out: Vec<Node> = Vec::new();
+        for node in nodes {
+            match (&mut out.last_mut(), &node) {
+                (Some(Node::Text(prev)), Node::Text(next)) if prev.marks == next.marks => {
+                    prev.text.push_str(&next.text);
+                }
+                _ => out.push(node),
+            }
+        }
+        out
+    }
+
+    fn ensure_has_text_leaf(mut children: Vec<Node>, marks: &Marks) -> Vec<Node> {
+        let has_text = children.iter().any(|n| matches!(n, Node::Text(_)));
+        if !has_text {
+            children.push(Node::Text(TextNode {
+                text: String::new(),
+                marks: marks.clone(),
+            }));
+        }
+        children
+    }
+
+    fn point_for_block_offset_in_children(
+        block_path: &[usize],
+        children: &[Node],
+        offset: usize,
+    ) -> CorePoint {
+        let mut text_nodes: Vec<(usize, usize)> = Vec::new();
+        for (child_ix, child) in children.iter().enumerate() {
+            if let Node::Text(t) = child {
+                text_nodes.push((child_ix, t.text.len()));
+            }
+        }
+        if text_nodes.is_empty() {
+            let mut path = block_path.to_vec();
+            path.push(0);
+            return CorePoint::new(path, 0);
+        }
+
+        let total: usize = children
+            .iter()
+            .map(|node| match node {
+                Node::Text(t) => t.text.len(),
+                Node::Void(v) => v.inline_text_len(),
+                Node::Element(_) => 0,
+            })
+            .sum();
+
+        let mut remaining = offset.min(total);
+        for (child_ix, child) in children.iter().enumerate() {
+            match child {
+                Node::Text(t) => {
+                    let len = t.text.len();
+                    if remaining < len {
+                        let mut path = block_path.to_vec();
+                        path.push(child_ix);
+                        return CorePoint::new(path, remaining);
+                    }
+                    if remaining == len {
+                        if matches!(children.get(child_ix + 1), Some(Node::Text(_))) {
+                            let mut path = block_path.to_vec();
+                            path.push(child_ix + 1);
+                            return CorePoint::new(path, 0);
+                        }
+                        let mut path = block_path.to_vec();
+                        path.push(child_ix);
+                        return CorePoint::new(path, len);
+                    }
+                    remaining = remaining.saturating_sub(len);
+                }
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    if len == 0 {
+                        continue;
+                    }
+                    if remaining < len {
+                        let before = remaining;
+                        let after = len - remaining;
+                        if before <= after {
+                            for (prev_ix, prev) in children.iter().enumerate().take(child_ix).rev()
+                            {
+                                if let Node::Text(t) = prev {
+                                    let mut path = block_path.to_vec();
+                                    path.push(prev_ix);
+                                    return CorePoint::new(path, t.text.len());
+                                }
+                            }
+                        }
+
+                        for (next_ix, next) in children.iter().enumerate().skip(child_ix + 1) {
+                            if matches!(next, Node::Text(_)) {
+                                let mut path = block_path.to_vec();
+                                path.push(next_ix);
+                                return CorePoint::new(path, 0);
+                            }
+                        }
+
+                        let (last_ix, last_len) = text_nodes.last().copied().unwrap();
+                        let mut path = block_path.to_vec();
+                        path.push(last_ix);
+                        return CorePoint::new(path, last_len);
+                    }
+
+                    if remaining == len {
+                        for (next_ix, next) in children.iter().enumerate().skip(child_ix + 1) {
+                            if matches!(next, Node::Text(_)) {
+                                let mut path = block_path.to_vec();
+                                path.push(next_ix);
+                                return CorePoint::new(path, 0);
+                            }
+                        }
+                        let (last_ix, last_len) = text_nodes.last().copied().unwrap();
+                        let mut path = block_path.to_vec();
+                        path.push(last_ix);
+                        return CorePoint::new(path, last_len);
+                    }
+
+                    remaining = remaining.saturating_sub(len);
+                }
+                Node::Element(_) => {}
+            }
+        }
+
+        let (last_ix, last_len) = text_nodes.last().copied().unwrap();
+        let mut path = block_path.to_vec();
+        path.push(last_ix);
+        CorePoint::new(path, last_len)
+    }
+
+    fn tx_replace_range_in_block(
+        &self,
+        block_path: &[usize],
+        range: Range<usize>,
+        inserted: &str,
+        inserted_marks: &Marks,
+        selection_after: Option<(usize, usize)>,
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        if inserted.contains('\n') {
+            return None;
+        }
+
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+
+        let old_children = el.children.clone();
+        let row_len = self.block_text_len_in_block(block_path);
+        let start = range.start.min(row_len);
+        let end = range.end.min(row_len).max(start);
+
+        let (left, rest) = Self::split_inline_children_at_offset(&old_children, start);
+        let (_removed, right) = Self::split_inline_children_at_offset(&rest, end - start);
+
+        let mut new_children = left;
+        if !inserted.is_empty() {
+            new_children.push(Node::Text(TextNode {
+                text: inserted.to_string(),
+                marks: inserted_marks.clone(),
+            }));
+        }
+        new_children.extend(right);
+        new_children = Self::merge_adjacent_text_nodes(new_children);
+        new_children = Self::ensure_has_text_leaf(new_children, inserted_marks);
+
+        let (anchor, focus) = if let Some((a, b)) = selection_after {
+            (
+                Self::point_for_block_offset_in_children(block_path, &new_children, a),
+                Self::point_for_block_offset_in_children(block_path, &new_children, b),
+            )
+        } else {
+            let caret = start + inserted.len();
+            let point = Self::point_for_block_offset_in_children(block_path, &new_children, caret);
+            (point.clone(), point)
+        };
+        let selection_after = Selection { anchor, focus };
+
+        let mut ops = Vec::new();
+        for child_ix in (0..old_children.len()).rev() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in new_children.into_iter().enumerate() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source),
+        )
+    }
+
+    fn tx_replace_range_with_multiline_text_in_block(
+        &self,
+        block_path: &[usize],
+        range: Range<usize>,
+        inserted: &str,
+        inserted_marks: &Marks,
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+
+        let parts: Vec<&str> = inserted.split('\n').collect();
+        if parts.len() <= 1 {
+            return self.tx_replace_range_in_block(
+                block_path,
+                range,
+                inserted,
+                inserted_marks,
+                None,
+                source,
+            );
+        }
+
+        let is_list_item = el.kind == "list_item";
+        let block_attrs = el.attrs.clone();
+
+        let old_children = el.children.clone();
+        let row_len = self.block_text_len_in_block(block_path);
+        let start = range.start.min(row_len);
+        let end = range.end.min(row_len).max(start);
+
+        let (left, rest) = Self::split_inline_children_at_offset(&old_children, start);
+        let (_removed, right) = Self::split_inline_children_at_offset(&rest, end - start);
+
+        let mut first_children = left;
+        if !parts[0].is_empty() {
+            first_children.push(Node::Text(TextNode {
+                text: parts[0].to_string(),
+                marks: inserted_marks.clone(),
+            }));
+        }
+        first_children = Self::merge_adjacent_text_nodes(first_children);
+        first_children = Self::ensure_has_text_leaf(first_children, inserted_marks);
+
+        let last_ix = parts.len() - 1;
+        let mut inserted_blocks: Vec<Node> = Vec::new();
+        let mut last_children: Vec<Node> = Vec::new();
+
+        for (i, part) in parts.iter().enumerate().skip(1) {
+            let mut children: Vec<Node> = Vec::new();
+            if !part.is_empty() {
+                children.push(Node::Text(TextNode {
+                    text: (*part).to_string(),
+                    marks: inserted_marks.clone(),
+                }));
+            }
+            if i == last_ix {
+                children.extend(right.clone());
+                children = Self::merge_adjacent_text_nodes(children);
+                children = Self::ensure_has_text_leaf(children, inserted_marks);
+                last_children = children.clone();
+            } else {
+                children = Self::merge_adjacent_text_nodes(children);
+                children = Self::ensure_has_text_leaf(children, inserted_marks);
+            }
+
+            let node = if is_list_item {
+                Node::Element(ElementNode {
+                    kind: "list_item".to_string(),
+                    attrs: block_attrs.clone(),
+                    children,
+                })
+            } else {
+                Node::Element(ElementNode {
+                    kind: "paragraph".to_string(),
+                    attrs: Default::default(),
+                    children,
+                })
+            };
+            inserted_blocks.push(node);
+        }
+
+        let mut ops = Vec::new();
+        for child_ix in (0..old_children.len()).rev() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in first_children.into_iter().enumerate() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+
+        let (block_ix, parent_path) = block_path.split_last()?;
+        for (i, node) in inserted_blocks.into_iter().enumerate() {
+            let mut path = parent_path.to_vec();
+            path.push(block_ix + i + 1);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+
+        let mut last_block_path = parent_path.to_vec();
+        last_block_path.push(block_ix + last_ix);
+        let caret_offset = parts[last_ix].len();
+        let caret_point = Self::point_for_block_offset_in_children(
+            &last_block_path,
+            &last_children,
+            caret_offset,
+        );
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(Selection::collapsed(caret_point))
+                .source(source),
+        )
+    }
+
+    fn tx_insert_multiline_text_at_block_offset(
+        &self,
+        block_path: &[usize],
+        offset: usize,
+        inserted: &str,
+        inserted_marks: &Marks,
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        self.tx_replace_range_with_multiline_text_in_block(
+            block_path,
+            offset..offset,
+            inserted,
+            inserted_marks,
+            source,
+        )
+    }
+
+    fn delete_selection_transaction(&self) -> Option<gpui_plate_core::Transaction> {
+        let selection = self.editor.selection().clone();
+        if selection.is_collapsed() {
+            return None;
+        }
+
+        let mut start = selection.anchor.clone();
+        let mut end = selection.focus.clone();
+        if start.path == end.path {
+            if end.offset < start.offset {
+                std::mem::swap(&mut start, &mut end);
+            }
+        } else if end.path < start.path {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let start_offset = self.row_offset_for_point(&start)?;
+        let end_offset = self.row_offset_for_point(&end)?;
+
+        let start_block: Vec<usize> = start.path.split_last().map(|(_, p)| p.to_vec())?;
+        let end_block: Vec<usize> = end.path.split_last().map(|(_, p)| p.to_vec())?;
+
+        let marks = self.active_marks();
+
+        if start_block == end_block {
+            return self.tx_replace_range_in_block(
+                &start_block,
+                start_offset..end_offset,
+                "",
+                &marks,
+                None,
+                "selection:delete",
+            );
+        }
+
+        let start_el = element_at_path(self.editor.doc(), &start_block)?;
+        let end_el = element_at_path(self.editor.doc(), &end_block)?;
+        if (start_el.kind != "paragraph" && start_el.kind != "list_item")
+            || (end_el.kind != "paragraph" && end_el.kind != "list_item")
+        {
+            return None;
+        }
+
+        let (start_ix, start_parent) = start_block.split_last()?;
+        let (end_ix, end_parent) = end_block.split_last()?;
+
+        let list_compatible = if start_el.kind == "list_item" {
+            if end_el.kind != "list_item" {
+                false
+            } else {
+                let start_type = start_el.attrs.get("list_type").and_then(|v| v.as_str());
+                let end_type = end_el.attrs.get("list_type").and_then(|v| v.as_str());
+                let start_level = start_el
+                    .attrs
+                    .get("list_level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let end_level = end_el
+                    .attrs
+                    .get("list_level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                start_type == end_type && start_level == end_level
+            }
+        } else {
+            start_el.kind == end_el.kind
+        };
+
+        let same_parent = start_parent == end_parent && *start_ix <= *end_ix;
+        if list_compatible && same_parent {
+            let start_children = start_el.children.clone();
+            let end_children = end_el.children.clone();
+
+            let (start_left, _start_right) =
+                Self::split_inline_children_at_offset(&start_children, start_offset);
+            let (_end_left, end_right) =
+                Self::split_inline_children_at_offset(&end_children, end_offset);
+
+            let mut merged_children = start_left;
+            merged_children.extend(end_right);
+            merged_children = Self::merge_adjacent_text_nodes(merged_children);
+            merged_children = Self::ensure_has_text_leaf(merged_children, &marks);
+
+            let selection_after = Selection::collapsed(Self::point_for_block_offset_in_children(
+                &start_block,
+                &merged_children,
+                start_offset,
+            ));
+
+            let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+            for child_ix in (0..start_children.len()).rev() {
+                let mut path = start_block.clone();
+                path.push(child_ix);
+                ops.push(gpui_plate_core::Op::RemoveNode { path });
+            }
+            for (child_ix, node) in merged_children.into_iter().enumerate() {
+                let mut path = start_block.clone();
+                path.push(child_ix);
+                ops.push(gpui_plate_core::Op::InsertNode { path, node });
+            }
+
+            for ix in (*start_ix + 1..=*end_ix).rev() {
+                let mut path = start_parent.to_vec();
+                path.push(ix);
+                ops.push(gpui_plate_core::Op::RemoveNode { path });
+            }
+
+            return Some(
+                gpui_plate_core::Transaction::new(ops)
+                    .selection_after(selection_after)
+                    .source("selection:delete_multi_block_merge"),
+            );
+        }
+
+        let blocks = text_block_paths(self.editor.doc());
+        let start_pos = blocks.iter().position(|p| p == &start_block)?;
+        let end_pos = blocks.iter().position(|p| p == &end_block)?;
+        let (start_pos, end_pos) = if start_pos <= end_pos {
+            (start_pos, end_pos)
+        } else {
+            (end_pos, start_pos)
+        };
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        let mut selection_after: Option<Selection> = None;
+
+        for (ix, block_path) in blocks.iter().enumerate().take(end_pos + 1).skip(start_pos) {
+            let len = self.block_text_len_in_block(block_path);
+            let range = if ix == start_pos {
+                start_offset..len
+            } else if ix == end_pos {
+                0..end_offset.min(len)
+            } else {
+                0..len
+            };
+            if range.start >= range.end {
+                continue;
+            }
+
+            let Some(tx) = self.tx_replace_range_in_block(
+                block_path,
+                range,
+                "",
+                &marks,
+                None,
+                "selection:delete:block",
+            ) else {
+                continue;
+            };
+
+            if selection_after.is_none() && ix == start_pos {
+                selection_after = tx.selection_after.clone();
+            }
+            ops.extend(tx.ops);
+        }
+
+        let selection_after = selection_after.unwrap_or_else(|| {
+            Selection::collapsed(
+                self.point_for_block_offset(&start_block, start_offset)
+                    .unwrap_or_else(|| CorePoint::new(start.path.clone(), start.offset)),
+            )
+        });
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source("selection:delete_multi_block_clear"),
+        )
+    }
+
+    fn delete_selection_if_any(&mut self, cx: &mut Context<Self>) -> Option<CorePoint> {
+        let tx = self.delete_selection_transaction()?;
+        self.push_tx(tx, cx);
+        Some(self.editor.selection().focus.clone())
+    }
+
+    fn tx_join_block_with_previous_in_block(
+        &self,
+        block_path: &[usize],
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        let (block_ix, parent_path) = block_path.split_last()?;
+        if *block_ix == 0 {
+            return None;
+        }
+
+        let mut prev_path = parent_path.to_vec();
+        prev_path.push(block_ix.saturating_sub(1));
+
+        let doc = self.editor.doc();
+        let prev_el = element_at_path(doc, &prev_path)?;
+        let cur_el = element_at_path(doc, block_path)?;
+
+        if (prev_el.kind != "paragraph" && prev_el.kind != "list_item")
+            || (cur_el.kind != "paragraph" && cur_el.kind != "list_item")
+        {
+            return None;
+        }
+
+        if cur_el.kind == "list_item" {
+            if prev_el.kind != "list_item" {
+                return None;
+            }
+            let cur_type = cur_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let prev_type = prev_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let cur_level = cur_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let prev_level = prev_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if cur_type != prev_type || cur_level != prev_level {
+                return None;
+            }
+        }
+
+        let caret_offset = self.block_text_len_in_block(&prev_path);
+        let marks = self.active_marks();
+
+        let mut merged_children = prev_el.children.clone();
+        merged_children.extend(cur_el.children.clone());
+        merged_children = Self::merge_adjacent_text_nodes(merged_children);
+        merged_children = Self::ensure_has_text_leaf(merged_children, &marks);
+
+        let selection_after = Selection::collapsed(Self::point_for_block_offset_in_children(
+            &prev_path,
+            &merged_children,
+            caret_offset,
+        ));
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        for child_ix in (0..prev_el.children.len()).rev() {
+            let mut path = prev_path.clone();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in merged_children.into_iter().enumerate() {
+            let mut path = prev_path.clone();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+        ops.push(gpui_plate_core::Op::RemoveNode {
+            path: block_path.to_vec(),
+        });
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source),
+        )
+    }
+
+    fn tx_join_block_with_next_in_block(
+        &self,
+        block_path: &[usize],
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        let (block_ix, parent_path) = block_path.split_last()?;
+        let mut next_path = parent_path.to_vec();
+        next_path.push(block_ix + 1);
+
+        let doc = self.editor.doc();
+        let cur_el = element_at_path(doc, block_path)?;
+        let next_el = element_at_path(doc, &next_path)?;
+
+        if (cur_el.kind != "paragraph" && cur_el.kind != "list_item")
+            || (next_el.kind != "paragraph" && next_el.kind != "list_item")
+        {
+            return None;
+        }
+
+        if cur_el.kind == "list_item" {
+            if next_el.kind != "list_item" {
+                return None;
+            }
+            let cur_type = cur_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let next_type = next_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let cur_level = cur_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let next_level = next_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if cur_type != next_type || cur_level != next_level {
+                return None;
+            }
+        }
+
+        let caret_offset = self.block_text_len_in_block(block_path);
+        let marks = self.active_marks();
+
+        let mut merged_children = cur_el.children.clone();
+        merged_children.extend(next_el.children.clone());
+        merged_children = Self::merge_adjacent_text_nodes(merged_children);
+        merged_children = Self::ensure_has_text_leaf(merged_children, &marks);
+
+        let selection_after = Selection::collapsed(Self::point_for_block_offset_in_children(
+            block_path,
+            &merged_children,
+            caret_offset,
+        ));
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        for child_ix in (0..cur_el.children.len()).rev() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in merged_children.into_iter().enumerate() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+        ops.push(gpui_plate_core::Op::RemoveNode { path: next_path });
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source),
+        )
+    }
+
+    fn prev_text_block_path(&self, block_path: &[usize]) -> Option<Vec<usize>> {
+        let ix = self
+            .text_block_order
+            .iter()
+            .position(|p| p.as_slice() == block_path)?;
+        ix.checked_sub(1)
+            .and_then(|prev| self.text_block_order.get(prev).cloned())
+    }
+
+    fn next_text_block_path(&self, block_path: &[usize]) -> Option<Vec<usize>> {
+        let ix = self
+            .text_block_order
+            .iter()
+            .position(|p| p.as_slice() == block_path)?;
+        self.text_block_order.get(ix + 1).cloned()
+    }
+
+    fn offset_for_point_in_block(
+        &self,
+        block_path: &[usize],
+        point: gpui::Point<Pixels>,
+    ) -> Option<usize> {
+        let cache = self.layout_cache.get(block_path)?;
+        let mut local = match cache.text_layout.index_for_position(point) {
+            Ok(ix) | Err(ix) => ix,
+        };
+        local = local.min(cache.text.len());
+        Some(local)
+    }
+
+    fn link_at_offset(&self, block_path: &[usize], offset: usize) -> Option<String> {
+        let cache = self.layout_cache.get(block_path)?;
+
+        let candidates = [offset, offset.saturating_sub(1)];
+        for candidate in candidates {
+            for seg in &cache.segments {
+                if seg.len == 0 {
+                    continue;
+                }
+                if candidate >= seg.start && candidate < seg.start + seg.len {
+                    return seg.marks.link.clone();
+                }
+            }
+        }
+
+        None
+    }
+
+    fn block_text_len_in_block(&self, block_path: &[usize]) -> usize {
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return 0;
+        };
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return 0;
+        }
+
+        el.children
+            .iter()
+            .map(|child| match child {
+                Node::Text(t) => t.text.len(),
+                Node::Void(v) => v.inline_text_len(),
+                Node::Element(_) => 0,
+            })
+            .sum()
+    }
+
+    fn text_block_path_for_point(&self, point: gpui::Point<Pixels>) -> Option<Vec<usize>> {
+        for (path, cache) in &self.layout_cache {
+            if cache.bounds.contains(&point) {
+                return Some(path.clone());
+            }
+        }
+
+        let mut best: Option<(Pixels, Vec<usize>)> = None;
+        for (path, cache) in &self.layout_cache {
+            let dist = if point.y < cache.bounds.top() {
+                cache.bounds.top() - point.y
+            } else if point.y > cache.bounds.bottom() {
+                point.y - cache.bounds.bottom()
+            } else {
+                px(0.)
+            };
+            match &best {
+                None => best = Some((dist, path.clone())),
+                Some((best_dist, _)) if dist < *best_dist => best = Some((dist, path.clone())),
+                _ => {}
+            }
+        }
+        best.map(|(_, path)| path)
+    }
+
+    fn push_tx(&mut self, tx: gpui_plate_core::Transaction, cx: &mut Context<Self>) {
+        if self.editor.apply(tx).is_ok() {
+            _ = self.scroll_cursor_into_view();
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
             cx.notify();
         }
     }
 
-    pub(crate) fn cursor(&self) -> usize {
-        self.ime_marked_range
-            .map(|r| r.end)
-            .unwrap_or(self.selection.end)
-    }
-
-    pub(crate) fn ordered_selection(&self) -> Range<usize> {
-        let mut start = self.selection.start;
-        let mut end = self.selection.end;
-        if end < start {
-            std::mem::swap(&mut start, &mut end);
-        }
-        start..end
-    }
-
-    pub(crate) fn has_selection(&self) -> bool {
-        self.selection.start != self.selection.end
-    }
-
-    pub(crate) fn line_range(&self, row: usize) -> Range<usize> {
-        let start = self.text.line_start_offset(row);
-        let end = self.text.line_end_offset(row);
-        start..end
-    }
-
-    pub(crate) fn word_range(&self, offset: usize) -> Range<usize> {
-        let len = self.text.len();
-        if len == 0 {
-            return 0..0;
-        }
-
-        let mut offset = offset.min(len);
-        if offset == len {
-            offset = len.saturating_sub(1);
-        }
-        offset = self.text.clip_offset(offset, Bias::Left);
-
-        if matches!(self.text.char_at(offset), Some('\n' | '\r')) && offset > 0 {
-            offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
-        }
-
-        let Some(ch) = self.text.char_at(offset) else {
-            return offset..offset;
-        };
-
-        let is_word_char = |c: char| c == '_' || c.is_alphanumeric();
-        let is_whitespace_char = |c: char| c.is_whitespace() && !matches!(c, '\n' | '\r');
-
-        enum Group {
-            Word,
-            Whitespace,
-            Other,
-        }
-
-        let group = if is_word_char(ch) {
-            Group::Word
-        } else if is_whitespace_char(ch) {
-            Group::Whitespace
-        } else {
-            Group::Other
-        };
-
-        let matches_group = |c: char| match group {
-            Group::Word => is_word_char(c),
-            Group::Whitespace => is_whitespace_char(c),
-            Group::Other => !is_word_char(c) && !is_whitespace_char(c) && !matches!(c, '\n' | '\r'),
-        };
-
-        let mut start = offset;
-        while start > 0 {
-            let prev = self.text.clip_offset(start.saturating_sub(1), Bias::Left);
-            if prev == start {
-                break;
-            }
-            let Some(prev_ch) = self.text.char_at(prev) else {
-                break;
-            };
-            if matches_group(prev_ch) {
-                start = prev;
-            } else {
-                break;
-            }
-        }
-
-        let mut end = self.text.clip_offset(offset + 1, Bias::Right);
-        while end < len {
-            let Some(next_ch) = self.text.char_at(end) else {
-                break;
-            };
-            if matches_group(next_ch) {
-                end = self.text.clip_offset(end + 1, Bias::Right);
-            } else {
-                break;
-            }
-        }
-
-        start..end
-    }
-
-    pub(crate) fn set_selection(&mut self, anchor: usize, focus: usize) {
-        self.selection.start = anchor.min(self.text.len());
-        self.selection.end = focus.min(self.text.len());
-    }
-
-    pub(crate) fn set_cursor(&mut self, offset: usize) {
-        let offset = offset.min(self.text.len());
-        self.selection = (offset..offset).into();
-        self.preferred_x = None;
-        self.active_style = self.style_at(offset);
-    }
-
-    fn sync_layout_cache_to_document(&mut self) {
-        let lines = self.document.blocks.len().max(1);
-        if self.layout_cache.len() < lines {
-            self.layout_cache
-                .extend(std::iter::repeat(None).take(lines - self.layout_cache.len()));
-        } else if self.layout_cache.len() > lines {
-            self.layout_cache.truncate(lines);
-        }
-    }
-
-    fn push_undo_snapshot(&mut self) {
-        self.undo_stack.push(Snapshot {
-            document: self.document.clone(),
-            selection: self.selection,
-            active_style: self.active_style.clone(),
-        });
-        self.redo_stack.clear();
-        if self.undo_stack.len() > 200 {
-            self.undo_stack.remove(0);
-        }
-    }
-
-    fn restore_snapshot(&mut self, snapshot: Snapshot) {
-        self.document = snapshot.document;
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.selection = snapshot.selection;
-        self.active_style = snapshot.active_style;
-        self.ime_marked_range = None;
-        self.preferred_x = None;
-        self.sync_layout_cache_to_document();
-    }
-
-    fn replace_bytes_range(
+    fn run_command_and_refresh(
         &mut self,
-        range: Range<usize>,
-        new_text: &str,
-        window: &mut Window,
+        id: &'static str,
+        args: Option<serde_json::Value>,
         cx: &mut Context<Self>,
-        push_undo: bool,
-        mark_ime: bool,
-        new_selected_utf16: Option<Range<usize>>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        if push_undo {
-            self.push_undo_snapshot();
-        }
-
-        let range = self.text.clip_offset(range.start, Bias::Left)
-            ..self.text.clip_offset(range.end, Bias::Right);
-
-        let new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
-
-        let removed_text = self.text.slice(range.clone()).to_string();
-        let removed_newlines = removed_text
-            .as_bytes()
-            .iter()
-            .filter(|b| **b == b'\n')
-            .count();
-        let inserted_newlines = new_text.as_bytes().iter().filter(|b| **b == b'\n').count();
-
-        let start_point = self.text.offset_to_point(range.start);
-        let end_point = self.text.offset_to_point(range.end);
-
-        self.ensure_document_non_empty();
-
-        let start_row = start_point
-            .row
-            .min(self.document.blocks.len().saturating_sub(1));
-        let end_row = end_point
-            .row
-            .min(self.document.blocks.len().saturating_sub(1));
-
-        let start_col = start_point
-            .column
-            .min(self.document.blocks[start_row].text_len());
-        let end_col = end_point
-            .column
-            .min(self.document.blocks[end_row].text_len());
-
-        self.delete_document_range(start_row, start_col, end_row, end_col);
-        let active_style = self.active_style.clone();
-        self.insert_plain_text(start_row, start_col, &new_text, &active_style);
-
-        // Maintain layout cache length relative to newline changes for better scroll-to-caret.
-        for _ in 0..removed_newlines {
-            if start_row + 1 < self.layout_cache.len() {
-                self.layout_cache.remove(start_row + 1);
-            }
-        }
-        for _ in 0..inserted_newlines {
-            self.layout_cache.insert(start_row + 1, None);
-        }
-
-        self.ensure_document_non_empty();
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.sync_layout_cache_to_document();
-
-        let new_cursor = (range.start + new_text.len()).min(self.text.len());
-        if mark_ime {
-            if new_text.is_empty() {
-                self.ime_marked_range = None;
-                self.set_cursor(range.start);
-            } else {
-                self.ime_marked_range = Some((range.start..range.start + new_text.len()).into());
-                if let Some(new_selected_utf16) = new_selected_utf16 {
-                    let new_sel = self.range_from_utf16(&new_selected_utf16);
-                    self.set_selection(range.start + new_sel.start, range.start + new_sel.end);
-                } else {
-                    self.set_cursor(range.start + new_text.len());
-                }
-            }
+    ) -> bool {
+        if self.editor.run_command(id, args).is_ok() {
+            _ = self.scroll_cursor_into_view();
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
+            cx.notify();
+            true
         } else {
-            self.ime_marked_range = None;
-            self.set_cursor(new_cursor);
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    fn ensure_document_non_empty(&mut self) {
-        if self.document.blocks.is_empty() {
-            self.document = RichTextDocument::default();
-        }
-        if self.layout_cache.is_empty() {
-            self.layout_cache.push(None);
+            false
         }
     }
 
-    fn style_at(&self, mut offset: usize) -> InlineStyle {
-        let total_len = self.text.len();
-        if total_len == 0 {
-            return InlineStyle::default();
-        }
-        if offset >= total_len {
-            offset = total_len.saturating_sub(1);
-        }
-
-        let cursor_point = self.text.offset_to_point(offset);
-        let row = cursor_point
-            .row
-            .min(self.document.blocks.len().saturating_sub(1));
-        let col = cursor_point.column;
-
-        let Some(block) = self.document.blocks.get(row) else {
-            return InlineStyle::default();
+    fn scroll_cursor_into_view(&mut self) -> bool {
+        let Some(block_path) = self.active_text_block_path() else {
+            return false;
         };
-
-        let block_len = block.text_len();
-        if block_len == 0 {
-            return block
-                .inlines
-                .iter()
-                .find_map(|node| match node {
-                    InlineNode::Text(text) => Some(text.style.clone()),
-                })
-                .unwrap_or_default();
-        }
-
-        let col = col.min(block_len);
-        if col >= block_len {
-            return block.last_style().cloned().unwrap_or_default();
-        }
-
-        let mut cursor = 0usize;
-        for node in &block.inlines {
-            match node {
-                InlineNode::Text(text) => {
-                    let end = cursor + text.text.len();
-                    if col < end {
-                        return text.style.clone();
-                    }
-                    cursor = end;
-                }
-            }
-        }
-
-        block.last_style().cloned().unwrap_or_default()
-    }
-
-    fn split_off_inlines_at(block: &mut BlockNode, offset: usize) -> Vec<InlineNode> {
-        let offset = offset.min(block.text_len());
-        let mut cursor = 0usize;
-
-        for ix in 0..block.inlines.len() {
-            let InlineNode::Text(text) = &block.inlines[ix];
-            let len = text.text.len();
-
-            if offset == cursor {
-                return block.inlines.split_off(ix);
-            }
-
-            if offset < cursor + len {
-                let rel = offset - cursor;
-                let mut tail = block.inlines.split_off(ix);
-                let mut head_text = match tail.remove(0) {
-                    InlineNode::Text(text) => text,
-                };
-
-                let right_text = head_text.text.split_off(rel);
-                let right_style = head_text.style.clone();
-                block.inlines.push(InlineNode::Text(head_text));
-
-                let mut suffix = vec![InlineNode::Text(TextNode {
-                    text: right_text,
-                    style: right_style,
-                })];
-                suffix.append(&mut tail);
-                return suffix;
-            }
-
-            cursor += len;
-        }
-
-        Vec::new()
-    }
-
-    fn delete_in_block(&mut self, row: usize, range: Range<usize>) {
-        let Some(block) = self.document.blocks.get_mut(row) else {
-            return;
+        let Some(cache) = self.layout_cache.get(block_path.as_slice()) else {
+            return false;
         };
-
-        let mut start = range.start;
-        let mut end = range.end;
-        if end < start {
-            std::mem::swap(&mut start, &mut end);
-        }
-
-        let block_len = block.text_len();
-        start = start.min(block_len);
-        end = end.min(block_len);
-        if start >= end {
-            return;
-        }
-
-        let tail = Self::split_off_inlines_at(block, end);
-        let _ = Self::split_off_inlines_at(block, start);
-        block.inlines.extend(tail);
-        block.normalize();
-    }
-
-    fn delete_document_range(
-        &mut self,
-        start_row: usize,
-        start_col: usize,
-        end_row: usize,
-        end_col: usize,
-    ) {
-        if self.document.blocks.is_empty() {
-            return;
-        }
-
-        if start_row == end_row {
-            self.delete_in_block(start_row, start_col..end_col);
-            return;
-        }
-
-        let start_len = self
-            .document
-            .blocks
-            .get(start_row)
-            .map(|b| b.text_len())
-            .unwrap_or(0);
-        self.delete_in_block(start_row, start_col..start_len);
-        self.delete_in_block(end_row, 0..end_col);
-
-        for _ in (start_row + 1)..end_row {
-            if start_row + 1 < self.document.blocks.len() {
-                self.document.blocks.remove(start_row + 1);
-            }
-        }
-
-        if start_row + 1 < self.document.blocks.len() {
-            let end_block = self.document.blocks.remove(start_row + 1);
-            if let Some(start_block) = self.document.blocks.get_mut(start_row) {
-                start_block.inlines.extend(end_block.inlines);
-                start_block.normalize();
-            }
-        }
-    }
-
-    fn insert_text_in_block(&mut self, row: usize, col: usize, text: &str, style: &InlineStyle) {
-        if text.is_empty() {
-            return;
-        }
-        let Some(block) = self.document.blocks.get_mut(row) else {
-            return;
-        };
-
-        let col = col.min(block.text_len());
-        let tail = Self::split_off_inlines_at(block, col);
-        block.inlines.push(InlineNode::Text(TextNode {
-            text: text.to_string(),
-            style: style.clone(),
-        }));
-        block.inlines.extend(tail);
-        block.normalize();
-    }
-
-    fn insert_plain_text(&mut self, row: usize, col: usize, text: &str, style: &InlineStyle) {
-        if text.is_empty() {
-            return;
-        }
-
-        if !text.contains('\n') {
-            self.insert_text_in_block(row, col, text, style);
-            return;
-        }
-
-        let successor_format = self
-            .document
-            .blocks
-            .get(row)
-            .map(|b| b.format.split_successor())
-            .unwrap_or_default();
-
-        let suffix = {
-            let Some(block) = self.document.blocks.get_mut(row) else {
-                return;
-            };
-            Self::split_off_inlines_at(block, col)
-        };
-
-        let mut parts = text.split('\n');
-        let first = parts.next().unwrap_or_default();
-        self.insert_text_in_block(row, col, first, style);
-
-        let mut insert_at = row + 1;
-        for part in parts {
-            let mut block = BlockNode {
-                format: successor_format,
-                inlines: vec![InlineNode::Text(TextNode {
-                    text: part.to_string(),
-                    style: style.clone(),
-                })],
-            };
-            block.normalize();
-            self.document.blocks.insert(insert_at, block);
-            insert_at += 1;
-        }
-
-        let last_row = insert_at.saturating_sub(1);
-        if let Some(last) = self.document.blocks.get_mut(last_row) {
-            last.inlines.extend(suffix);
-            last.normalize();
-        }
-    }
-
-    fn for_each_block_range_in_selection(
-        &self,
-        range: Range<usize>,
-        mut f: impl FnMut(usize, Range<usize>),
-    ) {
-        if range.is_empty() || self.document.blocks.is_empty() {
-            return;
-        }
-
-        let start_point = self.text.offset_to_point(range.start);
-        let end_point = self.text.offset_to_point(range.end);
-
-        let start_row = start_point
-            .row
-            .min(self.document.blocks.len().saturating_sub(1));
-        let end_row = end_point
-            .row
-            .min(self.document.blocks.len().saturating_sub(1));
-
-        for row in start_row..=end_row {
-            let block_len = self.document.blocks[row].text_len();
-            let local_start = if row == start_row {
-                start_point.column.min(block_len)
-            } else {
-                0
-            };
-            let local_end = if row == end_row {
-                end_point.column.min(block_len)
-            } else {
-                block_len
-            };
-
-            if local_start < local_end {
-                f(row, local_start..local_end);
-            }
-        }
-    }
-
-    fn update_inline_styles_in_block_range(
-        &mut self,
-        row: usize,
-        range: Range<usize>,
-        mut update: impl FnMut(&mut InlineStyle),
-    ) {
-        let Some(block) = self.document.blocks.get_mut(row) else {
-            return;
-        };
-
-        let mut start = range.start;
-        let mut end = range.end;
-        if end < start {
-            std::mem::swap(&mut start, &mut end);
-        }
-
-        let block_len = block.text_len();
-        start = start.min(block_len);
-        end = end.min(block_len);
-        if start >= end {
-            return;
-        }
-
-        let tail = Self::split_off_inlines_at(block, end);
-        let mut mid = Self::split_off_inlines_at(block, start);
-
-        for node in &mut mid {
-            match node {
-                InlineNode::Text(text) => update(&mut text.style),
-            }
-        }
-
-        block.inlines.extend(mid);
-        block.inlines.extend(tail);
-        block.normalize();
-    }
-
-    pub(crate) fn scroll_cursor_into_view(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor();
-        let caret_bounds = self.caret_bounds_for_offset(cursor);
-        let Some(caret_bounds) = caret_bounds else {
-            return;
-        };
-
-        let mut offset = self.scroll_handle.offset();
         let viewport = self.viewport_bounds;
+        if viewport.size.width == px(0.) && viewport.size.height == px(0.) {
+            return false;
+        }
+
+        let caret_ix = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(cache.text_layout.len());
+        let Some(pos) = cache.text_layout.position_for_index(caret_ix).or_else(|| {
+            cache
+                .text_layout
+                .position_for_index(cache.text_layout.len())
+        }) else {
+            return false;
+        };
+
+        let line_height = cache.text_layout.line_height();
+        let caret_bounds = Bounds::from_corners(pos, point(pos.x + px(1.5), pos.y + line_height));
+
+        let prev_offset = self.scroll_handle.offset();
+        let mut offset = prev_offset;
 
         let margin = px(12.);
         if caret_bounds.top() < viewport.top() + margin {
@@ -1010,1656 +1492,715 @@ impl RichTextState {
             offset.y -= caret_bounds.bottom() - (viewport.bottom() - margin);
         }
 
-        if caret_bounds.left() < viewport.left() + margin {
-            offset.x += (viewport.left() + margin) - caret_bounds.left();
-        } else if caret_bounds.right() > viewport.right() - margin {
-            offset.x -= caret_bounds.right() - (viewport.right() - margin);
+        if offset == prev_offset {
+            return false;
         }
-
         self.scroll_handle.set_offset(offset);
-        cx.notify();
+        true
     }
 
-    fn align_offset_x_for_wrap_line(
-        cache: &LineLayoutCache,
-        wrap_line_ix: usize,
-        align: BlockAlign,
-    ) -> Pixels {
-        let align_width = cache.bounds.size.width;
-        if align_width <= px(0.) {
-            return px(0.);
-        }
-
-        let Some(layout) = cache.text_layout.line_layout_for_index(0) else {
-            return px(0.);
-        };
-
-        let segments = layout.wrap_boundaries().len().saturating_add(1);
-        if segments == 0 {
-            return px(0.);
-        }
-        let wrap_line_ix = wrap_line_ix.min(segments - 1);
-
-        let end_ix = if wrap_line_ix < layout.wrap_boundaries().len() {
-            let boundary = layout.wrap_boundaries()[wrap_line_ix];
-            layout.runs()[boundary.run_ix]
-                .glyphs
-                .get(boundary.glyph_ix)
-                .map(|g| g.index)
-                .unwrap_or(layout.len())
-        } else {
-            layout.len()
-        };
-
-        let line_height = cache.text_layout.line_height();
-        let line_width = layout
-            .position_for_index(end_ix, line_height)
-            .map(|p| p.x)
-            .unwrap_or(px(0.));
-
-        match align {
-            BlockAlign::Left => px(0.),
-            BlockAlign::Center => (align_width - line_width) / 2.0,
-            BlockAlign::Right => align_width - line_width,
-        }
-    }
-
-    pub(crate) fn aligned_position_for_row_col(
-        &self,
-        row: usize,
-        col: usize,
-    ) -> Option<Point<Pixels>> {
-        let cache = self.layout_cache.get(row)?.as_ref()?;
-        let align = self
-            .document
-            .blocks
-            .get(row)
-            .map(|b| b.format.align)
-            .unwrap_or(BlockAlign::Left);
-
-        let col = col.min(cache.line_len);
-        let base = cache
-            .text_layout
-            .position_for_index(col)
-            .or_else(|| cache.text_layout.position_for_index(cache.line_len))?;
-
-        if align == BlockAlign::Left {
-            return Some(base);
-        }
-
-        let line_height = cache.text_layout.line_height();
-        let wrap_line_ix =
-            ((base.y - cache.bounds.origin.y).max(px(0.0)) / line_height).floor() as usize;
-        let dx = Self::align_offset_x_for_wrap_line(cache, wrap_line_ix, align);
-        Some(point(base.x + dx, base.y))
-    }
-
-    pub(crate) fn aligned_index_for_row_point(&self, row: usize, position: Point<Pixels>) -> usize {
-        let Some(cache) = self.layout_cache.get(row).and_then(|c| c.as_ref()) else {
-            return 0;
-        };
-
-        let align = self
-            .document
-            .blocks
-            .get(row)
-            .map(|b| b.format.align)
-            .unwrap_or(BlockAlign::Left);
-
-        let adjusted_point = if align == BlockAlign::Left {
-            position
-        } else {
-            let line_height = cache.text_layout.line_height();
-            let wrap_line_ix =
-                ((position.y - cache.bounds.origin.y).max(px(0.0)) / line_height).floor() as usize;
-            let dx = Self::align_offset_x_for_wrap_line(cache, wrap_line_ix, align);
-            point(position.x - dx, position.y)
-        };
-
-        let mut local_index = match cache.text_layout.index_for_position(adjusted_point) {
-            Ok(ix) | Err(ix) => ix,
-        };
-        local_index = local_index.min(cache.line_len);
-        local_index
-    }
-
-    fn caret_bounds_for_offset(&self, offset: usize) -> Option<Bounds<Pixels>> {
-        let cursor_point = self.text.offset_to_point(offset);
-        let row = cursor_point.row;
-        let col = cursor_point.column;
-
-        let cache = self.layout_cache.get(row)?.as_ref()?;
-        let pos = self.aligned_position_for_row_col(row, col)?;
-        let line_height = cache.text_layout.line_height();
-
-        Some(Bounds::from_corners(
-            pos,
-            point(pos.x + px(1.5), pos.y + line_height),
-        ))
-    }
-
-    fn is_attr_enabled(&self, range: Range<usize>, get: impl Fn(&InlineStyle) -> bool) -> bool {
-        if range.is_empty() {
-            return get(&self.active_style);
-        }
-
-        let mut enabled = true;
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            if !enabled {
-                return;
-            }
-            let mut cursor = 0usize;
-            for node in &self.document.blocks[row].inlines {
-                match node {
-                    InlineNode::Text(text) => {
-                        let end = cursor + text.text.len();
-                        let overlap_start = local_range.start.max(cursor);
-                        let overlap_end = local_range.end.min(end);
-                        if overlap_start < overlap_end && !get(&text.style) {
-                            enabled = false;
-                            return;
-                        }
-                        cursor = end;
-                    }
-                }
-            }
-        });
-
-        enabled
-    }
-
-    fn active_color_in_range(
-        &self,
-        range: Range<usize>,
-        get: impl Fn(&InlineStyle) -> Option<gpui::Hsla>,
-    ) -> Option<gpui::Hsla> {
-        if range.is_empty() {
-            return get(&self.active_style);
-        }
-
-        let mut value: Option<Option<gpui::Hsla>> = None;
-        let mut mixed = false;
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            if mixed {
-                return;
-            }
-
-            let mut cursor = 0usize;
-            for node in &self.document.blocks[row].inlines {
-                match node {
-                    InlineNode::Text(text) => {
-                        let end = cursor + text.text.len();
-                        let overlap_start = local_range.start.max(cursor);
-                        let overlap_end = local_range.end.min(end);
-                        if overlap_start < overlap_end {
-                            let next = get(&text.style);
-                            match value {
-                                None => value = Some(next),
-                                Some(prev) if prev == next => {}
-                                Some(_) => {
-                                    mixed = true;
-                                    return;
-                                }
-                            }
-                        }
-                        cursor = end;
-                    }
-                }
-            }
-        });
-
-        if mixed { None } else { value.flatten() }
-    }
-
-    fn toggle_attr(
+    pub(super) fn backspace(
         &mut self,
-        window: &mut Window,
+        _: &Backspace,
+        _window: &mut Window,
         cx: &mut Context<Self>,
-        get: impl Fn(&InlineStyle) -> bool + std::marker::Copy,
-        set: impl Fn(&mut InlineStyle, bool) + std::marker::Copy,
     ) {
-        if self.read_only {
-            return;
-        }
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            let enabled = get(&self.active_style);
-            set(&mut self.active_style, !enabled);
-            cx.notify();
+        if self.delete_selection_if_any(cx).is_some() {
             return;
         }
 
-        self.push_undo_snapshot();
-        let enabled = self.is_attr_enabled(range.clone(), get);
-        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            block_ranges.push((row, local_range));
-        });
-        for (row, local_range) in block_ranges {
-            self.update_inline_styles_in_block_range(row, local_range, |style| {
-                set(style, !enabled);
-            });
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn bold_mark_active(&self) -> bool {
-        self.is_attr_enabled(self.ordered_selection(), |s| s.bold)
-    }
-
-    pub fn italic_mark_active(&self) -> bool {
-        self.is_attr_enabled(self.ordered_selection(), |s| s.italic)
-    }
-
-    pub fn underline_mark_active(&self) -> bool {
-        self.is_attr_enabled(self.ordered_selection(), |s| s.underline)
-    }
-
-    pub fn strikethrough_mark_active(&self) -> bool {
-        self.is_attr_enabled(self.ordered_selection(), |s| s.strikethrough)
-    }
-
-    pub fn code_mark_active(&self) -> bool {
-        self.is_attr_enabled(self.ordered_selection(), |s| s.code)
-    }
-
-    pub fn active_text_color(&self) -> Option<gpui::Hsla> {
-        self.active_color_in_range(self.ordered_selection(), |s| s.fg)
-    }
-
-    pub fn active_highlight_color(&self) -> Option<gpui::Hsla> {
-        self.active_color_in_range(self.ordered_selection(), |s| s.bg)
-    }
-
-    pub fn toggle_bold_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_attr(window, cx, |s| s.bold, |s, v| s.bold = v);
-    }
-
-    pub fn toggle_italic_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_attr(window, cx, |s| s.italic, |s, v| s.italic = v);
-    }
-
-    pub fn toggle_underline_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_attr(window, cx, |s| s.underline, |s, v| s.underline = v);
-    }
-
-    pub fn toggle_strikethrough_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_attr(window, cx, |s| s.strikethrough, |s, v| s.strikethrough = v);
-    }
-
-    pub fn toggle_code_mark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.toggle_attr(window, cx, |s| s.code, |s, v| s.code = v);
-    }
-
-    pub fn set_block_kind(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.kind = kind;
-            }
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn indent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        const MAX_INDENT: u8 = 8;
-
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.indent = block.format.indent.saturating_add(1).min(MAX_INDENT);
-            }
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn outdent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.indent = block.format.indent.saturating_sub(1);
-            }
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn set_columns(&mut self, count: u8, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-
-        let count = count.clamp(2, 4);
-        let Some(_) = self.document.blocks.first() else {
+        let Some(block_path) = self.active_text_block_path() else {
             return;
         };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(text.len());
+        let start = self.prev_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        if start == cursor {
+            if cursor == 0 {
+                if let Some((block_ix, parent_path)) = block_path.split_last()
+                    && *block_ix > 0
+                {
+                    let mut prev_path = parent_path.to_vec();
+                    prev_path.push(block_ix.saturating_sub(1));
 
-        let group = self.next_columns_group_id;
-        self.next_columns_group_id = self.next_columns_group_id.saturating_add(1);
+                    if matches!(
+                        node_at_path(self.editor.doc(), &prev_path),
+                        Some(Node::Void(v)) if v.kind == "divider"
+                    ) {
+                        self.push_tx(
+                            gpui_plate_core::Transaction::new(vec![
+                                gpui_plate_core::Op::RemoveNode { path: prev_path },
+                            ])
+                            .source("key:backspace:remove_divider"),
+                            cx,
+                        );
+                        return;
+                    }
 
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        let mut present = vec![false; count as usize];
+                    if let Some(tx) =
+                        self.tx_join_block_with_previous_in_block(&block_path, "key:backspace:join")
+                    {
+                        self.push_tx(tx, cx);
+                        return;
+                    }
+                }
 
-        for (ix, row) in (start_row..=end_row).enumerate() {
-            let Some(block) = self.document.blocks.get_mut(row) else {
-                continue;
-            };
-
-            let column = (ix % count as usize) as u8;
-            block.format.columns = Some(crate::document::BlockColumns {
-                group,
-                count,
-                column,
-            });
-            present[column as usize] = true;
-        }
-
-        // Ensure each column has at least one block by inserting empty paragraphs.
-        let base_format = self
-            .document
-            .blocks
-            .get(start_row)
-            .map(|b| b.format)
-            .unwrap_or_default();
-
-        let mut insert_at = (end_row + 1).min(self.document.blocks.len());
-        for column in 0..count {
-            if present.get(column as usize).copied().unwrap_or(false) {
-                continue;
+                if self.active_list_type().is_some() {
+                    _ = self.run_command_and_refresh("list.unwrap", None, cx);
+                }
             }
-
-            let mut format = base_format;
-            format.kind = BlockKind::Paragraph;
-            format.columns = Some(crate::document::BlockColumns {
-                group,
-                count,
-                column,
-            });
-
-            self.document
-                .blocks
-                .insert(insert_at, BlockNode::from_text(format, ""));
-            insert_at += 1;
-        }
-
-        // Rebuild the rope if we inserted blocks.
-        if insert_at != (end_row + 1).min(self.document.blocks.len()) {
-            self.text = Rope::from(self.document.to_plain_text().as_str());
-            self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn active_block_kind(&self) -> Option<BlockKind> {
-        let (start_row, end_row) = self.selected_rows();
-        let first = self.document.blocks.get(start_row)?;
-        let normalize = |kind: BlockKind| match kind {
-            BlockKind::Todo { .. } => BlockKind::Todo { checked: false },
-            BlockKind::Toggle { .. } => BlockKind::Toggle { collapsed: false },
-            kind => kind,
-        };
-        let kind = normalize(first.format.kind);
-
-        for row in start_row..=end_row {
-            let Some(block) = self.document.blocks.get(row) else {
-                continue;
-            };
-            if normalize(block.format.kind) != kind {
-                return None;
-            }
-        }
-
-        Some(kind)
-    }
-
-    pub fn active_columns_count(&self) -> Option<u8> {
-        let (start_row, end_row) = self.selected_rows();
-        let first = self.document.blocks.get(start_row)?.format.columns?;
-        for row in start_row..=end_row {
-            let cols = self.document.blocks.get(row)?.format.columns?;
-            if cols.group != first.group || cols.count != first.count {
-                return None;
-            }
-        }
-        Some(first.count)
-    }
-
-    pub fn toggle_list(&mut self, kind: BlockKind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
             return;
         }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        let all_match = (start_row..=end_row).all(|row| {
-            self.document
-                .blocks
-                .get(row)
-                .is_some_and(|b| b.format.kind == kind)
-        });
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.kind = if all_match {
-                    BlockKind::Paragraph
-                } else {
-                    kind
-                };
-            }
+        let marks = self.active_marks();
+        if let Some(tx) = self.tx_replace_range_in_block(
+            &block_path,
+            start..cursor,
+            "",
+            &marks,
+            None,
+            "key:backspace",
+        ) {
+            self.push_tx(tx, cx);
         }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
     }
 
-    pub fn active_ordered_list_style(&self) -> Option<OrderedListStyle> {
-        let (start_row, end_row) = self.selected_rows();
-        let first = self.document.blocks.get(start_row)?;
-        if first.format.kind != BlockKind::OrderedListItem {
-            return None;
+    pub(super) fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_selection_if_any(cx).is_some() {
+            return;
         }
 
-        let style = first.format.ordered_list_style;
-        for row in start_row..=end_row {
-            let Some(block) = self.document.blocks.get(row) else {
-                continue;
-            };
-            if block.format.kind != BlockKind::OrderedListItem
-                || block.format.ordered_list_style != style
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(text.len());
+        let end = self.next_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        if end == cursor {
+            if cursor == text.len()
+                && let Some((block_ix, parent_path)) = block_path.split_last()
             {
-                return None;
-            }
-        }
+                let mut next_path = parent_path.to_vec();
+                next_path.push(block_ix + 1);
 
-        Some(style)
-    }
+                if matches!(
+                    node_at_path(self.editor.doc(), &next_path),
+                    Some(Node::Void(v)) if v.kind == "divider"
+                ) {
+                    self.push_tx(
+                        gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode {
+                            path: next_path,
+                        }])
+                        .source("key:delete:remove_divider"),
+                        cx,
+                    );
+                    return;
+                }
 
-    pub fn set_ordered_list_style(
-        &mut self,
-        style: OrderedListStyle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.kind = BlockKind::OrderedListItem;
-                block.format.ordered_list_style = style;
-            }
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn toggle_ordered_list_any(
-        &mut self,
-        style: OrderedListStyle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-
-        let all_ordered = (start_row..=end_row).all(|row| {
-            self.document
-                .blocks
-                .get(row)
-                .is_some_and(|b| b.format.kind == BlockKind::OrderedListItem)
-        });
-
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                if all_ordered {
-                    block.format.kind = BlockKind::Paragraph;
-                } else {
-                    block.format.kind = BlockKind::OrderedListItem;
-                    block.format.ordered_list_style = style;
+                if let Some(tx) =
+                    self.tx_join_block_with_next_in_block(&block_path, "key:delete:join")
+                {
+                    self.push_tx(tx, cx);
                 }
             }
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn toggle_ordered_list(
-        &mut self,
-        style: OrderedListStyle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
             return;
         }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-
-        let all_match = (start_row..=end_row).all(|row| {
-            self.document.blocks.get(row).is_some_and(|b| {
-                b.format.kind == BlockKind::OrderedListItem && b.format.ordered_list_style == style
-            })
-        });
-
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                if all_match {
-                    block.format.kind = BlockKind::Paragraph;
-                } else {
-                    block.format.kind = BlockKind::OrderedListItem;
-                    block.format.ordered_list_style = style;
-                }
-            }
+        let marks = self.active_marks();
+        if let Some(tx) =
+            self.tx_replace_range_in_block(&block_path, cursor..end, "", &marks, None, "key:delete")
+        {
+            self.push_tx(tx, cx);
         }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
     }
 
-    pub fn toggle_todo_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        let all_todo = (start_row..=end_row).all(|row| {
-            self.document
-                .blocks
-                .get(row)
-                .is_some_and(|b| matches!(b.format.kind, BlockKind::Todo { .. }))
-        });
+    pub(super) fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
 
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.kind = if all_todo {
-                    BlockKind::Paragraph
-                } else {
-                    BlockKind::Todo { checked: false }
-                };
-            }
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub(crate) fn toggle_todo_checked(
-        &mut self,
-        row: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        let checked = match self.document.blocks.get(row).map(|b| b.format.kind) {
-            Some(BlockKind::Todo { checked }) => checked,
-            _ => return,
-        };
-
-        self.push_undo_snapshot();
-
-        let Some(block) = self.document.blocks.get_mut(row) else {
+        let Some(block_path) = self.active_text_block_path() else {
             return;
         };
-        block.format.kind = BlockKind::Todo { checked: !checked };
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub(crate) fn toggle_toggle_collapsed(
-        &mut self,
-        row: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let collapsed = match self.document.blocks.get(row).map(|b| b.format.kind) {
-            Some(BlockKind::Toggle { collapsed }) => collapsed,
-            _ => return,
-        };
-
-        self.push_undo_snapshot();
-        let Some(block) = self.document.blocks.get_mut(row) else {
+        let Some(el) = element_at_path(self.editor.doc(), &block_path) else {
             return;
         };
+        let block_kind = el.kind.as_str();
 
-        block.format.kind = BlockKind::Toggle {
-            collapsed: !collapsed,
-        };
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
+        let text_len = self.block_text_len_in_block(&block_path);
+        let cursor = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(text_len);
 
-    pub fn insert_divider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-
-        let cursor = self.cursor();
-        let pos = self.text.offset_to_point(cursor);
-        let mut row = pos.row.min(self.document.blocks.len().saturating_sub(1));
-        if self.document.blocks.is_empty() {
-            self.document = RichTextDocument::default();
-            row = 0;
-        }
-
-        let replace_current =
-            self.document.blocks.get(row).is_some_and(|b| {
-                b.is_text_empty() && matches!(b.format.kind, BlockKind::Paragraph)
-            });
-
-        if replace_current {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.kind = BlockKind::Divider;
-            }
-        } else {
-            row = row.saturating_add(1);
-            self.document.blocks.insert(row, BlockNode::default());
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.kind = BlockKind::Divider;
-            }
-        }
-
-        // Ensure a paragraph after the divider and place the cursor there.
-        let insert_row = (row + 1).min(self.document.blocks.len());
-        self.document
-            .blocks
-            .insert(insert_row, BlockNode::default());
-
-        self.text = Rope::from(self.document.to_plain_text().as_str());
-        self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-        self.selection = Selection::default();
-        self.ime_marked_range = None;
-        self.active_style = InlineStyle::default();
-        self.preferred_x = None;
-
-        let offset = self.text.line_start_offset(insert_row);
-        self.set_cursor(offset);
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn set_block_size(
-        &mut self,
-        size: BlockTextSize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.size = size;
-            }
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn set_block_align(
-        &mut self,
-        align: BlockAlign,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        self.push_undo_snapshot();
-        let (start_row, end_row) = self.selected_rows();
-        for row in start_row..=end_row {
-            if let Some(block) = self.document.blocks.get_mut(row) {
-                block.format.align = align;
-            }
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn active_block_align(&self) -> BlockAlign {
-        let (start_row, end_row) = self.selected_rows();
-        let Some(first) = self.document.blocks.get(start_row) else {
-            return BlockAlign::default();
-        };
-
-        let mut align = first.format.align;
-        for row in start_row..=end_row {
-            let Some(block) = self.document.blocks.get(row) else {
-                continue;
-            };
-            if block.format.align != align {
-                align = BlockAlign::default();
-                break;
-            }
-        }
-
-        align
-    }
-
-    pub fn set_text_color(
-        &mut self,
-        color: Option<gpui::Hsla>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            self.active_style.fg = color;
-            cx.notify();
+        if block_kind == "list_item" && text_len == 0 && cursor == 0 {
+            _ = self.run_command_and_refresh("list.unwrap", None, cx);
             return;
         }
 
-        self.push_undo_snapshot();
-        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            block_ranges.push((row, local_range));
-        });
-        for (row, local_range) in block_ranges {
-            self.update_inline_styles_in_block_range(row, local_range, |style| {
-                style.fg = color;
-            });
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn set_highlight_color(
-        &mut self,
-        color: Option<gpui::Hsla>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            self.active_style.bg = color;
-            cx.notify();
-            return;
-        }
-
-        self.push_undo_snapshot();
-        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            block_ranges.push((row, local_range));
-        });
-        for (row, local_range) in block_ranges {
-            self.update_inline_styles_in_block_range(row, local_range, |style| {
-                style.bg = color;
-            });
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn set_link(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let url = url.and_then(|s| {
-            let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            self.active_style.link = url;
-            cx.notify();
-            return;
-        }
-
-        self.push_undo_snapshot();
-        let mut block_ranges: Vec<(usize, Range<usize>)> = Vec::new();
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            block_ranges.push((row, local_range));
-        });
-        for (row, local_range) in block_ranges {
-            let url = url.clone();
-            self.update_inline_styles_in_block_range(row, local_range, |style| {
-                style.link = url.clone();
-            });
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub fn current_link_url(&self) -> Option<String> {
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            return self.link_at_offset(self.cursor());
-        }
-
-        let mut found: Option<Option<String>> = None;
-        self.for_each_block_range_in_selection(range, |row, local_range| {
-            let Some(block) = self.document.blocks.get(row) else {
-                return;
-            };
-            let mut cursor = 0usize;
-            for node in &block.inlines {
-                let InlineNode::Text(text) = node;
-                let end = cursor + text.text.len();
-                let overlap_start = local_range.start.max(cursor);
-                let overlap_end = local_range.end.min(end);
-                if overlap_start < overlap_end {
-                    let link = text.style.link.clone();
-                    match &mut found {
-                        None => found = Some(link),
-                        Some(existing) => {
-                            if *existing != link {
-                                found = Some(None);
-                            }
-                        }
-                    }
-                }
-                cursor = end;
-            }
-        });
-
-        found.flatten()
-    }
-
-    pub fn set_link_at_cursor_or_selection(
-        &mut self,
-        url: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.read_only {
-            return;
-        }
-        let url = url.and_then(|s| {
-            let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-
-        let range = self.ordered_selection();
-        if !range.is_empty() {
-            self.set_link(url, window, cx);
-            return;
-        }
-
-        let cursor = self.cursor();
-        if self.text.len() == 0 || self.document.blocks.is_empty() {
-            self.active_style.link = url;
-            cx.notify();
-            return;
-        }
-
-        let point = self.text.offset_to_point(cursor);
-        let row = point.row.min(self.document.blocks.len().saturating_sub(1));
-        let col = point.column;
-
-        let Some(block) = self.document.blocks.get(row) else {
-            self.active_style.link = url;
-            cx.notify();
-            return;
-        };
-
-        let mut cursor_in_block = 0usize;
-        let mut target: Option<Range<usize>> = None;
-        for node in &block.inlines {
-            let InlineNode::Text(text) = node;
-            let end = cursor_in_block + text.text.len();
-            if col < end {
-                if text.style.link.is_some() {
-                    target = Some(cursor_in_block..end);
-                }
-                break;
-            }
-            cursor_in_block = end;
-        }
-
-        if let Some(local_range) = target {
-            self.push_undo_snapshot();
-            self.update_inline_styles_in_block_range(row, local_range, |style| {
-                style.link = url.clone();
-            });
-            cx.notify();
-            self.scroll_cursor_into_view(window, cx);
-            return;
-        }
-
-        self.active_style.link = url;
-        cx.notify();
-    }
-
-    fn selected_rows(&self) -> (usize, usize) {
-        if !self.has_selection() {
-            let row = self.text.offset_to_point(self.cursor()).row;
-            return (row, row);
-        }
-
-        let range = self.ordered_selection();
-        let mut start_row = self.text.offset_to_point(range.start).row;
-        let mut end_row = self.text.offset_to_point(range.end).row;
-
-        if range.end > 0 {
-            if let Some(ch) = self.text.char_at(range.end.saturating_sub(1)) {
-                if ch == '\n' && end_row > 0 {
-                    end_row = end_row.saturating_sub(1);
-                }
-            }
-        }
-
-        start_row = start_row.min(self.document.blocks.len().saturating_sub(1));
-        end_row = end_row.min(self.document.blocks.len().saturating_sub(1));
-        if end_row < start_row {
-            std::mem::swap(&mut start_row, &mut end_row);
-        }
-        (start_row, end_row)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn highlight_styles_for_line(
-        &self,
-        row: usize,
-        base_color: gpui::Hsla,
-    ) -> Vec<(Range<usize>, HighlightStyle)> {
-        let line_range = self.line_range(row);
-        let line_start = line_range.start;
-        let line_end = line_range.end;
-
-        let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-        if let Some(block) = self.document.blocks.get(row) {
-            let mut cursor = 0usize;
-            for node in &block.inlines {
-                let InlineNode::Text(text) = node;
-
-                let len = text.text.len();
-                if len == 0 {
-                    continue;
-                }
-
-                let local = cursor..cursor + len;
-                let mut highlight = HighlightStyle::default();
-
-                if text.style.bold {
-                    highlight.font_weight = Some(FontWeight::BOLD);
-                }
-                if text.style.italic {
-                    highlight.font_style = Some(FontStyle::Italic);
-                }
-                if text.style.underline {
-                    highlight.underline = Some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: text.style.fg,
-                        wavy: false,
-                    });
-                }
-                if text.style.link.is_some() {
-                    let link_color = text.style.fg.unwrap_or(self.theme.link);
-                    highlight.color = Some(link_color);
-                    if let Some(underline) = highlight.underline.as_mut() {
-                        if underline.color.is_none() {
-                            underline.color = Some(link_color);
-                        }
-                    } else {
-                        highlight.underline = Some(UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(link_color),
-                            wavy: false,
-                        });
-                    }
-                }
-                if text.style.strikethrough {
-                    highlight.strikethrough = Some(StrikethroughStyle {
-                        thickness: px(1.),
-                        color: text.style.fg,
-                        ..Default::default()
-                    });
-                }
-                if let Some(color) = text.style.fg {
-                    highlight.color = Some(color);
-                }
-                if let Some(bg) = text.style.bg {
-                    highlight.background_color = Some(bg);
-                }
-
-                if highlight != HighlightStyle::default() {
-                    highlights.push((local, highlight));
-                }
-
-                cursor += len;
-            }
-        }
-
-        if let Some(marked) = self.ime_marked_range {
-            let marked = marked.start..marked.end;
-            let marked = marked.start.max(line_start)..marked.end.min(line_end);
-            if marked.start < marked.end {
-                let local = (marked.start - line_start)..(marked.end - line_start);
-                let mark = vec![(
-                    local,
-                    HighlightStyle {
-                        underline: Some(UnderlineStyle {
-                            thickness: px(1.),
-                            color: Some(base_color),
-                            wavy: false,
-                        }),
-                        ..Default::default()
-                    },
-                )];
-                highlights = gpui::combine_highlights(highlights, mark).collect();
-            }
-        }
-
-        highlights
-    }
-
-    pub(crate) fn link_at_offset(&self, offset: usize) -> Option<String> {
-        let point = self.text.offset_to_point(offset.min(self.text.len()));
-        let row = point.row;
-        let col = point.column;
-
-        let block = self.document.blocks.get(row)?;
-        let mut cursor = 0usize;
-        for node in &block.inlines {
-            let InlineNode::Text(text) = node;
-            let len = text.text.len();
-            if col < cursor + len {
-                return text.style.link.clone();
-            }
-            cursor += len;
-        }
-
-        None
-    }
-
-    fn link_range_at_offset(&self, offset: usize) -> Option<(Range<usize>, String)> {
-        let point = self.text.offset_to_point(offset.min(self.text.len()));
-        let row = point.row.min(self.document.blocks.len().saturating_sub(1));
-        let col = point.column;
-
-        let block = self.document.blocks.get(row)?;
-        let mut ranges: Vec<(Range<usize>, String)> = Vec::new();
-
-        let mut cursor = 0usize;
-        let mut current: Option<(usize, String)> = None;
-        for node in &block.inlines {
-            let InlineNode::Text(text) = node;
-            let len = text.text.len();
-
-            match (&mut current, text.style.link.as_ref()) {
-                (Some((_start, url)), Some(link)) if url == link => {}
-                (Some((start, url)), Some(link)) => {
-                    ranges.push((*start..cursor, url.clone()));
-                    *start = cursor;
-                    *url = link.clone();
-                }
-                (Some((start, url)), None) => {
-                    ranges.push((*start..cursor, url.clone()));
-                    current = None;
-                }
-                (None, Some(link)) => current = Some((cursor, link.clone())),
-                (None, None) => {}
-            }
-
-            cursor += len;
-        }
-
-        if let Some((start, url)) = current {
-            ranges.push((start..cursor, url));
-        }
-
-        let block_start = self.text.line_start_offset(row);
-        for (range, url) in ranges {
-            if col >= range.start && col <= range.end {
-                return Some(((block_start + range.start)..(block_start + range.end), url));
-            }
-        }
-
-        None
-    }
-
-    pub fn active_link_overlay(&self) -> Option<ActiveLinkOverlay> {
-        let viewport = self.viewport_bounds;
-        if viewport.size.width <= px(0.) || viewport.size.height <= px(0.) {
-            return None;
-        }
-
-        let cursor = self.cursor();
-        let (range, url) = self.link_range_at_offset(cursor)?;
-        let caret_bounds = self.caret_bounds_for_offset(range.start)?;
-
-        let overlay_height = px(40.);
-        let vertical_margin = px(8.);
-        let prefer_above_y = caret_bounds.top() - overlay_height - vertical_margin;
-        let prefer_below_y = caret_bounds.bottom() + vertical_margin;
-
-        let mut anchor = point(caret_bounds.left(), prefer_above_y);
-
-        let min_x = viewport.left() + px(8.);
-        let max_x = (viewport.right() - px(200.)).max(min_x);
-        if anchor.x < min_x {
-            anchor.x = min_x;
-        } else if anchor.x > max_x {
-            anchor.x = max_x;
-        }
-
-        let min_y = viewport.top() + px(4.);
-        let max_y = (viewport.bottom() - overlay_height - px(4.)).max(min_y);
-        if anchor.y < min_y {
-            anchor.y = prefer_below_y;
-        }
-        if anchor.y < min_y {
-            anchor.y = min_y;
-        } else if anchor.y > max_y {
-            anchor.y = max_y;
-        }
-
-        Some(ActiveLinkOverlay { url, anchor })
-    }
-
-    pub(crate) fn offset_for_point(&self, point: Point<Pixels>) -> Option<usize> {
-        // Find the closest row by 2D distance to its layout bounds. This improves hit-testing in
-        // multi-column layouts where multiple rows can share the same y positions.
-        let mut best: Option<(usize, f32)> = None;
-        for (row, cache) in self.layout_cache.iter().enumerate() {
-            let Some(cache) = cache.as_ref() else {
-                continue;
-            };
-
-            let dx = if point.x < cache.bounds.left() {
-                cache.bounds.left() - point.x
-            } else if point.x > cache.bounds.right() {
-                point.x - cache.bounds.right()
+        let marks = self.active_marks();
+        if let Some(tx) = self.tx_insert_multiline_text_at_block_offset(
+            &block_path,
+            cursor,
+            "\n",
+            &marks,
+            if block_kind == "list_item" {
+                "key:enter:split_list_item"
             } else {
-                px(0.)
-            };
-            let dy = if point.y < cache.bounds.top() {
-                cache.bounds.top() - point.y
-            } else if point.y > cache.bounds.bottom() {
-                point.y - cache.bounds.bottom()
-            } else {
-                px(0.)
-            };
+                "key:enter:split_paragraph"
+            },
+        ) {
+            self.push_tx(tx, cx);
+        }
+    }
 
-            let dist = f32::from(dx) * f32::from(dx) + f32::from(dy) * f32::from(dy);
-            if best.is_none() || dist < best.unwrap().1 {
-                best = Some((row, dist));
+    pub(super) fn left(&mut self, _: &MoveLeft, _window: &mut Window, cx: &mut Context<Self>) {
+        let sel = self.editor.selection().clone();
+        if !sel.is_collapsed() {
+            let mut start = sel.anchor.clone();
+            let mut end = sel.focus.clone();
+            if start.path == end.path {
+                if end.offset < start.offset {
+                    std::mem::swap(&mut start, &mut end);
+                }
+            } else if end.path < start.path {
+                std::mem::swap(&mut start, &mut end);
             }
-        }
-
-        let (row, _) = best?;
-        let cache = self.layout_cache.get(row)?.as_ref()?;
-
-        let local_index = self.aligned_index_for_row_point(row, point);
-
-        Some((cache.start_offset + local_index).min(self.text.len()))
-    }
-
-    pub(crate) fn move_vertically(&mut self, direction: i32) -> Option<usize> {
-        let cursor = self.cursor();
-        let caret_bounds = self.caret_bounds_for_offset(cursor)?;
-        let x = self.preferred_x.unwrap_or(caret_bounds.left());
-
-        let row = self.text.offset_to_point(cursor).row;
-        let cache = self.layout_cache.get(row)?.as_ref()?;
-        let line_height = cache.text_layout.line_height();
-
-        let y = caret_bounds.top() + line_height * 0.5 + (direction as f32) * line_height;
-        self.offset_for_point(point(x, y))
-    }
-
-    // --- Action handlers ---
-
-    pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
+            self.set_selection_points(start.clone(), start, cx);
             return;
         }
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.replace_bytes_range(range, "", window, cx, true, false, None);
+        let Some(block_path) = self.active_text_block_path() else {
             return;
-        }
-
-        let cursor = self.cursor();
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
         if cursor == 0 {
-            return;
-        }
-
-        // Special: at start of line, downgrade heading/list/quote/todo, or remove dividers.
-        let pos = self.text.offset_to_point(cursor);
-        if pos.column == 0 && pos.row < self.document.blocks.len() {
-            let kind = self.document.blocks[pos.row].format.kind;
-            if matches!(kind, BlockKind::Divider) {
-                self.push_undo_snapshot();
-                self.document.blocks.remove(pos.row);
-                self.ensure_document_non_empty();
-                self.text = Rope::from(self.document.to_plain_text().as_str());
-                self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-
-                let target_row = pos
-                    .row
-                    .saturating_sub(1)
-                    .min(self.document.blocks.len() - 1);
-                let col = self
-                    .document
-                    .blocks
-                    .get(target_row)
-                    .map(|b| b.text_len())
-                    .unwrap_or(0);
-                let offset = self.text.line_start_offset(target_row) + col;
-                self.set_cursor(offset);
-                cx.notify();
-                return;
-            }
-            if matches!(
-                kind,
-                BlockKind::Heading { .. }
-                    | BlockKind::Quote
-                    | BlockKind::UnorderedListItem
-                    | BlockKind::OrderedListItem
-                    | BlockKind::Todo { .. }
-                    | BlockKind::Toggle { .. }
-            ) {
-                self.push_undo_snapshot();
-                self.document.blocks[pos.row].format.kind = BlockKind::Paragraph;
-                cx.notify();
+            if let Some(prev_path) = self.prev_text_block_path(&block_path) {
+                let offset = self.block_text_len_in_block(&prev_path);
+                let point = self
+                    .point_for_block_offset(&prev_path, offset)
+                    .unwrap_or_else(|| {
+                        let mut path = prev_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                self.set_selection_points(point.clone(), point, cx);
                 return;
             }
         }
-
-        let start = self.previous_boundary(cursor);
-        self.replace_bytes_range(start..cursor, "", window, cx, true, false, None);
+        let new_cursor = self.prev_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        self.set_selection_in_active_block(new_cursor, new_cursor, cx);
     }
 
-    pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
+    pub(super) fn right(&mut self, _: &MoveRight, _window: &mut Window, cx: &mut Context<Self>) {
+        let sel = self.editor.selection().clone();
+        if !sel.is_collapsed() {
+            let mut start = sel.anchor.clone();
+            let mut end = sel.focus.clone();
+            if start.path == end.path {
+                if end.offset < start.offset {
+                    std::mem::swap(&mut start, &mut end);
+                }
+            } else if end.path < start.path {
+                std::mem::swap(&mut start, &mut end);
+            }
+            self.set_selection_points(end.clone(), end, cx);
             return;
         }
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.replace_bytes_range(range, "", window, cx, true, false, None);
+        let Some(block_path) = self.active_text_block_path() else {
             return;
-        }
-
-        let cursor = self.cursor();
-        if cursor >= self.text.len() {
-            return;
-        }
-
-        let end = self.next_boundary(cursor);
-        self.replace_bytes_range(cursor..end, "", window, cx, true, false, None);
-    }
-
-    pub(super) fn enter(&mut self, _: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.replace_bytes_range(range, "", window, cx, true, false, None);
-        }
-
-        let cursor = self.cursor();
-        let row = self.text.offset_to_point(cursor).row;
-
-        if row < self.document.blocks.len() {
-            let kind = self.document.blocks[row].format.kind;
-
-            // Divider is a void block; pressing enter should move to a new paragraph below.
-            if matches!(kind, BlockKind::Divider) {
-                self.push_undo_snapshot();
-                let insert_row = (row + 1).min(self.document.blocks.len());
-                self.document
-                    .blocks
-                    .insert(insert_row, BlockNode::default());
-
-                self.text = Rope::from(self.document.to_plain_text().as_str());
-                self.layout_cache = vec![None; self.document.blocks.len().max(1)];
-                self.selection = Selection::default();
-                self.ime_marked_range = None;
-                self.active_style = InlineStyle::default();
-                self.preferred_x = None;
-
-                let offset = self.text.line_start_offset(insert_row);
-                self.set_cursor(offset);
-                cx.notify();
-                self.scroll_cursor_into_view(window, cx);
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == text.len() {
+            if let Some(next_path) = self.next_text_block_path(&block_path) {
+                let point = self
+                    .point_for_block_offset(&next_path, 0)
+                    .unwrap_or_else(|| {
+                        let mut path = next_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                self.set_selection_points(point.clone(), point, cx);
                 return;
             }
-
-            // Exit list/quote/todo on an empty line.
-            if matches!(
-                kind,
-                BlockKind::UnorderedListItem
-                    | BlockKind::OrderedListItem
-                    | BlockKind::Quote
-                    | BlockKind::Todo { .. }
-                    | BlockKind::Toggle { .. }
-            ) && self.document.blocks[row].is_text_empty()
-            {
-                self.push_undo_snapshot();
-                self.document.blocks[row].format.kind = BlockKind::Paragraph;
-                cx.notify();
-                return;
-            }
-
-            // If the current toggle is collapsed, expand it so newly inserted children are visible.
-            if let BlockKind::Toggle { collapsed: true } = kind {
-                self.document.blocks[row].format.kind = BlockKind::Toggle { collapsed: false };
-            }
         }
-
-        self.replace_bytes_range(cursor..cursor, "\n", window, cx, true, false, None);
-    }
-
-    pub(super) fn escape(&mut self, _: &Escape, _window: &mut Window, cx: &mut Context<Self>) {
-        self.selecting = false;
-        self.ime_marked_range = None;
-        cx.notify();
-    }
-
-    pub(super) fn left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.set_cursor(range.start);
-            cx.notify();
-            self.scroll_cursor_into_view(window, cx);
-            return;
-        }
-
-        let cursor = self.cursor();
-        let new_cursor = self.previous_boundary(cursor);
-        self.set_cursor(new_cursor);
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub(super) fn right(&mut self, _: &MoveRight, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.set_cursor(range.end);
-            cx.notify();
-            self.scroll_cursor_into_view(window, cx);
-            return;
-        }
-
-        let cursor = self.cursor();
-        let new_cursor = self.next_boundary(cursor);
-        self.set_cursor(new_cursor);
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub(super) fn up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.set_cursor(range.start);
-        }
-
-        if let Some(new_cursor) = self.move_vertically(-1) {
-            self.set_cursor(new_cursor);
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
-    }
-
-    pub(super) fn down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
-        if self.has_selection() {
-            let range = self.ordered_selection();
-            self.set_cursor(range.end);
-        }
-
-        if let Some(new_cursor) = self.move_vertically(1) {
-            self.set_cursor(new_cursor);
-        }
-
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
+        let new_cursor = self.next_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        self.set_selection_in_active_block(new_cursor, new_cursor, cx);
     }
 
     pub(super) fn select_left(
         &mut self,
         _: &SelectLeft,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cursor = self.cursor();
-        let new_cursor = self.previous_boundary(cursor);
-        if !self.has_selection() {
-            self.selection.start = cursor;
+        let sel = self.editor.selection().clone();
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == 0 {
+            if let Some(prev_path) = self.prev_text_block_path(&block_path) {
+                let focus = self
+                    .point_for_block_offset(&prev_path, self.block_text_len_in_block(&prev_path))
+                    .unwrap_or_else(|| {
+                        let mut path = prev_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                let anchor = if sel.is_collapsed() {
+                    self.point_for_block_offset(&block_path, cursor)
+                        .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+                } else {
+                    sel.anchor.clone()
+                };
+                self.set_selection_points(anchor, focus, cx);
+                return;
+            }
         }
-        self.selection.end = new_cursor;
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
+        let new_cursor = self.prev_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        let focus = self
+            .point_for_block_offset(&block_path, new_cursor)
+            .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset));
+        let anchor = if sel.is_collapsed() {
+            self.point_for_block_offset(&block_path, cursor)
+                .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+        } else {
+            sel.anchor.clone()
+        };
+        self.set_selection_points(anchor, focus, cx);
     }
 
     pub(super) fn select_right(
         &mut self,
         _: &SelectRight,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cursor = self.cursor();
-        let new_cursor = self.next_boundary(cursor);
-        if !self.has_selection() {
-            self.selection.start = cursor;
+        let sel = self.editor.selection().clone();
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == text.len() {
+            if let Some(next_path) = self.next_text_block_path(&block_path) {
+                let focus = self
+                    .point_for_block_offset(&next_path, 0)
+                    .unwrap_or_else(|| {
+                        let mut path = next_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                let anchor = if sel.is_collapsed() {
+                    self.point_for_block_offset(&block_path, cursor)
+                        .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+                } else {
+                    sel.anchor.clone()
+                };
+                self.set_selection_points(anchor, focus, cx);
+                return;
+            }
         }
-        self.selection.end = new_cursor;
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
+        let new_cursor = self.next_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        let focus = self
+            .point_for_block_offset(&block_path, new_cursor)
+            .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset));
+        let anchor = if sel.is_collapsed() {
+            self.point_for_block_offset(&block_path, cursor)
+                .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+        } else {
+            sel.anchor.clone()
+        };
+        self.set_selection_points(anchor, focus, cx);
     }
 
-    pub(super) fn select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.cursor();
-        if !self.has_selection() {
-            self.selection.start = cursor;
+    pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.undo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
+            cx.notify();
         }
-        if let Some(new_cursor) = self.move_vertically(-1) {
-            self.selection.end = new_cursor;
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
     }
 
-    pub(super) fn select_down(
-        &mut self,
-        _: &SelectDown,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let cursor = self.cursor();
-        if !self.has_selection() {
-            self.selection.start = cursor;
+    pub(super) fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.redo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
+            cx.notify();
         }
-        if let Some(new_cursor) = self.move_vertically(1) {
-            self.selection.end = new_cursor;
-        }
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
+    }
+
+    pub(super) fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        self.command_copy(cx);
+    }
+
+    pub(super) fn cut(&mut self, _: &Cut, _window: &mut Window, cx: &mut Context<Self>) {
+        self.command_cut(cx);
+    }
+
+    pub(super) fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        self.command_paste(cx);
     }
 
     pub(super) fn select_all(
         &mut self,
         _: &SelectAll,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.selection = (0..self.text.len()).into();
-        cx.notify();
-        self.scroll_cursor_into_view(window, cx);
+        self.command_select_all(cx);
     }
 
-    pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            return;
-        }
-        let selected_text = self.text.slice(range).to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(selected_text));
+    pub(super) fn insert_divider(
+        &mut self,
+        _: &InsertDivider,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("core.insert_divider", None, cx);
     }
 
-    pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let range = self.ordered_selection();
-        if range.is_empty() {
-            return;
-        }
-        let selected_text = self.text.slice(range.clone()).to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(selected_text));
-        self.replace_bytes_range(range, "", window, cx, true, false, None);
-    }
-
-    pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return;
-        };
-        let mut new_text = clipboard.text().unwrap_or_default();
-        new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
-        let range = self.ordered_selection();
-        self.replace_bytes_range(range, &new_text, window, cx, true, false, None);
-    }
-
-    pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let Some(snapshot) = self.undo_stack.pop() else {
-            return;
-        };
-        self.redo_stack.push(Snapshot {
-            document: self.document.clone(),
-            selection: self.selection,
-            active_style: self.active_style.clone(),
-        });
-        self.restore_snapshot(snapshot);
-        cx.notify();
-    }
-
-    pub(super) fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only {
-            return;
-        }
-        let Some(snapshot) = self.redo_stack.pop() else {
-            return;
-        };
-        self.undo_stack.push(Snapshot {
-            document: self.document.clone(),
-            selection: self.selection,
-            active_style: self.active_style.clone(),
-        });
-        self.restore_snapshot(snapshot);
-        cx.notify();
+    pub(super) fn insert_mention(
+        &mut self,
+        _: &InsertMention,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "label": "Alice" });
+        _ = self.run_command_and_refresh("mention.insert", Some(args), cx);
     }
 
     pub(super) fn toggle_bold(
         &mut self,
         _: &ToggleBold,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_bold_mark(window, cx);
+        _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
     }
 
-    pub(super) fn toggle_italic(
+    pub(super) fn toggle_bulleted_list(
         &mut self,
-        _: &ToggleItalic,
-        window: &mut Window,
+        _: &ToggleBulletedList,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_italic_mark(window, cx);
+        _ = self.run_command_and_refresh("list.toggle_bulleted", None, cx);
     }
 
-    pub(super) fn toggle_underline(
+    pub(super) fn toggle_ordered_list(
         &mut self,
-        _: &ToggleUnderline,
-        window: &mut Window,
+        _: &ToggleOrderedList,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_underline_mark(window, cx);
+        _ = self.run_command_and_refresh("list.toggle_ordered", None, cx);
     }
 
-    pub(super) fn toggle_strikethrough(
-        &mut self,
-        _: &ToggleStrikethrough,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_strikethrough_mark(window, cx);
+    pub fn command_undo(&mut self, cx: &mut Context<Self>) {
+        if self.editor.undo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
+            cx.notify();
+        }
     }
 
-    // --- Utilities copied from InputState ---
-
-    #[inline]
-    pub(crate) fn offset_from_utf16(&self, offset: usize) -> usize {
-        self.text.offset_utf16_to_offset(offset)
+    pub fn command_redo(&mut self, cx: &mut Context<Self>) {
+        if self.editor.redo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
+            cx.notify();
+        }
     }
 
-    #[inline]
-    pub(crate) fn offset_to_utf16(&self, offset: usize) -> usize {
-        self.text.offset_to_offset_utf16(offset)
+    pub fn command_insert_divider(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("core.insert_divider", None, cx);
     }
 
-    #[inline]
-    pub(crate) fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    pub fn command_insert_mention(&mut self, label: String, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "label": label });
+        _ = self.run_command_and_refresh("mention.insert", Some(args), cx);
     }
 
-    #[inline]
-    pub(crate) fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+    pub fn command_toggle_bold(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
     }
 
-    pub(crate) fn previous_boundary(&self, offset: usize) -> usize {
-        let mut offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
-        if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\r' {
-                offset = offset.saturating_sub(1);
+    pub fn command_toggle_bulleted_list(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("list.toggle_bulleted", None, cx);
+    }
+
+    pub fn command_toggle_ordered_list(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("list.toggle_ordered", None, cx);
+    }
+
+    pub fn command_insert_table(&mut self, rows: usize, cols: usize, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "rows": rows, "cols": cols });
+        _ = self.run_command_and_refresh("table.insert", Some(args), cx);
+    }
+
+    pub fn command_insert_table_row_below(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.insert_row_below", None, cx);
+    }
+
+    pub fn command_insert_table_col_right(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.insert_col_right", None, cx);
+    }
+
+    pub fn command_delete_table_row(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.delete_row", None, cx);
+    }
+
+    pub fn command_delete_table_col(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.delete_col", None, cx);
+    }
+
+    pub fn command_set_link(&mut self, url: String, cx: &mut Context<Self>) {
+        // UX: if there's no selection, apply link to the word under the caret so users get an
+        // immediate visual confirmation (instead of only affecting subsequent input).
+        if self.editor.selection().is_collapsed() {
+            if let Some(block_path) = self.active_text_block_path()
+                && let Some(text) = self.text_block_text(&block_path)
+            {
+                let cursor = self
+                    .row_offset_for_point(&self.editor.selection().focus)
+                    .unwrap_or(0)
+                    .min(text.len());
+                let text = text.as_str();
+                let mut range = Self::word_range(text, cursor);
+
+                let mut selected = text.get(range.clone()).unwrap_or("");
+                if range.start >= range.end || selected.chars().all(|ch| ch.is_whitespace()) {
+                    // If we landed on whitespace, try the next non-whitespace run to the right.
+                    let mut ix = range.end.min(text.len());
+                    while ix < text.len() {
+                        let Some(ch) = text.get(ix..).and_then(|s| s.chars().next()) else {
+                            break;
+                        };
+                        if !ch.is_whitespace() {
+                            range = Self::word_range(text, ix);
+                            selected = text.get(range.clone()).unwrap_or("");
+                            break;
+                        }
+                        ix = Self::next_boundary(text, ix);
+                    }
+                }
+
+                if range.start >= range.end || selected.chars().all(|ch| ch.is_whitespace()) {
+                    // If there's nothing meaningful to the right, try the left.
+                    let mut ix = range.start.min(text.len());
+                    while ix > 0 {
+                        let prev = Self::prev_boundary(text, ix);
+                        let Some(ch) = text.get(prev..).and_then(|s| s.chars().next()) else {
+                            break;
+                        };
+                        if !ch.is_whitespace() {
+                            range = Self::word_range(text, prev);
+                            selected = text.get(range.clone()).unwrap_or("");
+                            break;
+                        }
+                        ix = prev;
+                    }
+                }
+
+                if range.start < range.end && !selected.chars().all(|ch| ch.is_whitespace()) {
+                    self.set_selection_in_active_block(range.start, range.end, cx);
+                }
             }
         }
-        offset
+
+        let args = serde_json::json!({ "url": url });
+        _ = self.run_command_and_refresh("marks.set_link", Some(args), cx);
     }
 
-    pub(crate) fn next_boundary(&self, offset: usize) -> usize {
-        let mut offset = self.text.clip_offset(offset + 1, Bias::Right);
-        if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\n' {
-                offset += 1;
-            } else if ch == '\r' {
-                offset += 2;
+    pub fn command_unset_link(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.unset_link", None, cx);
+    }
+
+    pub fn is_bold_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("marks.is_bold_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn has_link_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("marks.has_link_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn active_link_url(&self) -> Option<String> {
+        self.editor
+            .run_query::<Marks>("marks.get_active", None)
+            .ok()
+            .and_then(|m| m.link)
+    }
+
+    pub fn is_bulleted_list_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>(
+                "list.is_active",
+                Some(serde_json::json!({ "type": "bulleted" })),
+            )
+            .unwrap_or(false)
+    }
+
+    pub fn is_ordered_list_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>(
+                "list.is_active",
+                Some(serde_json::json!({ "type": "ordered" })),
+            )
+            .unwrap_or(false)
+    }
+
+    pub fn is_table_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("table.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn command_copy(&mut self, cx: &mut Context<Self>) {
+        let selection = self.editor.selection().clone();
+        if selection.is_collapsed() {
+            return;
+        }
+
+        let mut start = selection.anchor.clone();
+        let mut end = selection.focus.clone();
+        if start.path == end.path {
+            if end.offset < start.offset {
+                std::mem::swap(&mut start, &mut end);
+            }
+        } else if end.path < start.path {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let start_offset = self.row_offset_for_point(&start).unwrap_or(0);
+        let end_offset = self.row_offset_for_point(&end).unwrap_or(0);
+
+        let Some(start_block) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
+            return;
+        };
+        let Some(end_block) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
+            return;
+        };
+
+        if start_block == end_block {
+            let text = self.text_block_text(&start_block).unwrap_or_default();
+            let start = start_offset.min(text.len());
+            let end = end_offset.min(text.len()).max(start);
+            let selected = text.as_str().get(start..end).unwrap_or("").to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(selected));
+            return;
+        }
+
+        let blocks = text_block_paths(self.editor.doc());
+        let Some(start_pos) = blocks.iter().position(|p| p == &start_block) else {
+            return;
+        };
+        let Some(end_pos) = blocks.iter().position(|p| p == &end_block) else {
+            return;
+        };
+        let (start_pos, end_pos) = if start_pos <= end_pos {
+            (start_pos, end_pos)
+        } else {
+            (end_pos, start_pos)
+        };
+
+        let mut out = String::new();
+        for (ix, block_path) in blocks.iter().enumerate().take(end_pos + 1).skip(start_pos) {
+            let text = self.text_block_text(block_path).unwrap_or_default();
+            if ix == start_pos {
+                let start = start_offset.min(text.len());
+                out.push_str(text.as_str().get(start..).unwrap_or(""));
+                out.push('\n');
+            } else if ix == end_pos {
+                let end = end_offset.min(text.len());
+                out.push_str(text.as_str().get(..end).unwrap_or(""));
+            } else {
+                out.push_str(text.as_str());
+                out.push('\n');
             }
         }
-        offset.min(self.text.len())
+
+        cx.write_to_clipboard(ClipboardItem::new_string(out));
+    }
+
+    pub fn command_cut(&mut self, cx: &mut Context<Self>) {
+        self.command_copy(cx);
+        _ = self.delete_selection_if_any(cx);
+    }
+
+    pub fn command_paste(&mut self, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        let mut new_text = clipboard.text().unwrap_or_default();
+        new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
+        if new_text.is_empty() {
+            return;
+        }
+
+        let insert_at = self
+            .delete_selection_if_any(cx)
+            .unwrap_or_else(|| self.editor.selection().focus.clone());
+        let Some((_, block_path)) = insert_at.path.split_last() else {
+            return;
+        };
+        let offset = self.row_offset_for_point(&insert_at).unwrap_or(0);
+        let marks = self.active_marks();
+
+        if let Some(tx) = self.tx_insert_multiline_text_at_block_offset(
+            block_path,
+            offset,
+            &new_text,
+            &marks,
+            "command:paste",
+        ) {
+            self.push_tx(tx, cx);
+        }
+    }
+
+    pub fn command_select_all(&mut self, cx: &mut Context<Self>) {
+        let blocks = text_block_paths(self.editor.doc());
+        let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
+            return;
+        };
+
+        let anchor = self.point_for_block_offset(first, 0).unwrap_or_else(|| {
+            let mut path = first.clone();
+            path.push(0);
+            CorePoint::new(path, 0)
+        });
+        let focus = self
+            .point_for_block_offset(last, self.block_text_len_in_block(last))
+            .unwrap_or_else(|| {
+                let mut path = last.clone();
+                path.push(0);
+                CorePoint::new(path, 0)
+            });
+        self.set_selection_points(anchor, focus, cx);
     }
 }
 
@@ -2671,9 +2212,11 @@ impl EntityInputHandler for RichTextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let range = self.range_from_utf16(&range_utf16);
-        adjusted_range.replace(self.range_to_utf16(&range));
-        Some(self.text.slice(range).to_string())
+        let text = self.active_text();
+        let start = utf16_to_byte(text.as_str(), range_utf16.start);
+        let end = utf16_to_byte(text.as_str(), range_utf16.end);
+        adjusted_range.replace(byte_to_utf16_range(text.as_str(), start..end));
+        Some(text.as_str().get(start..end).unwrap_or("").to_string())
     }
 
     fn selected_text_range(
@@ -2682,11 +2225,73 @@ impl EntityInputHandler for RichTextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        let range = self.ordered_selection();
+        let text = self.active_text();
+        let range = self.ordered_active_range();
+        let utf16 = byte_to_utf16_range(text.as_str(), range.clone());
+
+        let sel = self.editor.selection();
+        let anchor_offset = self.row_offset_for_point(&sel.anchor).unwrap_or(0);
+        let focus_offset = self.row_offset_for_point(&sel.focus).unwrap_or(0);
+        let reversed = if let Some(active_block) = self.active_text_block_path() {
+            let anchor_block = sel.anchor.path.split_last().map(|(_, p)| p);
+            let focus_block = sel.focus.path.split_last().map(|(_, p)| p);
+            anchor_block == Some(active_block.as_slice())
+                && focus_block == Some(active_block.as_slice())
+                && focus_offset < anchor_offset
+        } else {
+            false
+        };
+
         Some(UTF16Selection {
-            range: self.range_to_utf16(&range),
-            reversed: self.selection.end < self.selection.start,
+            range: utf16,
+            reversed,
         })
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.active_text();
+        let range_bytes = range_utf16
+            .as_ref()
+            .map(|r| utf16_to_byte(text.as_str(), r.start)..utf16_to_byte(text.as_str(), r.end))
+            .or_else(|| self.ime_marked_range.clone())
+            .unwrap_or_else(|| self.ordered_active_range());
+
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let marks = self.active_marks();
+        let inserted = new_text.replace("\r\n", "\n").replace('\r', "\n");
+
+        let tx = if inserted.contains('\n') {
+            self.tx_replace_range_with_multiline_text_in_block(
+                &block_path,
+                range_bytes.clone(),
+                &inserted,
+                &marks,
+                "ime:replace_text",
+            )
+        } else {
+            self.tx_replace_range_in_block(
+                &block_path,
+                range_bytes.clone(),
+                &inserted,
+                &marks,
+                None,
+                "ime:replace_text",
+            )
+        };
+
+        if let Some(tx) = tx {
+            self.push_tx(tx, cx);
+        }
+        // Committed input ends any active preedit range.
+        self.ime_marked_range = None;
     }
 
     fn marked_text_range(
@@ -2694,28 +2299,14 @@ impl EntityInputHandler for RichTextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
+        let text = self.active_text();
         self.ime_marked_range
-            .map(|range| self.range_to_utf16(&(range.start..range.end)))
+            .as_ref()
+            .map(|r| byte_to_utf16_range(text.as_str(), r.clone()))
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         self.ime_marked_range = None;
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.ime_marked_range.map(|range| range.into()))
-            .unwrap_or_else(|| self.ordered_selection());
-
-        self.replace_bytes_range(range, new_text, window, cx, true, false, None);
     }
 
     fn replace_and_mark_text_in_range(
@@ -2723,24 +2314,52 @@ impl EntityInputHandler for RichTextState {
         range_utf16: Option<Range<usize>>,
         new_text: &str,
         new_selected_range_utf16: Option<Range<usize>>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
+        let text = self.active_text();
+        let range_bytes = range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.ime_marked_range.map(|range| range.into()))
-            .unwrap_or_else(|| self.ordered_selection());
+            .map(|r| utf16_to_byte(text.as_str(), r.start)..utf16_to_byte(text.as_str(), r.end))
+            .or_else(|| self.ime_marked_range.clone())
+            .unwrap_or_else(|| self.ordered_active_range());
 
-        self.replace_bytes_range(
-            range,
-            new_text,
-            window,
-            cx,
-            false,
-            true,
-            new_selected_range_utf16,
-        );
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let marks = self.active_marks();
+        let inserted = new_text.replace("\r\n", "\n").replace('\r', "\n");
+        if inserted.contains('\n') {
+            return;
+        }
+
+        let inserted_len = inserted.len();
+        let marked = if inserted_len == 0 {
+            None
+        } else {
+            Some(range_bytes.start..range_bytes.start + inserted_len)
+        };
+        self.ime_marked_range = marked.clone();
+
+        let selection_after_offsets =
+            if let (Some(marked), Some(sel_utf16)) = (marked, new_selected_range_utf16) {
+                let rel_start = utf16_to_byte(inserted.as_str(), sel_utf16.start);
+                let rel_end = utf16_to_byte(inserted.as_str(), sel_utf16.end);
+                Some((marked.start + rel_start, marked.start + rel_end))
+            } else {
+                None
+            };
+
+        if let Some(tx) = self.tx_replace_range_in_block(
+            &block_path,
+            range_bytes.clone(),
+            &inserted,
+            &marks,
+            selection_after_offsets,
+            "ime:replace_and_mark_text",
+        ) {
+            self.push_tx(tx, cx);
+        }
     }
 
     fn bounds_for_range(
@@ -2750,19 +2369,16 @@ impl EntityInputHandler for RichTextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let range = self.range_from_utf16(&range_utf16);
-        let start_point = self.text.offset_to_point(range.start);
-        let row = start_point.row;
-        let col = start_point.column;
-
-        let cache = self.layout_cache.get(row)?.as_ref()?;
-        let pos = cache
-            .text_layout
-            .position_for_index(col)
-            .or_else(|| cache.text_layout.position_for_index(cache.line_len))?;
+        let block_path = self.active_text_block_path()?;
+        let cache = self.layout_cache.get(block_path.as_slice())?;
+        let text = cache.text.as_str();
+        let start = utf16_to_byte(text, range_utf16.start);
+        let pos = cache.text_layout.position_for_index(start)?;
         let line_height = cache.text_layout.line_height();
-
-        Some(Bounds::from_corners(pos, point(pos.x, pos.y + line_height)))
+        Some(Bounds::from_corners(
+            pos,
+            point(pos.x + px(1.0), pos.y + line_height),
+        ))
     }
 
     fn character_index_for_point(
@@ -2771,8 +2387,10 @@ impl EntityInputHandler for RichTextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let offset = self.offset_for_point(point)?;
-        Some(self.offset_to_utf16(offset))
+        let block_path = self.active_text_block_path()?;
+        let byte_ix = self.offset_for_point_in_block(&block_path, point)?;
+        let text = self.active_text();
+        Some(byte_to_utf16(text.as_str(), byte_ix))
     }
 }
 
@@ -2780,4 +2398,943 @@ impl gpui::Focusable for RichTextState {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+pub struct RichTextLineElement {
+    state: Entity<RichTextState>,
+    block_path: Vec<usize>,
+    styled_text: StyledText,
+    text: SharedString,
+    segments: Vec<InlineTextSegment>,
+}
+
+impl RichTextLineElement {
+    pub fn new(state: Entity<RichTextState>, block_path: Vec<usize>) -> Self {
+        Self {
+            state,
+            block_path,
+            styled_text: StyledText::new(SharedString::default()),
+            text: SharedString::default(),
+            segments: Vec::new(),
+        }
+    }
+
+    fn paint_selection_range(
+        layout: &gpui::TextLayout,
+        range: Range<usize>,
+        bounds: &Bounds<Pixels>,
+        line_height: Pixels,
+        window: &mut Window,
+        selection_color: gpui::Hsla,
+    ) {
+        let start_ix = range.start.min(layout.len());
+        let end_ix = range.end.min(layout.len());
+        if start_ix >= end_ix {
+            return;
+        }
+
+        let Some(first_pos) = layout.position_for_index(0).or_else(|| {
+            layout
+                .position_for_index(layout.len())
+                .or_else(|| Some(bounds.origin))
+        }) else {
+            return;
+        };
+        let origin = first_pos;
+
+        let Some(line_layout) = layout.line_layout_for_index(start_ix) else {
+            return;
+        };
+
+        let mut boundaries: Vec<usize> = line_layout
+            .wrap_boundaries()
+            .iter()
+            .filter_map(|boundary| {
+                let run = line_layout.unwrapped_layout.runs.get(boundary.run_ix)?;
+                run.glyphs.get(boundary.glyph_ix).map(|g| g.index)
+            })
+            .collect();
+
+        // `wrap_boundaries` is empty for non-wrapping text; treat it as a single visual line.
+        boundaries.push(line_layout.len());
+        boundaries.dedup();
+
+        let mut seg_start = 0usize;
+        for (seg_ix, seg_end) in boundaries.into_iter().enumerate() {
+            let seg_start_ix = seg_start;
+            seg_start = seg_end;
+
+            let a = start_ix.max(seg_start_ix);
+            let b = end_ix.min(seg_end);
+            if a >= b {
+                continue;
+            }
+
+            let seg_origin_x = line_layout.unwrapped_layout.x_for_index(seg_start_ix);
+            let start_x = line_layout.unwrapped_layout.x_for_index(a) - seg_origin_x;
+            let end_x = line_layout.unwrapped_layout.x_for_index(b) - seg_origin_x;
+
+            let y = origin.y + line_height * seg_ix as f32;
+            window.paint_quad(gpui::quad(
+                Bounds::from_corners(
+                    point(origin.x + start_x, y),
+                    point(origin.x + end_x, y + line_height),
+                ),
+                px(0.),
+                selection_color,
+                gpui::Edges::default(),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+        }
+    }
+}
+
+impl IntoElement for RichTextLineElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for RichTextLineElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_element_id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let (text, segments, marked_range) = {
+            let state = self.state.read(cx);
+            let Some(el) = element_at_path(state.editor.doc(), &self.block_path) else {
+                return (window.request_layout(gpui::Style::default(), [], cx), ());
+            };
+            if el.kind != "paragraph" && el.kind != "list_item" {
+                self.text = SharedString::default();
+                return (window.request_layout(gpui::Style::default(), [], cx), ());
+            }
+
+            let mut combined = String::new();
+            let mut segments = Vec::new();
+            for (child_ix, child) in el.children.iter().enumerate() {
+                match child {
+                    Node::Text(t) => {
+                        let start = combined.len();
+                        combined.push_str(&t.text);
+                        segments.push(InlineTextSegment {
+                            child_ix,
+                            start,
+                            len: t.text.len(),
+                            marks: t.marks.clone(),
+                            kind: InlineTextSegmentKind::Text,
+                        });
+                    }
+                    Node::Void(v) => {
+                        let display = v.inline_text();
+                        let start = combined.len();
+                        combined.push_str(&display);
+                        segments.push(InlineTextSegment {
+                            child_ix,
+                            start,
+                            len: display.len(),
+                            marks: Marks::default(),
+                            kind: InlineTextSegmentKind::Void {
+                                kind: v.kind.clone().into(),
+                            },
+                        });
+                    }
+                    Node::Element(_) => {}
+                }
+            }
+            if segments.is_empty() {
+                segments.push(InlineTextSegment {
+                    child_ix: 0,
+                    start: 0,
+                    len: 0,
+                    marks: Marks::default(),
+                    kind: InlineTextSegmentKind::Text,
+                });
+            }
+
+            let marked = (state.active_text_block_path().as_ref() == Some(&self.block_path))
+                .then(|| state.ime_marked_range.clone())
+                .flatten();
+            (SharedString::new(combined), segments, marked)
+        };
+
+        self.text = text.clone();
+        self.segments = segments.clone();
+
+        let render_text: SharedString = if text.is_empty() { " ".into() } else { text };
+
+        let marked_range = marked_range
+            .filter(|_| !self.text.is_empty())
+            .map(|r| r.start.min(self.text.len())..r.end.min(self.text.len()))
+            .filter(|r| r.start < r.end);
+
+        let mut runs = Vec::new();
+
+        let base_style = window.text_style();
+        if self.text.is_empty() {
+            let marks = segments
+                .first()
+                .map(|s| s.marks.clone())
+                .unwrap_or_default();
+            let mut style = base_style.clone();
+            if marks.bold {
+                style.font_weight = FontWeight::BOLD;
+            }
+            if marks.link.is_some() {
+                style.color = cx.theme().blue;
+                style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(cx.theme().blue),
+                    wavy: false,
+                });
+            }
+            runs.push(style.to_run(1));
+        } else {
+            for seg in segments.iter().filter(|s| s.len > 0) {
+                let mut style = base_style.clone();
+                if seg.marks.bold {
+                    style.font_weight = FontWeight::BOLD;
+                }
+                if seg.marks.link.is_some() {
+                    style.color = cx.theme().blue;
+                    style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(cx.theme().blue),
+                        wavy: false,
+                    });
+                }
+                if matches!(
+                    &seg.kind,
+                    InlineTextSegmentKind::Void { kind } if kind.as_ref() == "mention"
+                ) {
+                    style.color = cx.theme().foreground;
+                    style.background_color = Some(cx.theme().muted);
+                    style.underline = None;
+                    style.font_weight = FontWeight::MEDIUM;
+                }
+
+                if let Some(marked) = marked_range.clone() {
+                    let seg_start = seg.start;
+                    let seg_end = seg.start + seg.len;
+                    let sel_start = marked.start.max(seg_start);
+                    let sel_end = marked.end.min(seg_end);
+                    if sel_start >= sel_end {
+                        runs.push(style.to_run(seg.len));
+                        continue;
+                    }
+
+                    let before = sel_start - seg_start;
+                    let inside = sel_end - sel_start;
+                    let after = seg_end - sel_end;
+
+                    if before > 0 {
+                        runs.push(style.clone().to_run(before));
+                    }
+
+                    let mut marked_style = style.clone();
+                    marked_style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(window.text_style().color),
+                        wavy: false,
+                    });
+                    runs.push(marked_style.to_run(inside));
+
+                    if after > 0 {
+                        runs.push(style.to_run(after));
+                    }
+                } else {
+                    runs.push(style.to_run(seg.len));
+                }
+            }
+        }
+
+        self.styled_text = StyledText::new(render_text.clone()).with_runs(runs);
+        let (layout_id, _) =
+            self.styled_text
+                .request_layout(global_element_id, inspector_id, window, cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.styled_text
+            .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+
+        let text_layout = self.styled_text.layout().clone();
+        let block_path = self.block_path.clone();
+        let text = self.text.clone();
+        let segments = self.segments.clone();
+        self.state.update(cx, |state, _| {
+            state.layout_cache.insert(
+                block_path,
+                LineLayoutCache {
+                    bounds,
+                    text_layout: text_layout.clone(),
+                    text,
+                    segments,
+                },
+            );
+        });
+
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let hitbox = prepaint.clone();
+        window.set_cursor_style(CursorStyle::IBeam, &hitbox);
+
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+
+        // Paint selection/caret for this row.
+        let (selection, is_focused) = {
+            let state = self.state.read(cx);
+            (
+                state.editor.selection().clone(),
+                state.focus_handle.is_focused(window),
+            )
+        };
+        let layout = self.styled_text.layout().clone();
+        let line_height = layout.line_height();
+
+        if selection.is_collapsed() {
+            if selection
+                .focus
+                .path
+                .split_last()
+                .map(|(_, p)| p == self.block_path.as_slice())
+                .unwrap_or(false)
+                && is_focused
+            {
+                let caret_ix = {
+                    let state = self.state.read(cx);
+                    state.row_offset_for_point(&selection.focus).unwrap_or(0)
+                }
+                .min(layout.len());
+                if let Some(pos) = layout
+                    .position_for_index(caret_ix)
+                    .or_else(|| layout.position_for_index(layout.len()))
+                {
+                    window.paint_quad(gpui::quad(
+                        Bounds::from_corners(pos, point(pos.x + px(1.5), pos.y + line_height)),
+                        px(0.),
+                        window.text_style().color,
+                        gpui::Edges::default(),
+                        gpui::transparent_black(),
+                        gpui::BorderStyle::default(),
+                    ));
+                }
+            }
+            return;
+        }
+
+        let mut start = selection.anchor.clone();
+        let mut end = selection.focus.clone();
+        if start.path == end.path {
+            if end.offset < start.offset {
+                std::mem::swap(&mut start, &mut end);
+            }
+        } else if end.path < start.path {
+            std::mem::swap(&mut start, &mut end);
+        }
+        if start.path.len() < 2 || end.path.len() < 2 {
+            return;
+        }
+
+        let Some(start_block) = start.path.split_last().map(|(_, p)| p) else {
+            return;
+        };
+        let Some(end_block) = end.path.split_last().map(|(_, p)| p) else {
+            return;
+        };
+        if self.block_path.as_slice() < start_block || self.block_path.as_slice() > end_block {
+            return;
+        }
+
+        let row_len = self.text.len();
+        let (a, b) = if start_block == end_block {
+            let state = self.state.read(cx);
+            let a = state.row_offset_for_point(&start).unwrap_or(0).min(row_len);
+            let b = state.row_offset_for_point(&end).unwrap_or(0).min(row_len);
+            (a, b)
+        } else if self.block_path.as_slice() == start_block {
+            let state = self.state.read(cx);
+            let a = state.row_offset_for_point(&start).unwrap_or(0).min(row_len);
+            (a, row_len)
+        } else if self.block_path.as_slice() == end_block {
+            let state = self.state.read(cx);
+            let b = state.row_offset_for_point(&end).unwrap_or(0).min(row_len);
+            (0, b)
+        } else {
+            (0, row_len)
+        };
+
+        if a >= b {
+            return;
+        }
+
+        Self::paint_selection_range(
+            &layout,
+            a..b,
+            &bounds,
+            line_height,
+            window,
+            cx.theme().selection,
+        );
+    }
+}
+
+pub(crate) struct RichTextInputHandlerElement {
+    state: Entity<RichTextState>,
+}
+
+impl RichTextInputHandlerElement {
+    pub(crate) fn new(state: Entity<RichTextState>) -> Self {
+        Self { state }
+    }
+}
+
+impl IntoElement for RichTextInputHandlerElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for RichTextInputHandlerElement {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = gpui::Style::default();
+        style.size.width = gpui::relative(1.).into();
+        style.size.height = gpui::relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.state.update(cx, |state, _| {
+            state.viewport_bounds = bounds;
+        });
+        // Mirror the existing rich text editor behavior: capture mouse events for selection,
+        // but allow scrolling to propagate to the underlying scroll area.
+        window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll)
+    }
+
+    fn paint(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.state.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.state.clone()),
+            cx,
+        );
+
+        window.set_cursor_style(CursorStyle::IBeam, prepaint);
+
+        // Mouse down focuses and sets caret.
+        window.on_mouse_event({
+            let state = self.state.clone();
+            let hitbox = prepaint.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble() || event.button != MouseButton::Left {
+                    return;
+                }
+                if !hitbox.is_hovered(window) {
+                    return;
+                }
+
+                // Cmd/Ctrl-click opens a link instead of moving the caret.
+                if event.modifiers.secondary() && !event.modifiers.shift {
+                    let url = {
+                        let this = state.read(cx);
+                        let Some(block_path) = this.text_block_path_for_point(event.position)
+                        else {
+                            return;
+                        };
+                        let offset = this
+                            .offset_for_point_in_block(&block_path, event.position)
+                            .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                        this.link_at_offset(&block_path, offset)
+                    };
+                    if let Some(url) = url {
+                        cx.open_url(&url);
+                        return;
+                    }
+                }
+
+                let focus_handle = { state.read(cx).focus_handle.clone() };
+                window.focus(&focus_handle);
+
+                state.update(cx, |this, cx| {
+                    let Some(block_path) = this.text_block_path_for_point(event.position) else {
+                        return;
+                    };
+
+                    let offset = this
+                        .offset_for_point_in_block(&block_path, event.position)
+                        .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                    let focus = this
+                        .point_for_block_offset(&block_path, offset)
+                        .unwrap_or_else(|| {
+                            let mut path = block_path.clone();
+                            path.push(0);
+                            CorePoint::new(path, 0)
+                        });
+
+                    if event.click_count >= 3 {
+                        let range = 0..this.block_text_len_in_block(&block_path);
+                        let anchor = this
+                            .point_for_block_offset(&block_path, range.start)
+                            .unwrap_or_else(|| focus.clone());
+                        let focus = this
+                            .point_for_block_offset(&block_path, range.end)
+                            .unwrap_or_else(|| focus.clone());
+                        this.set_selection_points(anchor, focus, cx);
+                        // Do not enter "drag selecting" mode on multi-click. This avoids tiny mouse
+                        // movements between down/up being interpreted as a drag that expands the
+                        // selection across paragraphs (which can look like "select all").
+                        this.selecting = false;
+                        this.selection_anchor = None;
+                        return;
+                    }
+
+                    if event.click_count == 2 {
+                        let text = this.text_block_text(&block_path).unwrap_or_default();
+                        let range =
+                            this.word_or_void_range_in_block(&block_path, text.as_str(), offset);
+                        let anchor = this
+                            .point_for_block_offset(&block_path, range.start)
+                            .unwrap_or_else(|| focus.clone());
+                        let focus = this
+                            .point_for_block_offset(&block_path, range.end)
+                            .unwrap_or_else(|| focus.clone());
+                        this.set_selection_points(anchor.clone(), focus, cx);
+                        this.selecting = false;
+                        this.selection_anchor = None;
+                        return;
+                    }
+
+                    let anchor = if event.modifiers.shift {
+                        this.editor.selection().anchor.clone()
+                    } else {
+                        focus.clone()
+                    };
+
+                    this.set_selection_points(anchor.clone(), focus, cx);
+                    this.selecting = true;
+                    this.selection_anchor = Some(anchor);
+                });
+            }
+        });
+
+        window.on_mouse_event({
+            let state = self.state.clone();
+            move |event: &MouseMoveEvent, _phase, _window, cx| {
+                if event.pressed_button != Some(MouseButton::Left) {
+                    return;
+                }
+                state.update(cx, |this, cx| {
+                    if !this.selecting {
+                        return;
+                    }
+                    let Some(block_path) = this.text_block_path_for_point(event.position) else {
+                        return;
+                    };
+                    let offset = this
+                        .offset_for_point_in_block(&block_path, event.position)
+                        .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                    let focus = this
+                        .point_for_block_offset(&block_path, offset)
+                        .unwrap_or_else(|| {
+                            let mut path = block_path.clone();
+                            path.push(0);
+                            CorePoint::new(path, 0)
+                        });
+                    let anchor = this
+                        .selection_anchor
+                        .clone()
+                        .unwrap_or_else(|| focus.clone());
+                    this.set_selection_points(anchor, focus, cx);
+                });
+            }
+        });
+
+        window.on_mouse_event({
+            let state = self.state.clone();
+            move |event: &MouseUpEvent, _phase, _window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                state.update(cx, |this, cx| {
+                    this.selecting = false;
+                    this.selection_anchor = None;
+                    cx.notify();
+                });
+            }
+        });
+    }
+}
+
+impl Render for RichTextState {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let state = cx.entity().clone();
+
+        if !self.did_auto_focus && !window.is_inspector_picking(cx) {
+            window.focus(&self.focus_handle);
+            self.did_auto_focus = true;
+        }
+
+        let mut blocks: Vec<AnyElement> = Vec::new();
+        for (row, node) in self.editor.doc().children.iter().enumerate() {
+            match node {
+                Node::Element(el) if el.kind == "paragraph" => {
+                    blocks.push(
+                        RichTextLineElement::new(state.clone(), vec![row]).into_any_element(),
+                    );
+                }
+                Node::Element(el) if el.kind == "list_item" => {
+                    let list_type = el
+                        .attrs
+                        .get("list_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("bulleted");
+                    let marker = if list_type == "ordered" {
+                        let ix = el
+                            .attrs
+                            .get("list_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1);
+                        format!("{ix}.")
+                    } else {
+                        "•".to_string()
+                    };
+                    let level = el
+                        .attrs
+                        .get("list_level")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let indent = px(16. * level as f32);
+                    blocks.push(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(8.))
+                            .pl(indent)
+                            .child(
+                                div()
+                                    .w(px(24.))
+                                    .flex()
+                                    .justify_end()
+                                    .text_color(theme.muted_foreground)
+                                    .child(marker),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(RichTextLineElement::new(state.clone(), vec![row])),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                Node::Element(el) if el.kind == "table" => {
+                    let mut rows: Vec<AnyElement> = Vec::new();
+                    for (row_ix, row_node) in el.children.iter().enumerate() {
+                        let Node::Element(row_el) = row_node else {
+                            continue;
+                        };
+                        if row_el.kind != "table_row" {
+                            continue;
+                        }
+
+                        let mut cells: Vec<AnyElement> = Vec::new();
+                        for (cell_ix, cell_node) in row_el.children.iter().enumerate() {
+                            let Node::Element(cell_el) = cell_node else {
+                                continue;
+                            };
+                            if cell_el.kind != "table_cell" {
+                                continue;
+                            }
+
+                            let mut cell_blocks: Vec<AnyElement> = Vec::new();
+                            for (block_ix, block_node) in cell_el.children.iter().enumerate() {
+                                let block_path = vec![row, row_ix, cell_ix, block_ix];
+                                match block_node {
+                                    Node::Element(block_el) if block_el.kind == "paragraph" => {
+                                        cell_blocks.push(
+                                            RichTextLineElement::new(state.clone(), block_path)
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    Node::Element(block_el) if block_el.kind == "list_item" => {
+                                        let list_type = block_el
+                                            .attrs
+                                            .get("list_type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("bulleted");
+                                        let marker = if list_type == "ordered" {
+                                            let ix = block_el
+                                                .attrs
+                                                .get("list_index")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(1);
+                                            format!("{ix}.")
+                                        } else {
+                                            "•".to_string()
+                                        };
+                                        let level = block_el
+                                            .attrs
+                                            .get("list_level")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let indent = px(16. * level as f32);
+                                        cell_blocks.push(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_start()
+                                                .gap(px(8.))
+                                                .pl(indent)
+                                                .child(
+                                                    div()
+                                                        .w(px(24.))
+                                                        .flex()
+                                                        .justify_end()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(marker),
+                                                )
+                                                .child(div().flex_1().min_w(px(0.)).child(
+                                                    RichTextLineElement::new(
+                                                        state.clone(),
+                                                        block_path,
+                                                    ),
+                                                ))
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    Node::Void(v) if v.kind == "divider" => {
+                                        cell_blocks.push(
+                                            div()
+                                                .py(px(8.))
+                                                .child(div().w_full().h(px(1.)).bg(theme.border))
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    _ => {
+                                        cell_blocks.push(
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .italic()
+                                                .child("<unknown cell block>")
+                                                .into_any_element(),
+                                        );
+                                    }
+                                }
+                            }
+
+                            cells.push(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .p(px(6.))
+                                    .child(div().flex_col().gap(px(6.)).children(cell_blocks))
+                                    .into_any_element(),
+                            );
+                        }
+
+                        rows.push(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(6.))
+                                .children(cells)
+                                .into_any_element(),
+                        );
+                    }
+
+                    blocks.push(
+                        div()
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded(theme.radius / 2.)
+                            .p(px(6.))
+                            .child(div().flex_col().gap(px(6.)).children(rows))
+                            .into_any_element(),
+                    );
+                }
+                Node::Void(v) if v.kind == "divider" => {
+                    blocks.push(
+                        div()
+                            .py(px(8.))
+                            .child(div().w_full().h(px(1.)).bg(theme.border))
+                            .into_any_element(),
+                    );
+                }
+                _ => {
+                    blocks.push(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .italic()
+                            .child(format!(
+                                "<unknown node at {row}: {:?}>",
+                                self.editor.doc().children.get(row).map(|n| match n {
+                                    Node::Element(el) => el.kind.as_str(),
+                                    Node::Void(v) => v.kind.as_str(),
+                                    Node::Text(_) => "text",
+                                })
+                            ))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+
+        div()
+            .id(("richtext-next", cx.entity_id()))
+            .key_context(CONTEXT)
+            .track_focus(&self.focus_handle)
+            .tab_index(0)
+            .w_full()
+            .h_full()
+            .relative()
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .when(!window.is_inspector_picking(cx), |this| {
+                this.on_action(window.listener_for(&state, RichTextState::backspace))
+                    .on_action(window.listener_for(&state, RichTextState::delete))
+                    .on_action(window.listener_for(&state, RichTextState::enter))
+                    .on_action(window.listener_for(&state, RichTextState::left))
+                    .on_action(window.listener_for(&state, RichTextState::right))
+                    .on_action(window.listener_for(&state, RichTextState::select_left))
+                    .on_action(window.listener_for(&state, RichTextState::select_right))
+                    .on_action(window.listener_for(&state, RichTextState::undo))
+                    .on_action(window.listener_for(&state, RichTextState::redo))
+                    .on_action(window.listener_for(&state, RichTextState::copy))
+                    .on_action(window.listener_for(&state, RichTextState::cut))
+                    .on_action(window.listener_for(&state, RichTextState::paste))
+                    .on_action(window.listener_for(&state, RichTextState::select_all))
+                    .on_action(window.listener_for(&state, RichTextState::insert_divider))
+                    .on_action(window.listener_for(&state, RichTextState::insert_mention))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_bold))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_bulleted_list))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_ordered_list))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .child(RichTextInputHandlerElement::new(state.clone())),
+            )
+            .child(
+                div()
+                    .id("scroll-area")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll_handle)
+                    .child(div().p(px(12.)).flex_col().gap(px(6.)).children(blocks)),
+            )
+    }
+}
+
+fn utf16_to_byte(s: &str, utf16_ix: usize) -> usize {
+    if utf16_ix == 0 {
+        return 0;
+    }
+    let mut utf16_count = 0usize;
+    for (byte_ix, ch) in s.char_indices() {
+        if utf16_count >= utf16_ix {
+            return byte_ix;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    s.len()
+}
+
+fn byte_to_utf16(s: &str, byte_ix: usize) -> usize {
+    let byte_ix = byte_ix.min(s.len());
+    let mut utf16_count = 0usize;
+    for (ix, ch) in s.char_indices() {
+        if ix >= byte_ix {
+            break;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    utf16_count
+}
+
+fn byte_to_utf16_range(s: &str, range: Range<usize>) -> Range<usize> {
+    byte_to_utf16(s, range.start)..byte_to_utf16(s, range.end)
 }
