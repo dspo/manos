@@ -7,6 +7,7 @@
 
 ## 阶段性进展（当前实现）
 - 可运行 demo app：`crates/git-viewer`（`cargo run -p git-viewer`）。
+- 支持命令行启动并指定工作目录：`git-viewer [path]`（或 `cargo run -p git-viewer -- [path]`）。
 - Git 集成方式：**调用系统 `git` 命令**（`std::process::Command`），当前未引入 `libgit2/gix` 等 Rust git 库（便于快速覆盖真实工作流与保持行为一致）。
 - 启动降级：启动时探测 `git` 是否可执行；缺失时提示并禁用仓库状态与 Git 操作（demo 仍可用）。
 - 文件列表：`git status --porcelain=v2 -z` 拉取；过滤 All/Conflicts/Staged/Unstaged/Untracked；点击文件进入 diff 或冲突视图。
