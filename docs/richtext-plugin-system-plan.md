@@ -306,6 +306,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 内置命令与查询（便于工具层/插件协作）：
 - Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`toggle.wrap_selection`、`toggle.unwrap`、`toggle.toggle_collapsed`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
 - Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`block.indent_level`、`blockquote.is_active`、`toggle.is_active`、`toggle.is_collapsed`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
+- Transaction Transform IDs（示例）：`autoformat.on_space`
 - 代码位置：`crates/plate-core/src/plugin.rs`
 
 ### 当前进度（阶段性）
@@ -322,6 +323,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Iteration 11（Todo/Task）已实现：TodoPlugin（schema + normalize + commands + query）+ checkbox 前缀可点击（command → tx → undo）+ toolbar Todo。
 - Iteration 12（Indent）已实现：IndentPlugin（block.indent_* + normalize + query）+ list_level/outdent 支持 + toolbar Indent。
 - Iteration 13（Toggle）已实现：TogglePlugin（schema + normalize + commands + query）+ view 折叠渲染 + chevron 命中测试 + toolbar Toggle/Collapse。
+- Iteration 14（Transaction Hooks + Autoformat）已实现：新增 `transaction_transforms` 扩展点（apply 前可预览/改写 tx）+ AutoformatPlugin（Markdown shortcuts）端到端闭环。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -800,7 +802,50 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - 若折叠时光标在内容区，折叠后光标自动移动到 title 末尾（可见且可继续输入）。
   - **键盘导航**：折叠状态下用上下方向键移动光标，不会落入 toggle 的隐藏内容。
   - **Undo/Redo**：折叠/展开、wrap/unwrap 都可被 undo/redo 正确回滚。
-  - **JSON round-trip**：Save As → Open 后 `toggle` 的 children 结构与 `collapsed` 状态保持一致（未启用插件也不丢数据）。
+- **JSON round-trip**：Save As → Open 后 `toggle` 的 children 结构与 `collapsed` 状态保持一致（未启用插件也不丢数据）。
+
+### Iteration 14：Transaction Hooks（tx transform）+ Autoformat（Markdown shortcuts）
+
+> 目标：补齐 Plate/Slate 常见的“输入规则/Autoformat”能力所必需的 **Transaction Hook** 扩展点：插件可在 `apply(tx)` 之前基于“预览结果”改写 transaction；并用 AutoformatPlugin 做端到端验证（不在 view 层硬编码规则）。
+
+**要实现什么**
+- `gpui-plate-core`：
+  - 新增插件扩展点：`transaction_transforms()`：
+    - `Editor::apply(tx)` 在真正 apply 之前，按注册顺序执行 tx transforms。
+    - transform 可按需调用 `editor.preview_transaction(tx)` 拿到 `TransactionPreview { doc, selection }`（模拟 apply 当前 tx + normalize 后的预览结果），避免为每次输入都强制克隆整棵 doc。
+    - transform 可返回新的 tx（通常为“原 tx ops + 追加 ops”，并覆盖 `selection_after`），以表达输入规则/语义改写；返回 `None` 则不改写。
+  - AutoformatPlugin：
+    - transform id：`autoformat.on_space`
+    - 触发条件（保守且可预测）：
+      - 仅对 `tx.meta.source == "ime:replace_text"` 生效（避免 IME preedit `ime:replace_and_mark_text` 被误改写）。
+      - selection 必须 collapsed。
+      - 当前 paragraph 的全文必须**恰好等于 marker**，且 caret 位于 marker 末尾（避免在非空行误触发）。
+    - 支持规则（可扩展）：
+      - `- ` / `* ` → bulleted list
+      - `1. ` → ordered list
+      - `> ` → blockquote
+      - `# `…`###### ` → heading level 1..6
+      - `[ ] ` / `[x] ` → todo（checked false/true）
+    - 语义要求：改写后 caret 必须落在“转换后的内容起点”，并可 undo/redo。
+- `gpui-manos-plate`（view）：
+  - 无需新增输入规则逻辑：继续按现有方式产出 tx（`source: "ime:replace_text"`），由 core transform 统一做 autoformat。
+
+**怎么实现（关键做法）**
+- 在 core 内实现 `editor.preview_transaction(tx)`：克隆 doc/selection，模拟 apply tx + normalize，生成 `TransactionPreview`（仅在 transform 需要时调用）。
+- AutoformatOnSpace 优先从 tx 的“block children replace ops”还原当前块文本与 caret 全局 offset（无 doc clone）；必要时 fallback 到 `preview_transaction`；转换用“追加 Remove/Insert block node ops”表达（保证 undo 语义与审计性）。
+
+**要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
+- 手动验收清单（Iteration 14 通过标准）：
+  - 在空段落行首依次键入下列 marker，并确认自动转换且光标在内容起点：
+    - `- ` / `* ` → 列表（bulleted）
+    - `1. ` → 列表（ordered）
+    - `> ` → 引用（blockquote）
+    - `# ` / `## ` / `### ` → heading level 1..3（可继续扩到 6）
+    - `[ ] ` / `[x] ` → todo（checked false/true）
+  - **Undo/Redo**：转换动作可被 undo/redo 正确回滚。
+  - **IME 安全**：中文输入法 composition（预编辑态）不应被 autoformat 打断（本阶段用单测覆盖 `ime:replace_and_mark_text` 不触发；实际中文 IME 可在 story 里手动验证）。
 
 ## 9. 风险与对策
 

@@ -91,9 +91,23 @@ pub trait NormalizePass: Send + Sync {
     fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op>;
 }
 
+#[derive(Debug, Clone)]
+pub struct TransactionPreview {
+    pub doc: Document,
+    pub selection: Selection,
+}
+
+pub trait TransactionTransform: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn transform(&self, editor: &crate::core::Editor, tx: &Transaction) -> Option<Transaction>;
+}
+
 pub trait PlatePlugin: Send + Sync {
     fn id(&self) -> &'static str;
     fn node_specs(&self) -> Vec<NodeSpec> {
+        Vec::new()
+    }
+    fn transaction_transforms(&self) -> Vec<Box<dyn TransactionTransform>> {
         Vec::new()
     }
     fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
@@ -110,6 +124,7 @@ pub trait PlatePlugin: Send + Sync {
 #[derive(Default)]
 pub struct PluginRegistry {
     node_specs: HashMap<String, NodeSpec>,
+    transaction_transforms: Vec<Box<dyn TransactionTransform>>,
     normalize_passes: Vec<Box<dyn NormalizePass>>,
     commands: HashMap<String, CommandSpec>,
     queries: HashMap<String, QuerySpec>,
@@ -141,6 +156,7 @@ impl PluginRegistry {
             Box::new(CoreNormalizePlugin),
             Box::new(CoreCommandsPlugin),
             Box::new(MarksCommandsPlugin),
+            Box::new(AutoformatPlugin),
             Box::new(HeadingPlugin),
             Box::new(BlockquotePlugin),
             Box::new(TogglePlugin),
@@ -160,6 +176,9 @@ impl PluginRegistry {
             }
             self.node_specs.insert(spec.kind.clone(), spec);
         }
+
+        self.transaction_transforms
+            .extend(plugin.transaction_transforms());
 
         self.normalize_passes.extend(plugin.normalize_passes());
 
@@ -182,6 +201,10 @@ impl PluginRegistry {
 
     pub fn node_specs(&self) -> &HashMap<String, NodeSpec> {
         &self.node_specs
+    }
+
+    pub fn transaction_transforms(&self) -> &[Box<dyn TransactionTransform>] {
+        &self.transaction_transforms
     }
 
     pub fn normalize_passes(&self) -> &[Box<dyn NormalizePass>] {
@@ -849,6 +872,284 @@ impl PlatePlugin for MarksCommandsPlugin {
                 }),
             },
         ]
+    }
+}
+
+struct AutoformatPlugin;
+
+impl PlatePlugin for AutoformatPlugin {
+    fn id(&self) -> &'static str {
+        "autoformat"
+    }
+
+    fn transaction_transforms(&self) -> Vec<Box<dyn TransactionTransform>> {
+        vec![Box::new(AutoformatOnSpace)]
+    }
+}
+
+struct AutoformatOnSpace;
+
+impl TransactionTransform for AutoformatOnSpace {
+    fn id(&self) -> &'static str {
+        "autoformat.on_space"
+    }
+
+    fn transform(&self, editor: &crate::core::Editor, tx: &Transaction) -> Option<Transaction> {
+        let source = tx.meta.source.as_deref()?;
+        if source != "ime:replace_text" {
+            return None;
+        }
+
+        fn replace_node_ops(path: &[usize], node: Node) -> Vec<Op> {
+            vec![
+                Op::RemoveNode {
+                    path: path.to_vec(),
+                },
+                Op::InsertNode {
+                    path: path.to_vec(),
+                    node,
+                },
+            ]
+        }
+
+        let mut extra_ops: Vec<Op> = Vec::new();
+        let mut selection_after: Option<Selection> = None;
+
+        let Some((block_path, caret_global, text, marks)) = (|| {
+            let (doc_after, selection_after) = if let Some(sel) = &tx.selection_after {
+                (None, sel.clone())
+            } else {
+                let preview = editor.preview_transaction(tx).ok()?;
+                (Some(preview.doc), preview.selection)
+            };
+
+            if !selection_after.is_collapsed() {
+                return None;
+            }
+
+            let focus = &selection_after.focus;
+            let (focus_child_ix, block_path) = focus.path.split_last()?;
+            let block_path = block_path.to_vec();
+            let focus_child_ix = *focus_child_ix;
+
+            let children = if let Some(children) = children_after_replace_ops(tx, &block_path) {
+                children
+            } else if let Some(doc) = doc_after {
+                let Node::Element(el) = node_at_path(&doc, &block_path)? else {
+                    return None;
+                };
+                el.children.clone()
+            } else {
+                return None;
+            };
+
+            let mut out_text = String::new();
+            let mut out_marks = Marks::default();
+            let mut have_marks = false;
+            for child in &children {
+                match child {
+                    Node::Text(t) => {
+                        if !have_marks {
+                            out_marks = t.marks.clone();
+                            have_marks = true;
+                        }
+                        out_text.push_str(&t.text);
+                    }
+                    Node::Void(_) => return None,
+                    Node::Element(_) => return None,
+                }
+            }
+
+            let caret_global = point_global_offset(&children, focus_child_ix, focus.offset);
+
+            Some((block_path, caret_global, out_text, out_marks))
+        })() else {
+            return None;
+        };
+
+        fn children_after_replace_ops(tx: &Transaction, block_path: &[usize]) -> Option<Vec<Node>> {
+            let mut saw_remove = false;
+            let mut inserted: Vec<(usize, Node)> = Vec::new();
+
+            for op in &tx.ops {
+                match op {
+                    Op::RemoveNode { path }
+                        if path.len() == block_path.len() + 1 && path.starts_with(block_path) =>
+                    {
+                        saw_remove = true;
+                    }
+                    Op::InsertNode { path, node }
+                        if path.len() == block_path.len() + 1 && path.starts_with(block_path) =>
+                    {
+                        let child_ix = *path.last()?;
+                        inserted.push((child_ix, node.clone()));
+                    }
+                    _ => {}
+                }
+            }
+
+            if !saw_remove || inserted.is_empty() {
+                return None;
+            }
+
+            inserted.sort_by_key(|(ix, _)| *ix);
+            for (expected, (ix, _)) in inserted.iter().enumerate() {
+                if *ix != expected {
+                    return None;
+                }
+            }
+
+            Some(inserted.into_iter().map(|(_, node)| node).collect())
+        }
+
+        let Node::Element(block_el) = node_at_path(editor.doc(), &block_path)? else {
+            return None;
+        };
+        if block_el.kind != "paragraph" {
+            return None;
+        }
+        if !element_is_text_block(block_el, editor.registry()) {
+            return None;
+        }
+
+        let empty_text_children = || -> Vec<Node> {
+            vec![Node::Text(TextNode {
+                text: String::new(),
+                marks: marks.clone(),
+            })]
+        };
+
+        match text.as_str() {
+            "- " | "* " if caret_global == 2 && text.len() == 2 => {
+                let indent = block_el
+                    .attrs
+                    .get("indent")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let mut attrs = block_el.attrs.clone();
+                attrs.remove("indent");
+                attrs.remove("list_index");
+                attrs.insert(
+                    "list_type".to_string(),
+                    Value::String("bulleted".to_string()),
+                );
+                if indent > 0 {
+                    attrs.insert(
+                        "list_level".to_string(),
+                        Value::Number(serde_json::Number::from(indent.min(MAX_INDENT_LEVEL))),
+                    );
+                }
+                let children = empty_text_children();
+                let node = Node::Element(ElementNode {
+                    kind: "list_item".to_string(),
+                    attrs,
+                    children: children.clone(),
+                });
+                extra_ops.extend(replace_node_ops(&block_path, node));
+                let caret = point_for_global_offset(&block_path, &children, 0);
+                selection_after = Some(Selection::collapsed(caret));
+            }
+            "1. " if caret_global == 3 && text.len() == 3 => {
+                let indent = block_el
+                    .attrs
+                    .get("indent")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let mut attrs = block_el.attrs.clone();
+                attrs.remove("indent");
+                attrs.remove("list_index");
+                attrs.insert(
+                    "list_type".to_string(),
+                    Value::String("ordered".to_string()),
+                );
+                if indent > 0 {
+                    attrs.insert(
+                        "list_level".to_string(),
+                        Value::Number(serde_json::Number::from(indent.min(MAX_INDENT_LEVEL))),
+                    );
+                }
+                let children = empty_text_children();
+                let node = Node::Element(ElementNode {
+                    kind: "list_item".to_string(),
+                    attrs,
+                    children: children.clone(),
+                });
+                extra_ops.extend(replace_node_ops(&block_path, node));
+                let caret = point_for_global_offset(&block_path, &children, 0);
+                selection_after = Some(Selection::collapsed(caret));
+            }
+            "> " if caret_global == 2 && text.len() == 2 => {
+                let children = empty_text_children();
+                let para = Node::Element(ElementNode {
+                    kind: "paragraph".to_string(),
+                    attrs: block_el.attrs.clone(),
+                    children: children.clone(),
+                });
+                let quote = Node::Element(ElementNode {
+                    kind: "blockquote".to_string(),
+                    attrs: Attrs::default(),
+                    children: vec![para],
+                });
+                extra_ops.extend(replace_node_ops(&block_path, quote));
+                let mut inner_path = block_path.clone();
+                inner_path.push(0);
+                let caret = point_for_global_offset(&inner_path, &children, 0);
+                selection_after = Some(Selection::collapsed(caret));
+            }
+            "[ ] " | "[x] " | "[X] " if caret_global == 4 && text.len() == 4 => {
+                let checked = matches!(text.as_str(), "[x] " | "[X] ");
+                let mut attrs = block_el.attrs.clone();
+                attrs.insert("checked".to_string(), Value::Bool(checked));
+                let children = empty_text_children();
+                let node = Node::Element(ElementNode {
+                    kind: "todo_item".to_string(),
+                    attrs,
+                    children: children.clone(),
+                });
+                extra_ops.extend(replace_node_ops(&block_path, node));
+                let caret = point_for_global_offset(&block_path, &children, 0);
+                selection_after = Some(Selection::collapsed(caret));
+            }
+            marker if marker.ends_with(' ') && marker.chars().all(|ch| ch == '#' || ch == ' ') => {
+                let hashes = marker.chars().take_while(|ch| *ch == '#').count();
+                if hashes >= 1
+                    && hashes <= 6
+                    && marker == format!("{} ", "#".repeat(hashes))
+                    && caret_global == marker.len()
+                    && text.len() == marker.len()
+                {
+                    let mut attrs = block_el.attrs.clone();
+                    attrs.insert(
+                        "level".to_string(),
+                        Value::Number(serde_json::Number::from(hashes as u64)),
+                    );
+                    let children = empty_text_children();
+                    let node = Node::Element(ElementNode {
+                        kind: "heading".to_string(),
+                        attrs,
+                        children: children.clone(),
+                    });
+                    extra_ops.extend(replace_node_ops(&block_path, node));
+                    let caret = point_for_global_offset(&block_path, &children, 0);
+                    selection_after = Some(Selection::collapsed(caret));
+                }
+            }
+            _ => {}
+        }
+
+        if extra_ops.is_empty() {
+            return None;
+        }
+
+        let mut ops = tx.ops.clone();
+        ops.extend(extra_ops);
+
+        let mut out = Transaction::new(ops);
+        out.meta = tx.meta.clone();
+        if let Some(sel) = selection_after {
+            out.selection_after = Some(sel);
+        }
+        Some(out)
     }
 }
 

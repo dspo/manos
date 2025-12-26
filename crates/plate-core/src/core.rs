@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::ops::{Op, Path, Transaction};
 use crate::plugin::{
     CommandError, CommandSpec, NodeSpec, NormalizePass, PluginRegistry, QueryError,
+    TransactionPreview,
 };
 
 pub type Attrs = BTreeMap<String, serde_json::Value>;
@@ -313,6 +314,7 @@ impl Editor {
     }
 
     pub fn apply(&mut self, tx: Transaction) -> Result<(), ApplyError> {
+        let tx = self.transform_transaction(tx);
         let selection_before = self.selection.clone();
 
         let mut inverse_ops: Vec<Op> = Vec::new();
@@ -344,6 +346,48 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    fn transform_transaction(&self, mut tx: Transaction) -> Transaction {
+        for transform in self.registry.transaction_transforms() {
+            if let Some(next) = transform.transform(self, &tx) {
+                tx = next;
+            }
+        }
+        tx
+    }
+
+    pub fn preview_transaction(&self, tx: &Transaction) -> Result<TransactionPreview, ApplyError> {
+        let mut doc = self.doc.clone();
+        let mut selection = self.selection.clone();
+
+        for op in tx.ops.iter().cloned() {
+            let _ = apply_op_to(&mut doc, &mut selection, op)?;
+        }
+
+        if let Some(sel) = &tx.selection_after {
+            selection = sel.clone();
+        }
+
+        let mut converged = false;
+        for _ in 0..self.config.max_normalize_iterations {
+            let ops = self.registry.normalize(&doc);
+            if ops.is_empty() {
+                converged = true;
+                break;
+            }
+            for op in ops {
+                let _ = apply_op_to(&mut doc, &mut selection, op)?;
+            }
+        }
+
+        if !converged {
+            return Err(ApplyError::NormalizeDidNotConverge);
+        }
+
+        selection = self.registry.normalize_selection(&doc, &selection);
+
+        Ok(TransactionPreview { doc, selection })
     }
 
     pub fn run_command(
@@ -400,68 +444,69 @@ impl Editor {
     }
 
     fn apply_op(&mut self, op: Op) -> Result<Op, ApplyError> {
-        match op {
-            Op::InsertText { path, offset, text } => {
-                let text_node = node_text_mut(&mut self.doc, &path)?;
-                let offset = clamp_to_char_boundary(&text_node.text, offset);
-                text_node.text.insert_str(offset, &text);
-                transform_selection_insert_text(&mut self.selection, &path, offset, text.len());
-                Ok(Op::RemoveText {
-                    path,
-                    range: offset..offset + text.len(),
-                })
-            }
-            Op::RemoveText { path, range } => {
-                let text_node = node_text_mut(&mut self.doc, &path)?;
-                let start =
-                    clamp_to_char_boundary(&text_node.text, range.start.min(text_node.text.len()));
-                let end =
-                    clamp_to_char_boundary(&text_node.text, range.end.min(text_node.text.len()));
-                if start >= end {
-                    return Ok(Op::InsertText {
-                        path,
-                        offset: start,
-                        text: String::new(),
-                    });
-                }
-                let removed = text_node.text[start..end].to_string();
-                text_node.text.replace_range(start..end, "");
-                transform_selection_remove_text(&mut self.selection, &path, start..end);
-                Ok(Op::InsertText {
+        apply_op_to(&mut self.doc, &mut self.selection, op)
+    }
+}
+
+fn apply_op_to(doc: &mut Document, selection: &mut Selection, op: Op) -> Result<Op, ApplyError> {
+    match op {
+        Op::InsertText { path, offset, text } => {
+            let text_node = node_text_mut(doc, &path)?;
+            let offset = clamp_to_char_boundary(&text_node.text, offset);
+            text_node.text.insert_str(offset, &text);
+            transform_selection_insert_text(selection, &path, offset, text.len());
+            Ok(Op::RemoveText {
+                path,
+                range: offset..offset + text.len(),
+            })
+        }
+        Op::RemoveText { path, range } => {
+            let text_node = node_text_mut(doc, &path)?;
+            let start =
+                clamp_to_char_boundary(&text_node.text, range.start.min(text_node.text.len()));
+            let end = clamp_to_char_boundary(&text_node.text, range.end.min(text_node.text.len()));
+            if start >= end {
+                return Ok(Op::InsertText {
                     path,
                     offset: start,
-                    text: removed,
-                })
+                    text: String::new(),
+                });
             }
-            Op::InsertNode { path, node } => {
-                insert_node(&mut self.doc, &path, node)?;
-                transform_selection_insert_node(&mut self.selection, &path);
-                Ok(Op::RemoveNode { path })
-            }
-            Op::RemoveNode { path } => {
-                let removed = remove_node(&mut self.doc, &path)?;
-                transform_selection_remove_node(&mut self.selection, &path, &removed, &self.doc);
-                Ok(Op::InsertNode {
-                    path,
-                    node: removed,
-                })
-            }
-            Op::SetNodeAttrs { path, patch } => {
-                let node = node_mut(&mut self.doc, &path)?;
-                let old = match node {
-                    Node::Element(el) => patch_apply(&mut el.attrs, &patch),
-                    Node::Void(v) => patch_apply(&mut v.attrs, &patch),
-                    Node::Text(_) => {
-                        return Err(ApplyError::InvalidPath("Text has no attrs".into()));
-                    }
-                };
-                Ok(Op::SetNodeAttrs { path, patch: old })
-            }
-            Op::SetTextMarks { path, marks } => {
-                let text_node = node_text_mut(&mut self.doc, &path)?;
-                let old = std::mem::replace(&mut text_node.marks, marks);
-                Ok(Op::SetTextMarks { path, marks: old })
-            }
+            let removed = text_node.text[start..end].to_string();
+            text_node.text.replace_range(start..end, "");
+            transform_selection_remove_text(selection, &path, start..end);
+            Ok(Op::InsertText {
+                path,
+                offset: start,
+                text: removed,
+            })
+        }
+        Op::InsertNode { path, node } => {
+            insert_node(doc, &path, node)?;
+            transform_selection_insert_node(selection, &path);
+            Ok(Op::RemoveNode { path })
+        }
+        Op::RemoveNode { path } => {
+            let removed = remove_node(doc, &path)?;
+            transform_selection_remove_node(selection, &path, &removed, doc);
+            Ok(Op::InsertNode {
+                path,
+                node: removed,
+            })
+        }
+        Op::SetNodeAttrs { path, patch } => {
+            let node = node_mut(doc, &path)?;
+            let old = match node {
+                Node::Element(el) => patch_apply(&mut el.attrs, &patch),
+                Node::Void(v) => patch_apply(&mut v.attrs, &patch),
+                Node::Text(_) => return Err(ApplyError::InvalidPath("Text has no attrs".into())),
+            };
+            Ok(Op::SetNodeAttrs { path, patch: old })
+        }
+        Op::SetTextMarks { path, marks } => {
+            let text_node = node_text_mut(doc, &path)?;
+            let old = std::mem::replace(&mut text_node.marks, marks);
+            Ok(Op::SetTextMarks { path, marks: old })
         }
     }
 }
