@@ -304,8 +304,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
-- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
-- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
+- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
+- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`blockquote.is_active`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
 - 代码位置：`crates/plate-core/src/plugin.rs`
 
 ### 当前进度（阶段性）
@@ -318,6 +318,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Iteration 7（壳层替换）已实现：`gpui-manos-plate` 已从旧 `crates/rich_text` monolith 切换为 `gpui-plate-core` 驱动的最终架构实现。
 - Iteration 8（Marks Pro）已实现：Italic/Underline/Strike/Code/Colors（命令/查询/渲染/工具栏）闭环。
 - Iteration 9（Schema-driven TextBlock + Heading）已实现：text block 判定由 `node_specs` 驱动；新增 Heading 插件与 toolbar dropdown（H1/H2/H3/Paragraph）。
+- Iteration 10（容器型 Block + Blockquote）已实现：BlockquotePlugin（schema + normalize + commands + query）+ view 递归渲染（包含 table cell 内嵌容器）+ toolbar Quote。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -656,7 +657,23 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `story`：
   - toolbar 增加 Quote 按钮（wrap/unwrap）。
 
+**怎么实现（关键做法）**
+- core：
+  - `blockquote.wrap_selection`：将 selection 覆盖的 block 区间整体抽出，插入为 `blockquote(children=selected)`；并 remap selection 的 `path` 指向 quote 内部对应节点。
+  - `blockquote.unwrap`：从 selection 向上找最近 `blockquote`，移除 quote 并将 children 依序插回父容器；并 remap selection。
+  - normalize pass：保证 `blockquote` 永远至少包含一个 `paragraph("")`，避免空容器导致 selection 无落点。
+- view：
+  - 将渲染从“顶层 match + table 特判”重构为 `render_block(node, path)` 的递归渲染：
+    - text block：`RichTextLineElement::new(state, path)`（`path` 为该 block 的 element path）
+    - list_item：前缀 marker + line element（仍复用同一套 layout_cache/hit-test）
+    - blockquote：渲染为容器（左侧竖线 + children 的 block 列表），children 继续递归
+    - table：保留布局特判，但 cell 内 block 渲染仍走 `render_block`（允许嵌套 quote 等容器）
+- story：
+  - Quote 按钮只读 `blockquote.is_active`（query）决定 wrap/unwrap，只调用 command，不直连树结构。
+
 **要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
 - **Wrap/Unwrap**：选中 1~N 个段落点击 Quote → 变成 blockquote 容器；再点一次可还原。
 - **容器内编辑**：quote 内输入/换行/Undo/Redo 正常；鼠标点击可正确定位 caret。
 - **JSON round-trip**：Save As → Open 后 quote 结构稳定（normalize 后不漂移）。

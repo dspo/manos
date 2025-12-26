@@ -142,6 +142,7 @@ impl PluginRegistry {
             Box::new(CoreCommandsPlugin),
             Box::new(MarksCommandsPlugin),
             Box::new(HeadingPlugin),
+            Box::new(BlockquotePlugin),
             Box::new(ListPlugin),
             Box::new(TablePlugin),
             Box::new(MentionPlugin),
@@ -993,6 +994,128 @@ impl NormalizePass for NormalizeHeadingLevels {
     }
 }
 
+struct BlockquotePlugin;
+
+impl PlatePlugin for BlockquotePlugin {
+    fn id(&self) -> &'static str {
+        "blockquote"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "blockquote".to_string(),
+            role: NodeRole::Block,
+            is_void: false,
+            children: ChildConstraint::BlockOnly,
+        }]
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeBlockquoteChildren)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec {
+                id: "blockquote.wrap_selection".to_string(),
+                label: "Wrap selection in blockquote".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    wrap_selection_in_blockquote(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to wrap blockquote: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "blockquote.unwrap".to_string(),
+                label: "Unwrap blockquote".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    unwrap_nearest_blockquote(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to unwrap blockquote: {e:?}"))
+                            })
+                        })
+                }),
+            },
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "blockquote.is_active".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| Ok(Value::Bool(is_in_blockquote(editor)))),
+        }]
+    }
+}
+
+struct NormalizeBlockquoteChildren;
+
+impl NormalizePass for NormalizeBlockquoteChildren {
+    fn id(&self) -> &'static str {
+        "blockquote.ensure_non_empty"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_container(
+            children: &[Node],
+            parent_path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                if el.kind == "blockquote" && el.children.is_empty() {
+                    let mut path = parent_path.clone();
+                    path.push(ix);
+                    path.push(0);
+                    ops.push(Op::InsertNode {
+                        path,
+                        node: Node::paragraph(""),
+                    });
+                }
+            }
+
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                let spec_children = registry
+                    .node_specs
+                    .get(&el.kind)
+                    .map(|s| s.children.clone())
+                    .unwrap_or(ChildConstraint::Any);
+                if spec_children == ChildConstraint::InlineOnly || el.children.is_empty() {
+                    continue;
+                }
+
+                parent_path.push(ix);
+                normalize_container(&el.children, parent_path, registry, ops);
+                parent_path.pop();
+            }
+        }
+
+        normalize_container(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
 struct ListPlugin;
 
 impl PlatePlugin for ListPlugin {
@@ -1563,6 +1686,182 @@ fn unset_heading(editor: &mut crate::core::Editor) -> Result<Transaction, String
     ])
     .selection_after(selection_after)
     .source("command:block.unset_heading"))
+}
+
+fn is_in_blockquote(editor: &crate::core::Editor) -> bool {
+    nearest_blockquote_path(editor.doc(), &editor.selection().focus.path).is_some()
+}
+
+fn nearest_blockquote_path(doc: &Document, point_path: &[usize]) -> Option<Path> {
+    let mut path: Path = point_path.to_vec();
+    while !path.is_empty() {
+        if let Some(Node::Element(el)) = node_at_path(doc, &path) {
+            if el.kind == "blockquote" {
+                return Some(path);
+            }
+        }
+        path.pop();
+    }
+    None
+}
+
+fn children_at_path<'a>(doc: &'a Document, parent_path: &[usize]) -> Option<&'a [Node]> {
+    if parent_path.is_empty() {
+        return Some(&doc.children);
+    }
+    match node_at_path(doc, parent_path)? {
+        Node::Element(el) => Some(&el.children),
+        Node::Void(_) | Node::Text(_) => None,
+    }
+}
+
+fn wrap_selection_in_blockquote(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let (start, end) = ordered_selection_points(&sel);
+    let start_block_path = start
+        .path
+        .split_last()
+        .map(|(_, p)| p.to_vec())
+        .ok_or_else(|| "Selection start is not in a text block".to_string())?;
+    let end_block_path = end
+        .path
+        .split_last()
+        .map(|(_, p)| p.to_vec())
+        .ok_or_else(|| "Selection end is not in a text block".to_string())?;
+
+    let (start_ix, start_parent) = start_block_path
+        .split_last()
+        .ok_or_else(|| "Selection start is not a block node".to_string())?;
+    let (end_ix, end_parent) = end_block_path
+        .split_last()
+        .ok_or_else(|| "Selection end is not a block node".to_string())?;
+
+    if start_parent != end_parent {
+        return Err("Selection must be within a single block container".into());
+    }
+
+    let (start_ix, end_ix) = if start_ix <= end_ix {
+        (*start_ix, *end_ix)
+    } else {
+        (*end_ix, *start_ix)
+    };
+
+    let Some(parent_children) = children_at_path(editor.doc(), start_parent) else {
+        return Err("Selection parent is not a container".into());
+    };
+    if start_ix >= parent_children.len() || end_ix >= parent_children.len() {
+        return Err("Selection block range is out of bounds".into());
+    }
+
+    let selected: Vec<Node> = parent_children
+        .iter()
+        .cloned()
+        .take(end_ix + 1)
+        .skip(start_ix)
+        .collect();
+
+    let quote = Node::Element(ElementNode {
+        kind: "blockquote".to_string(),
+        attrs: Attrs::default(),
+        children: selected,
+    });
+
+    let mut ops: Vec<Op> = Vec::new();
+    for ix in (start_ix..=end_ix).rev() {
+        let mut path = start_parent.to_vec();
+        path.push(ix);
+        ops.push(Op::RemoveNode { path });
+    }
+    let mut insert_path = start_parent.to_vec();
+    insert_path.push(start_ix);
+    ops.push(Op::InsertNode {
+        path: insert_path.clone(),
+        node: quote,
+    });
+
+    let remap_point = |point: &Point| -> Point {
+        if !point.path.starts_with(start_parent) || point.path.len() < start_parent.len() + 2 {
+            return point.clone();
+        }
+        let block_ix = point.path[start_parent.len()];
+        if block_ix < start_ix || block_ix > end_ix {
+            return point.clone();
+        }
+        let mut new_path = start_parent.to_vec();
+        new_path.push(start_ix);
+        new_path.push(block_ix - start_ix);
+        new_path.extend_from_slice(&point.path[start_parent.len() + 1..]);
+        Point {
+            path: new_path,
+            offset: point.offset,
+        }
+    };
+
+    let selection_after = Selection {
+        anchor: remap_point(&sel.anchor),
+        focus: remap_point(&sel.focus),
+    };
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:blockquote.wrap_selection"))
+}
+
+fn unwrap_nearest_blockquote(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let Some(quote_path) = nearest_blockquote_path(editor.doc(), &sel.focus.path) else {
+        return Ok(Transaction::new(Vec::new()).source("command:blockquote.unwrap"));
+    };
+    let (quote_ix, parent_path) = quote_path
+        .split_last()
+        .ok_or_else(|| "Invalid blockquote path".to_string())?;
+    let quote_ix = *quote_ix;
+    let parent_path = parent_path.to_vec();
+    let Some(Node::Element(quote_el)) = node_at_path(editor.doc(), &quote_path).cloned() else {
+        return Err("Blockquote node not found".into());
+    };
+    if quote_el.kind != "blockquote" {
+        return Ok(Transaction::new(Vec::new()).source("command:blockquote.unwrap"));
+    }
+
+    let children = quote_el.children;
+
+    let mut ops: Vec<Op> = Vec::new();
+    ops.push(Op::RemoveNode {
+        path: quote_path.clone(),
+    });
+
+    for (i, node) in children.into_iter().enumerate() {
+        let mut path = parent_path.clone();
+        path.push(quote_ix + i);
+        ops.push(Op::InsertNode { path, node });
+    }
+
+    let remap_point = |point: &Point| -> Point {
+        if point.path.len() < quote_path.len() + 1 {
+            return point.clone();
+        }
+        if !point.path.starts_with(&quote_path) {
+            return point.clone();
+        }
+        let inner_ix = point.path[quote_path.len()];
+        let mut new_path = parent_path.clone();
+        new_path.push(quote_ix + inner_ix);
+        new_path.extend_from_slice(&point.path[quote_path.len() + 1..]);
+        Point {
+            path: new_path,
+            offset: point.offset,
+        }
+    };
+
+    let selection_after = Selection {
+        anchor: remap_point(&sel.anchor),
+        focus: remap_point(&sel.focus),
+    };
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:blockquote.unwrap"))
 }
 
 fn toggle_list(editor: &mut crate::core::Editor, list_type: &str) -> Result<(), String> {

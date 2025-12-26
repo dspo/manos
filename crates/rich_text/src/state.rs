@@ -2024,6 +2024,14 @@ impl RichTextState {
         _ = self.run_command_and_refresh("block.unset_heading", None, cx);
     }
 
+    pub fn command_toggle_blockquote(&mut self, cx: &mut Context<Self>) {
+        if self.is_blockquote_active() {
+            _ = self.run_command_and_refresh("blockquote.unwrap", None, cx);
+        } else {
+            _ = self.run_command_and_refresh("blockquote.wrap_selection", None, cx);
+        }
+    }
+
     pub fn command_toggle_bold(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
     }
@@ -2202,6 +2210,12 @@ impl RichTextState {
             .run_query::<Option<u64>>("block.heading_level", None)
             .ok()
             .flatten()
+    }
+
+    pub fn is_blockquote_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("blockquote.is_active", None)
+            .unwrap_or(false)
     }
 
     pub fn command_copy(&mut self, cx: &mut Context<Self>) {
@@ -3206,84 +3220,131 @@ impl Render for RichTextState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let state = cx.entity().clone();
+        let registry = self.editor.registry();
 
         if !self.did_auto_focus && !window.is_inspector_picking(cx) {
             window.focus(&self.focus_handle);
             self.did_auto_focus = true;
         }
 
-        let mut blocks: Vec<AnyElement> = Vec::new();
-        for (row, node) in self.editor.doc().children.iter().enumerate() {
+        fn render_text_block(
+            el: &ElementNode,
+            path: Vec<usize>,
+            window: &mut Window,
+            state: &Entity<RichTextState>,
+        ) -> AnyElement {
+            let mut line = RichTextLineElement::new(state.clone(), path);
+            if el.kind == "heading" {
+                let level = el
+                    .attrs
+                    .get("level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .clamp(1, 6);
+                let mut style = window.text_style();
+                let size = match level {
+                    1 => 28.0,
+                    2 => 22.0,
+                    3 => 18.0,
+                    4 => 16.0,
+                    5 => 14.0,
+                    _ => 13.0,
+                };
+                style.font_size = px(size).into();
+                style.line_height = px(size * 1.25).into();
+                style.font_weight = FontWeight::SEMIBOLD;
+                line = line.with_base_text_style(style);
+            }
+            line.into_any_element()
+        }
+
+        fn render_list_item(
+            el: &ElementNode,
+            path: Vec<usize>,
+            theme: &gpui_component::Theme,
+            state: &Entity<RichTextState>,
+        ) -> AnyElement {
+            let list_type = el
+                .attrs
+                .get("list_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bulleted");
+            let marker = if list_type == "ordered" {
+                let ix = el
+                    .attrs
+                    .get("list_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                format!("{ix}.")
+            } else {
+                "•".to_string()
+            };
+            let level = el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let indent = px(16. * level as f32);
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.))
+                .pl(indent)
+                .child(
+                    div()
+                        .w(px(24.))
+                        .flex()
+                        .justify_end()
+                        .text_color(theme.muted_foreground)
+                        .child(marker),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(RichTextLineElement::new(state.clone(), path)),
+                )
+                .into_any_element()
+        }
+
+        fn render_block(
+            node: &Node,
+            path: Vec<usize>,
+            window: &mut Window,
+            theme: &gpui_component::Theme,
+            state: &Entity<RichTextState>,
+            registry: &PluginRegistry,
+        ) -> AnyElement {
             match node {
                 Node::Element(el) if el.kind == "list_item" => {
-                    let list_type = el
-                        .attrs
-                        .get("list_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("bulleted");
-                    let marker = if list_type == "ordered" {
-                        let ix = el
-                            .attrs
-                            .get("list_index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(1);
-                        format!("{ix}.")
-                    } else {
-                        "•".to_string()
-                    };
-                    let level = el
-                        .attrs
-                        .get("list_level")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let indent = px(16. * level as f32);
-                    blocks.push(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .gap(px(8.))
-                            .pl(indent)
-                            .child(
-                                div()
-                                    .w(px(24.))
-                                    .flex()
-                                    .justify_end()
-                                    .text_color(theme.muted_foreground)
-                                    .child(marker),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child(RichTextLineElement::new(state.clone(), vec![row])),
-                            )
-                            .into_any_element(),
-                    );
+                    render_list_item(el, path, theme, state)
                 }
-                Node::Element(el) if is_text_block_kind(self.editor.registry(), &el.kind) => {
-                    let mut line = RichTextLineElement::new(state.clone(), vec![row]);
-                    if el.kind == "heading" {
-                        let level = el
-                            .attrs
-                            .get("level")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(1)
-                            .clamp(1, 6);
-                        let mut style = window.text_style();
-                        let size = match level {
-                            1 => 28.0,
-                            2 => 22.0,
-                            3 => 18.0,
-                            4 => 16.0,
-                            5 => 14.0,
-                            _ => 13.0,
-                        };
-                        style.font_size = px(size).into();
-                        style.line_height = px(size * 1.25).into();
-                        style.font_weight = FontWeight::SEMIBOLD;
-                        line = line.with_base_text_style(style);
+                Node::Element(el) if is_text_block_kind(registry, &el.kind) => {
+                    render_text_block(el, path, window, state)
+                }
+                Node::Element(el) if el.kind == "blockquote" => {
+                    let mut children: Vec<AnyElement> = Vec::new();
+                    for (ix, child) in el.children.iter().enumerate() {
+                        let mut child_path = path.clone();
+                        child_path.push(ix);
+                        children.push(render_block(
+                            child, child_path, window, theme, state, registry,
+                        ));
                     }
-                    blocks.push(line.into_any_element());
+
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(10.))
+                        .child(div().w(px(3.)).rounded(px(99.)).bg(theme.border))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(div().flex_col().gap(px(6.)).children(children)),
+                        )
+                        .into_any_element()
                 }
                 Node::Element(el) if el.kind == "table" => {
                     let mut rows: Vec<AnyElement> = Vec::new();
@@ -3306,103 +3367,13 @@ impl Render for RichTextState {
 
                             let mut cell_blocks: Vec<AnyElement> = Vec::new();
                             for (block_ix, block_node) in cell_el.children.iter().enumerate() {
-                                let block_path = vec![row, row_ix, cell_ix, block_ix];
-                                match block_node {
-                                    Node::Element(block_el) if block_el.kind == "list_item" => {
-                                        let list_type = block_el
-                                            .attrs
-                                            .get("list_type")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("bulleted");
-                                        let marker = if list_type == "ordered" {
-                                            let ix = block_el
-                                                .attrs
-                                                .get("list_index")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(1);
-                                            format!("{ix}.")
-                                        } else {
-                                            "•".to_string()
-                                        };
-                                        let level = block_el
-                                            .attrs
-                                            .get("list_level")
-                                            .and_then(|v| v.as_u64())
-                                            .unwrap_or(0);
-                                        let indent = px(16. * level as f32);
-                                        cell_blocks.push(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_start()
-                                                .gap(px(8.))
-                                                .pl(indent)
-                                                .child(
-                                                    div()
-                                                        .w(px(24.))
-                                                        .flex()
-                                                        .justify_end()
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(marker),
-                                                )
-                                                .child(div().flex_1().min_w(px(0.)).child(
-                                                    RichTextLineElement::new(
-                                                        state.clone(),
-                                                        block_path,
-                                                    ),
-                                                ))
-                                                .into_any_element(),
-                                        );
-                                    }
-                                    Node::Element(block_el)
-                                        if is_text_block_kind(
-                                            self.editor.registry(),
-                                            &block_el.kind,
-                                        ) =>
-                                    {
-                                        let mut line =
-                                            RichTextLineElement::new(state.clone(), block_path);
-                                        if block_el.kind == "heading" {
-                                            let level = block_el
-                                                .attrs
-                                                .get("level")
-                                                .and_then(|v| v.as_u64())
-                                                .unwrap_or(1)
-                                                .clamp(1, 6);
-                                            let mut style = window.text_style();
-                                            let size = match level {
-                                                1 => 28.0,
-                                                2 => 22.0,
-                                                3 => 18.0,
-                                                4 => 16.0,
-                                                5 => 14.0,
-                                                _ => 13.0,
-                                            };
-                                            style.font_size = px(size).into();
-                                            style.line_height = px(size * 1.25).into();
-                                            style.font_weight = FontWeight::SEMIBOLD;
-                                            line = line.with_base_text_style(style);
-                                        }
-                                        cell_blocks.push(line.into_any_element());
-                                    }
-                                    Node::Void(v) if v.kind == "divider" => {
-                                        cell_blocks.push(
-                                            div()
-                                                .py(px(8.))
-                                                .child(div().w_full().h(px(1.)).bg(theme.border))
-                                                .into_any_element(),
-                                        );
-                                    }
-                                    _ => {
-                                        cell_blocks.push(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .italic()
-                                                .child("<unknown cell block>")
-                                                .into_any_element(),
-                                        );
-                                    }
-                                }
+                                let mut block_path = path.clone();
+                                block_path.push(row_ix);
+                                block_path.push(cell_ix);
+                                block_path.push(block_ix);
+                                cell_blocks.push(render_block(
+                                    block_node, block_path, window, theme, state, registry,
+                                ));
                             }
 
                             cells.push(
@@ -3427,42 +3398,42 @@ impl Render for RichTextState {
                         );
                     }
 
-                    blocks.push(
-                        div()
-                            .border_1()
-                            .border_color(theme.border)
-                            .rounded(theme.radius / 2.)
-                            .p(px(6.))
-                            .child(div().flex_col().gap(px(6.)).children(rows))
-                            .into_any_element(),
-                    );
+                    div()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius / 2.)
+                        .p(px(6.))
+                        .child(div().flex_col().gap(px(6.)).children(rows))
+                        .into_any_element()
                 }
-                Node::Void(v) if v.kind == "divider" => {
-                    blocks.push(
-                        div()
-                            .py(px(8.))
-                            .child(div().w_full().h(px(1.)).bg(theme.border))
-                            .into_any_element(),
-                    );
-                }
-                _ => {
-                    blocks.push(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .italic()
-                            .child(format!(
-                                "<unknown node at {row}: {:?}>",
-                                self.editor.doc().children.get(row).map(|n| match n {
-                                    Node::Element(el) => el.kind.as_str(),
-                                    Node::Void(v) => v.kind.as_str(),
-                                    Node::Text(_) => "text",
-                                })
-                            ))
-                            .into_any_element(),
-                    );
-                }
+                Node::Void(v) if v.kind == "divider" => div()
+                    .py(px(8.))
+                    .child(div().w_full().h(px(1.)).bg(theme.border))
+                    .into_any_element(),
+                _ => div()
+                    .text_color(theme.muted_foreground)
+                    .italic()
+                    .child(format!(
+                        "<unknown node at {:?}: {:?}>",
+                        path,
+                        match node {
+                            Node::Element(el) => el.kind.as_str(),
+                            Node::Void(v) => v.kind.as_str(),
+                            Node::Text(_) => "text",
+                        }
+                    ))
+                    .into_any_element(),
             }
         }
+
+        let blocks: Vec<AnyElement> = self
+            .editor
+            .doc()
+            .children
+            .iter()
+            .enumerate()
+            .map(|(ix, node)| render_block(node, vec![ix], window, &theme, &state, registry))
+            .collect();
 
         div()
             .id(("richtext-next", cx.entity_id()))
