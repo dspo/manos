@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/git-viewer",
+    "crates/diffview",
     "crates/dnd_list",
     "crates/dnd_tree",
     "crates/extras",
@@ -30,6 +32,7 @@ raw-window-handle = { version = "0.6", features = ["std"] }
 ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+similar = "2"
 serialize-to-javascript = { version = "0.1.2" }
 sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
 wry = { version = "0.53.5" }
