@@ -37,6 +37,8 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
                 greet_async,
                 greet_slow,
                 count_to,
+                channel_large_json,
+                channel_large_bytes,
                 get_bytes,
                 echo_bytes,
                 inspect_request
@@ -96,6 +98,20 @@ fn count_to(n: u32, on_event: gpui_manos_webview::ipc::Channel<CountEvent>) -> R
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
 
+    Ok(())
+}
+
+#[gpui_manos_webview::command]
+fn channel_large_json(on_event: gpui_manos_webview::ipc::Channel<String>) -> Result<(), String> {
+    on_event.send("x".repeat(10_000))?;
+    Ok(())
+}
+
+#[gpui_manos_webview::command]
+fn channel_large_bytes(
+    on_event: gpui_manos_webview::ipc::Channel<gpui_manos_webview::ipc::Response>,
+) -> Result<(), String> {
+    on_event.send(gpui_manos_webview::ipc::Response::binary(vec![7u8; 20_000]))?;
     Ok(())
 }
 

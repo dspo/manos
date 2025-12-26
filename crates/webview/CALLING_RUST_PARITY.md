@@ -36,7 +36,7 @@ JS 侧（注入脚本）
 当前关键限制
 - async runtime 仅为 `pollster::block_on`（不是完整 Tokio runtime）；且 postMessage fallback 仍在 IPC handler 线程内执行命令。
 - `ipc::Response::binary(...)` 可在 custom-protocol 路径返回 `ArrayBuffer`；但 postMessage fallback 目前仍会回传 `number[]`（与 Tauri 行为不完全一致）。
-- `ipc::Channel<T>` 已提供最小可用实现（JSON 消息 + drop 时发送 end）；但缺少 `__TAURI_CHANNEL__|fetch` 大 payload 快路径与二进制/分片优化。
+- `ipc::Channel<T>` 已实现基础 parity（JSON + binary + 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path + drop 时发送 end）；但 postMessage fallback 的二进制仍会变成 `number[]`，且暂未做队列 TTL/清理策略。
 - 命令函数仍无法注入 `WebviewWindow` / `AppHandle` / `State<T>` 等完整上下文（Tauri 文档支持）。
 - 事件系统（Rust 侧 listen/emit）基本未实现，仅有 JS 分发函数骨架（`crates/webview/src/lib.rs`）。
 
@@ -52,7 +52,7 @@ JS 侧（注入脚本）
 | 返回 ArrayBuffer | `tauri::ipc::Response` | ⚠️ | `ipc::Response::binary` 在 custom-protocol 路径可返回 `ArrayBuffer`；fallback 仍会变成 `number[]` | M3 |
 | 错误处理 | `Result<T, E: Serialize>`（结构化） | ⚠️ | 默认 `E: ToString` 会 reject 为 JSON string；支持 `#[command(error = "json")]` 返回结构化 JSON | M1/M3 |
 | 异步命令 | `async fn` / `#[command(async)]` | ⚠️ | 已支持 `async fn`（`pollster::block_on`）；仍缺少完整 runtime 与更一致的线程模型 | M2（困难） |
-| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ⚠️ | 已支持 `ipc::Channel<T>` 发送 JSON 消息；缺少大 payload/binary 优化与 `__TAURI_CHANNEL__` fast-path | M4（困难） |
+| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ⚠️ | 已支持 `ipc::Channel<T>`：JSON/binary（通过 `Channel<ipc::Response>`）+ 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path；仍缺少更完善的清理与 fallback parity | M4（困难） |
 | 访问 WebviewWindow | 参数注入 `WebviewWindow` | ❌ | 命令里拿不到发起方上下文（label/webview id 等） | M5（困难） |
 | 访问 AppHandle | 参数注入 `AppHandle` | ❌ | 无法在命令内访问全局应用服务（事件/状态/窗口管理等） | M5（困难） |
 | 访问托管状态 | `Builder::manage` + `State<T>` | ❌ | 无统一状态容器 & 注入机制 | M5（困难） |
@@ -152,7 +152,7 @@ JS 侧（注入脚本）
 建议任务
 - [x] 最小实现：支持命令参数注入 `ipc::Channel<T>`，可多次 `send(T)`，并在 drop 时发送 `{ end: true }`。
 - [x] 多 webview 兼容：通过 `Invoke.webview_label` + `ipc::IpcContextGuard` 贯通上下文，确保 Channel 发送到正确 webview。
-- [ ] 大 payload / 二进制优化：实现 `plugin:__TAURI_CHANNEL__|fetch`（Tauri 的 fast-path），避免通过 `eval` 直接塞入超大 JSON/bytes。
+- [x] 大 payload / 二进制优化：内置 `plugin:__TAURI_CHANNEL__|fetch`（Tauri 的 fast-path），Channel 在超过阈值时改为先缓存数据再让前端 invoke 拉取，避免通过 `eval` 直接塞入超大 JSON/bytes。
 
 难点/风险（为什么“困难”）
 - 这不仅是“返回一个响应”，而是要维护跨多次消息的状态与回调映射。

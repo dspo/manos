@@ -113,11 +113,21 @@ pub struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     pub fn new() -> Self {
+        let mut handlers: HashMap<
+            String,
+            Arc<dyn Fn(http::Request<Vec<u8>>) -> http::Response<Vec<u8>> + Send + Sync + 'static>,
+        > = HashMap::new();
+
+        handlers.insert(
+            ipc::FETCH_CHANNEL_DATA_COMMAND.to_string(),
+            Arc::new(|request| ipc::fetch_channel_data(request)),
+        );
+
         Builder {
             builder: WebViewBuilder::new(),
             webview_id: WebViewId::default(),
             invoke_handler: None,
-            handlers: HashMap::new(),
+            handlers,
         }
     }
 
@@ -287,15 +297,27 @@ impl<'a> Builder<'a> {
                 };
 
                 let cmd = message.cmd;
+                let api_handler = handlers_for_post_message.get(&cmd).cloned();
+
                 let response = if let Some(ref handler) = invoke_handler_for_post_message {
-                    handler(Invoke {
-                        command: cmd.clone(),
-                        request,
-                        webview_label: message.webview_label.clone(),
-                    })
-                    .unwrap_or_else(|| ipc::not_found(cmd.clone()))
-                } else if let Some(handler) = handlers_for_post_message.get(&cmd) {
-                    handler(request)
+                    if let Some(api_handler) = api_handler {
+                        let request_for_invoke = request.clone();
+                        handler(Invoke {
+                            command: cmd.clone(),
+                            request: request_for_invoke,
+                            webview_label: message.webview_label.clone(),
+                        })
+                        .unwrap_or_else(|| api_handler(request))
+                    } else {
+                        handler(Invoke {
+                            command: cmd.clone(),
+                            request,
+                            webview_label: message.webview_label.clone(),
+                        })
+                        .unwrap_or_else(|| ipc::not_found(cmd.clone()))
+                    }
+                } else if let Some(api_handler) = api_handler {
+                    api_handler(request)
                 } else {
                     ipc::not_found(cmd.clone())
                 };
@@ -417,14 +439,24 @@ impl<'a> Builder<'a> {
                         let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || {
                                 if let Some(handler) = invoke_handler {
-                                    handler(Invoke {
-                                        command,
-                                        request,
-                                        webview_label,
-                                    })
+                                    if let Some(api_handler) = api_handler {
+                                        let request_for_invoke = request.clone();
+                                        handler(Invoke {
+                                            command: command.clone(),
+                                            request: request_for_invoke,
+                                            webview_label: webview_label.clone(),
+                                        })
+                                        .unwrap_or_else(|| api_handler(request))
+                                    } else {
+                                        handler(Invoke {
+                                            command,
+                                            request,
+                                            webview_label,
+                                        })
                                         .unwrap_or_else(|| ipc::not_found(raw_path))
-                                } else if let Some(handler) = api_handler {
-                                    handler(request)
+                                    }
+                                } else if let Some(api_handler) = api_handler {
+                                    api_handler(request)
                                 } else {
                                     ipc::not_found(raw_path)
                                 }
@@ -473,13 +505,19 @@ fn from_hex(byte: u8) -> Option<u8> {
 pub mod ipc {
     use super::*;
     use http::HeaderValue;
-    use std::sync::Arc;
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     pub const IPC_CHANNEL_PREFIX: &str = "__CHANNEL__:";
+    pub const FETCH_CHANNEL_DATA_COMMAND: &str = "plugin:__TAURI_CHANNEL__|fetch";
+
+    const CHANNEL_ID_HEADER_NAME: &str = "Tauri-Channel-Id";
+    const MAX_JSON_DIRECT_EXECUTE_THRESHOLD: usize = 8192;
+    const MAX_RAW_DIRECT_EXECUTE_THRESHOLD: usize = 1024;
 
     static PLATFORM_DISPATCHER: OnceLock<Arc<dyn gpui::PlatformDispatcher>> = OnceLock::new();
+    static CHANNEL_DATA_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static CHANNEL_DATA_QUEUE: OnceLock<Mutex<HashMap<u32, InvokeResponseBody>>> = OnceLock::new();
 
     pub(crate) fn init_platform_dispatcher(dispatcher: Arc<dyn gpui::PlatformDispatcher>) {
         let _ = PLATFORM_DISPATCHER.set(dispatcher);
@@ -549,6 +587,57 @@ pub mod ipc {
         Ok(())
     }
 
+    #[derive(Debug, Clone)]
+    pub enum InvokeResponseBody {
+        Json(String),
+        Raw(Vec<u8>),
+    }
+
+    pub trait IpcResponse {
+        fn body(self) -> std::result::Result<InvokeResponseBody, String>;
+    }
+
+    impl<T: serde::Serialize> IpcResponse for T {
+        fn body(self) -> std::result::Result<InvokeResponseBody, String> {
+            serde_json::to_string(&self)
+                .map(InvokeResponseBody::Json)
+                .map_err(|err| err.to_string())
+        }
+    }
+
+    fn channel_data_queue() -> &'static Mutex<HashMap<u32, InvokeResponseBody>> {
+        CHANNEL_DATA_QUEUE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn store_channel_data(body: InvokeResponseBody) -> u32 {
+        let id = CHANNEL_DATA_COUNTER.fetch_add(1, Ordering::Relaxed);
+        channel_data_queue().lock().unwrap().insert(id, body);
+        id
+    }
+
+    pub(crate) fn fetch_channel_data(request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+        let Some(id) = request
+            .headers()
+            .get(CHANNEL_ID_HEADER_NAME)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return bad_request("missing channel id header");
+        };
+
+        let body = channel_data_queue().lock().unwrap().remove(&id);
+        let Some(body) = body else {
+            return not_found(format!("channel data {id}"));
+        };
+
+        match body {
+            InvokeResponseBody::Json(json_string) => {
+                respond(Response::new(json_string.into_bytes(), "application/json"))
+            }
+            InvokeResponseBody::Raw(bytes) => respond(Response::binary(bytes)),
+        }
+    }
+
     #[derive(Debug)]
     pub struct Request {
         parts: http::request::Parts,
@@ -607,6 +696,26 @@ pub mod ipc {
                     .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
             );
             builder.body(self.body).unwrap()
+        }
+    }
+
+    impl IpcResponse for Response {
+        fn body(self) -> std::result::Result<InvokeResponseBody, String> {
+            let is_json = self
+                .content_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                == "application/json";
+
+            if is_json {
+                String::from_utf8(self.body)
+                    .map(InvokeResponseBody::Json)
+                    .map_err(|err| err.to_string())
+            } else {
+                Ok(InvokeResponseBody::Raw(self.body))
+            }
         }
     }
 
@@ -670,20 +779,45 @@ pub mod ipc {
 
     impl<TSend> Channel<TSend>
     where
-        TSend: serde::Serialize,
+        TSend: IpcResponse,
     {
         pub fn send(&self, message: TSend) -> std::result::Result<(), String> {
-            let message = serde_json::to_string(&message).map_err(|err| err.to_string())?;
+            let body = message.body()?;
             let current_index = self
                 .inner
                 .next_message_index
                 .fetch_add(1, Ordering::Relaxed);
-            let js = format!(
-                "window.__TAURI_INTERNALS__.runCallback({}, {{ message: {message}, index: {current_index} }});",
-                self.inner.id
-            );
 
-            dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+            match body {
+                InvokeResponseBody::Json(message)
+                    if message.len() < MAX_JSON_DIRECT_EXECUTE_THRESHOLD =>
+                {
+                    let js = format!(
+                        "window.__TAURI_INTERNALS__.runCallback({}, {{ message: {message}, index: {current_index} }});",
+                        self.inner.id
+                    );
+                    dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+                }
+                InvokeResponseBody::Raw(bytes)
+                    if bytes.len() < MAX_RAW_DIRECT_EXECUTE_THRESHOLD =>
+                {
+                    let bytes_as_json_array =
+                        serde_json::to_string(&bytes).map_err(|err| err.to_string())?;
+                    let js = format!(
+                        "window.__TAURI_INTERNALS__.runCallback({}, {{ message: new Uint8Array({bytes_as_json_array}).buffer, index: {current_index} }});",
+                        self.inner.id
+                    );
+                    dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+                }
+                body => {
+                    let data_id = store_channel_data(body);
+                    let js = format!(
+                        "window.__TAURI_INTERNALS__.invoke('{FETCH_CHANNEL_DATA_COMMAND}', null, {{ headers: {{ '{CHANNEL_ID_HEADER_NAME}': '{data_id}' }} }}).then((response) => window.__TAURI_INTERNALS__.runCallback({}, {{ message: response, index: {current_index} }})).catch(console.error);",
+                        self.inner.id
+                    );
+                    dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+                }
+            }
         }
     }
 
@@ -994,7 +1128,7 @@ fn prepare_scripts(
         InvokeInitializationScript {
             process_ipc_message_fn: include_str!("scripts/tauri/process-ipc-message-fn.js"),
             os_name: std::env::consts::OS,
-            fetch_channel_data_command: "plugin:__TAURI_CHANNEL__|fetch",
+            fetch_channel_data_command: ipc::FETCH_CHANNEL_DATA_COMMAND,
             invoke_key: INVOKE_KEY,
         }
         .render_default(&core::default::Default::default())?
