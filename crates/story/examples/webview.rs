@@ -3,6 +3,7 @@ use gpui::{
 };
 use gpui_manos_webview::webview::WebView;
 use gpui_manos_webview::wry::WebViewId;
+use serde::Serialize;
 use std::path::PathBuf;
 
 fn main() {
@@ -34,7 +35,10 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
             .invoke_handler(gpui_manos_webview::generate_handler![
                 greet,
                 greet_async,
-                greet_slow
+                greet_slow,
+                get_bytes,
+                echo_bytes,
+                inspect_request
             ]);
 
         let builder = if index_html.exists() {
@@ -76,6 +80,41 @@ async fn greet_async(name: String) -> Result<String, String> {
 fn greet_slow(name: String) -> Result<String, String> {
     std::thread::sleep(std::time::Duration::from_millis(750));
     Ok(format!("Hello, {}! (from GPUI slow)", name))
+}
+
+#[gpui_manos_webview::command]
+fn get_bytes() -> gpui_manos_webview::ipc::Response {
+    gpui_manos_webview::ipc::Response::binary("hello from gpui-manos-webview".as_bytes().to_vec())
+}
+
+#[gpui_manos_webview::command]
+fn echo_bytes(request: gpui_manos_webview::ipc::Request) -> gpui_manos_webview::ipc::Response {
+    gpui_manos_webview::ipc::Response::binary(request.into_body())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestInfo {
+    method: String,
+    uri: String,
+    content_type: Option<String>,
+    body_len: usize,
+}
+
+#[gpui_manos_webview::command]
+fn inspect_request(request: gpui_manos_webview::ipc::Request) -> RequestInfo {
+    let content_type = request
+        .headers()
+        .get(gpui_manos_webview::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|value| value.to_string());
+
+    RequestInfo {
+        method: request.method().to_string(),
+        uri: request.uri().to_string(),
+        content_type,
+        body_len: request.body().len(),
+    }
 }
 
 fn escape_html(input: &str) -> String {

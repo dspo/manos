@@ -107,6 +107,8 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut arg_idents = Vec::new();
     let mut arg_types = Vec::new();
+    let mut call_arg_idents = Vec::new();
+    let mut request_ident: Option<Ident> = None;
     for input in &function.sig.inputs {
         match input {
             FnArg::Receiver(receiver) => {
@@ -116,8 +118,23 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
             }
             FnArg::Typed(pat_type) => match &*pat_type.pat {
                 Pat::Ident(pat_ident) => {
-                    arg_idents.push(pat_ident.ident.clone());
-                    arg_types.push((*pat_type.ty).clone());
+                    let ident = pat_ident.ident.clone();
+                    let ty = (*pat_type.ty).clone();
+                    call_arg_idents.push(ident.clone());
+                    if is_ipc_request_type(&ty) {
+                        if request_ident.is_some() {
+                            return syn::Error::new_spanned(
+                                &pat_type.ty,
+                                "only one gpui_manos_webview::ipc::Request argument is supported",
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                        request_ident = Some(ident);
+                    } else {
+                        arg_idents.push(ident);
+                        arg_types.push(ty);
+                    }
                 }
                 other => {
                     return syn::Error::new_spanned(
@@ -165,7 +182,7 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
                 "" | "application/json" => {}
                 "application/octet-stream" => {
                     return #root::ipc::bad_request_json(&format!(
-                        "command `{}` does not support binary payloads yet",
+                        "command `{}` does not support binary payloads; add an `ipc::Request` parameter to access raw bytes",
                         stringify!(#command_fn)
                     ));
                 }
@@ -179,10 +196,18 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let base_call = if arg_idents.is_empty() {
+    let define_request = if let Some(request_ident) = &request_ident {
+        quote! {
+            let #request_ident = #root::ipc::Request::new(__gpui_parts, __gpui_body);
+        }
+    } else {
+        quote!()
+    };
+
+    let base_call = if call_arg_idents.is_empty() {
         quote!(#command_fn())
     } else {
-        quote!(#command_fn(#(#arg_idents),*))
+        quote!(#command_fn(#(#call_arg_idents),*))
     };
     let call = if is_async {
         quote!(#root::async_runtime::block_on(#base_call))
@@ -195,14 +220,14 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
             if serialize_error {
                 quote! {
                     match #call {
-                        Ok(output) => #root::ipc::ok_json(&output),
+                        Ok(output) => #root::ipc::respond(output),
                         Err(err) => #root::ipc::internal_error_json(&err),
                     }
                 }
             } else {
                 quote! {
                     match #call {
-                        Ok(output) => #root::ipc::ok_json(&output),
+                        Ok(output) => #root::ipc::respond(output),
                         Err(err) => #root::ipc::internal_error_json(&format!(
                             "command `{}` failed: {}",
                             stringify!(#command_fn),
@@ -214,17 +239,22 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
         }
         _ => quote! {
             let output = #call;
-            #root::ipc::ok_json(&output)
+            #root::ipc::respond(output)
         },
     };
 
-    let wrapper = quote! {
-        #[doc(hidden)]
-        #[allow(non_snake_case)]
-        #vis fn #wrapper_fn(request: #root::http::Request<Vec<u8>>) -> #root::http::Response<Vec<u8>> {
-            use ::std::string::ToString as _;
-            let (parts, __gpui_body) = request.into_parts();
-            let __gpui_content_type = parts
+    let needs_body = !arg_idents.is_empty() || request_ident.is_some();
+    let needs_content_type = !arg_idents.is_empty();
+
+    let wrapper_body = if !needs_body {
+        quote! {
+            let _ = request;
+            #respond
+        }
+    } else if needs_content_type {
+        quote! {
+            let (__gpui_parts, __gpui_body) = request.into_parts();
+            let __gpui_content_type = __gpui_parts
                 .headers
                 .get(#root::http::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
@@ -233,7 +263,24 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
             let __gpui_content_type = __gpui_content_type.split(';').next().unwrap_or("").trim();
             #content_type_check
             #parse_args
+            #define_request
             #respond
+        }
+    } else {
+        quote! {
+            let (__gpui_parts, __gpui_body) = request.into_parts();
+            #parse_args
+            #define_request
+            #respond
+        }
+    };
+
+    let wrapper = quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        #vis fn #wrapper_fn(request: #root::http::Request<Vec<u8>>) -> #root::http::Response<Vec<u8>> {
+            use ::std::string::ToString as _;
+            #wrapper_body
         }
     };
 
@@ -323,6 +370,22 @@ fn is_result_type(ty: &Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "Result")
+}
+
+fn is_ipc_request_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+
+    let segments = &type_path.path.segments;
+    if segments.len() < 2 {
+        return false;
+    }
+
+    let last = segments.last().expect("segments is not empty");
+    let second_last = segments.iter().nth_back(1).expect("segments has >= 2");
+
+    second_last.ident == "ipc" && last.ident == "Request"
 }
 
 /// Wraps a function with signature `Fn(http::Request<Vec<u8>> -> http::Response<Vec<u8>>)` into a tuple `(func_name, func)`.

@@ -467,6 +467,87 @@ pub mod ipc {
     use super::*;
     use http::HeaderValue;
 
+    #[derive(Debug)]
+    pub struct Request {
+        parts: http::request::Parts,
+        body: Vec<u8>,
+    }
+
+    impl Request {
+        pub fn new(parts: http::request::Parts, body: Vec<u8>) -> Self {
+            Self { parts, body }
+        }
+
+        pub fn method(&self) -> &http::Method {
+            &self.parts.method
+        }
+
+        pub fn uri(&self) -> &http::Uri {
+            &self.parts.uri
+        }
+
+        pub fn headers(&self) -> &http::HeaderMap {
+            &self.parts.headers
+        }
+
+        pub fn body(&self) -> &[u8] {
+            &self.body
+        }
+
+        pub fn into_body(self) -> Vec<u8> {
+            self.body
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Response {
+        body: Vec<u8>,
+        content_type: String,
+    }
+
+    impl Response {
+        pub fn new(body: impl Into<Vec<u8>>, content_type: impl Into<String>) -> Self {
+            Self {
+                body: body.into(),
+                content_type: content_type.into(),
+            }
+        }
+
+        pub fn binary(body: impl Into<Vec<u8>>) -> Self {
+            Self::new(body, "application/octet-stream")
+        }
+
+        fn into_http_response(self) -> http::Response<Vec<u8>> {
+            let mut builder = response_builder(http::StatusCode::OK, "ok");
+            builder = builder.header(
+                CONTENT_TYPE,
+                HeaderValue::from_str(&self.content_type)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            builder.body(self.body).unwrap()
+        }
+    }
+
+    pub trait IntoInvokeResponse {
+        fn into_invoke_response(self) -> http::Response<Vec<u8>>;
+    }
+
+    impl<T: serde::Serialize> IntoInvokeResponse for T {
+        fn into_invoke_response(self) -> http::Response<Vec<u8>> {
+            ok_json(&self)
+        }
+    }
+
+    impl IntoInvokeResponse for Response {
+        fn into_invoke_response(self) -> http::Response<Vec<u8>> {
+            self.into_http_response()
+        }
+    }
+
+    pub fn respond<T: IntoInvokeResponse>(value: T) -> http::Response<Vec<u8>> {
+        value.into_invoke_response()
+    }
+
     fn response_builder(
         status_code: http::StatusCode,
         tauri_response: &'static str,

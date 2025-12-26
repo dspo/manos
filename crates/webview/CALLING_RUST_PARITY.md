@@ -133,16 +133,16 @@ JS 侧（注入脚本）
 - 对齐文档中“返回 ArrayBuffer”的能力，并为上传/headers 校验等场景提供原始 request 访问。
 
 建议任务
-- [ ] 定义 `gpui_manos_webview::ipc::Response`（或复用现有类型）来表达“原始字节响应 + content-type”。
-- [ ] 允许命令返回该 Response，从而在 JS 侧走 `arrayBuffer()` 分支。
-- [ ] 引入 `gpui_manos_webview::ipc::Request`（headers + body + maybe origin/webview_id），并允许命令参数注入该对象（仅该类型，不做完整 AppHandle/WebviewWindow）。
+- [x] 定义 `gpui_manos_webview::ipc::Response` 来表达“原始字节响应 + content-type”。
+- [x] 允许命令返回该 Response（以及 `Result<Response, E>`），在 `ipc://` custom-protocol 路径下前端可走 `arrayBuffer()` 分支。
+- [x] 引入 `gpui_manos_webview::ipc::Request`（method/uri/headers/body），并支持作为命令参数注入（用于读取 headers 与 raw body bytes）。
 
 验收点（建议）
 - `read_file() -> Response` 前端能拿到 `ArrayBuffer`，且不会被 JSON 序列化成巨大数组。
 - `upload(request: Request)` 能读取 `Authorization` header 与 raw body bytes。
 
 难点/风险
-- 需要在 JS 注入脚本与 Rust 响应 content-type 上达成一致约定（例如 `application/octet-stream`）。
+- postMessage fallback 目前仍会把二进制结果回传为 `number[]`（`Vec<u8>` 的 JSON 序列化），与 custom-protocol 的 `ArrayBuffer` 不完全一致。
 
 ### M4：Channel（流式传输）（高价值，但复杂）（1–2 周）
 
