@@ -4,6 +4,10 @@
 
 运行入口：`cargo run -p gpui-manos-components-story --example richtext_next`
 
+相关文档：
+- [RichText：插件系统与未来架构计划（激进重构版）](richtext-plugin-system-plan.md)
+- [RichText Editor：扩展性与重构方向（面向未来）](richtext-extensibility.md)
+
 ## 已知问题
 
 ### 1) 双击选词：中文边界不理想
@@ -13,3 +17,6 @@
 - 影响范围：仅影响双击选词体验；不影响键盘输入/IME/undo/redo/序列化。
 - 建议方向（后续迭代）：引入更合适的文本边界规则（例如字素簇/Unicode word boundary，必要时引入分词库作为可选特性）。
 
+## 交互提示
+
+- Link：`Cmd/Ctrl+Click` 打开 URL（普通点击仍用于移动光标/选择文本）。

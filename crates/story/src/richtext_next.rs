@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -5,15 +6,19 @@ use gpui::actions;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, TitleBar, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, TitleBar,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
+    input::{Input, InputState},
     menu::AppMenuBar,
     notification::Notification,
 };
 use gpui_manos_components::plate_toolbar::{
     PlateIconName, PlateToolbarIconButton, PlateToolbarSeparator,
 };
-use gpui_plate_core::{Editor, Node, PlateValue, Point as CorePoint, Selection};
+use gpui_plate_core::{
+    Document, Editor, ElementNode, Marks, Node, PlateValue, Point as CorePoint, Selection, TextNode,
+};
 
 use crate::app_menus::{About, Open, Save, SaveAs};
 
@@ -32,6 +37,10 @@ actions!(
         Undo,
         Redo,
         InsertDivider,
+        InsertMention,
+        ToggleBold,
+        ToggleBulletedList,
+        ToggleOrderedList,
     ]
 );
 
@@ -56,7 +65,100 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-d", InsertDivider, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-d", InsertDivider, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-m", InsertMention, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-m", InsertMention, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-b", ToggleBold, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-b", ToggleBold, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-8", ToggleBulletedList, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-8", ToggleBulletedList, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-7", ToggleOrderedList, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-7", ToggleOrderedList, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-c", gpui_manos_plate::Copy, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-c", gpui_manos_plate::Copy, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-x", gpui_manos_plate::Cut, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-x", gpui_manos_plate::Cut, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-v", gpui_manos_plate::Paste, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-v", gpui_manos_plate::Paste, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-a", gpui_manos_plate::SelectAll, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-a", gpui_manos_plate::SelectAll, Some(CONTEXT)),
     ]);
+}
+
+fn node_at_path<'a>(doc: &'a Document, path: &[usize]) -> Option<&'a Node> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut node = doc.children.get(path[0])?;
+    for &ix in path.iter().skip(1) {
+        node = match node {
+            Node::Element(el) => el.children.get(ix)?,
+            Node::Text(_) | Node::Void(_) => return None,
+        };
+    }
+    Some(node)
+}
+
+fn element_at_path<'a>(doc: &'a Document, path: &[usize]) -> Option<&'a ElementNode> {
+    match node_at_path(doc, path)? {
+        Node::Element(el) => Some(el),
+        _ => None,
+    }
+}
+
+fn text_block_paths(doc: &Document) -> Vec<Vec<usize>> {
+    fn walk(nodes: &[Node], path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        for (ix, node) in nodes.iter().enumerate() {
+            let Node::Element(el) = node else {
+                continue;
+            };
+
+            path.push(ix);
+
+            if el.kind == "paragraph" || el.kind == "list_item" {
+                out.push(path.clone());
+            } else {
+                walk(&el.children, path, out);
+            }
+
+            path.pop();
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(&doc.children, &mut Vec::new(), &mut out);
+    out
+}
+
+#[derive(Clone)]
+pub enum InlineTextSegmentKind {
+    Text,
+    Void { kind: SharedString },
+}
+
+#[derive(Clone)]
+pub struct InlineTextSegment {
+    pub child_ix: usize,
+    pub start: usize,
+    pub len: usize,
+    pub marks: Marks,
+    pub kind: InlineTextSegmentKind,
 }
 
 #[derive(Clone)]
@@ -64,6 +166,7 @@ pub struct LineLayoutCache {
     pub bounds: Bounds<Pixels>,
     pub text_layout: gpui::TextLayout,
     pub text: SharedString,
+    pub segments: Vec<InlineTextSegment>,
 }
 
 pub struct RichTextNextState {
@@ -73,7 +176,8 @@ pub struct RichTextNextState {
     selecting: bool,
     selection_anchor: Option<CorePoint>,
     viewport_bounds: Bounds<Pixels>,
-    layout_cache: Vec<Option<LineLayoutCache>>,
+    layout_cache: HashMap<Vec<usize>, LineLayoutCache>,
+    text_block_order: Vec<Vec<usize>>,
     ime_marked_range: Option<Range<usize>>,
     did_auto_focus: bool,
 }
@@ -81,14 +185,17 @@ pub struct RichTextNextState {
 impl RichTextNextState {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle().tab_stop(true);
+        let editor = Editor::with_richtext_plugins();
+        let text_block_order = text_block_paths(editor.doc());
         Self {
             focus_handle,
             scroll_handle: ScrollHandle::new(),
-            editor: Editor::with_core_plugins(),
+            editor,
             selecting: false,
             selection_anchor: None,
             viewport_bounds: Bounds::default(),
-            layout_cache: Vec::new(),
+            layout_cache: HashMap::new(),
+            text_block_order,
             ime_marked_range: None,
             did_auto_focus: false,
         }
@@ -115,44 +222,22 @@ impl RichTextNextState {
         self.editor = Editor::new(
             value.into_document(),
             selection,
-            gpui_plate_core::PluginRegistry::core(),
+            gpui_plate_core::PluginRegistry::richtext(),
         );
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
+        self.layout_cache.clear();
+        self.text_block_order = text_block_paths(self.editor.doc());
         self.ime_marked_range = None;
         cx.notify();
     }
 
-    fn active_text_path(&self) -> Option<Vec<usize>> {
-        Some(self.editor.selection().focus.path.clone())
-    }
-
-    fn active_block_index(&self) -> usize {
+    fn active_text_block_path(&self) -> Option<Vec<usize>> {
         self.editor
             .selection()
             .focus
             .path
-            .first()
-            .copied()
-            .unwrap_or(0)
-    }
-
-    fn set_selection_in_row(
-        &mut self,
-        row: usize,
-        anchor: usize,
-        focus: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let row = row.min(self.editor.doc().children.len().saturating_sub(1));
-        let path = vec![row, 0];
-        let sel = Selection {
-            anchor: CorePoint::new(path.clone(), anchor),
-            focus: CorePoint::new(path, focus),
-        };
-        self.editor.set_selection(sel);
-        _ = self.scroll_cursor_into_view();
-        self.ime_marked_range = None;
-        cx.notify();
+            .split_last()
+            .map(|(_, p)| p.to_vec())
     }
 
     fn set_selection_points(
@@ -168,19 +253,70 @@ impl RichTextNextState {
     }
 
     fn active_text(&self) -> SharedString {
-        let path = self.editor.selection().focus.path.clone();
-        let mut node = None;
-        if path.len() >= 2 {
-            if let Some(block) = self.editor.doc().children.get(path[0]) {
-                if let Node::Element(el) = block {
-                    node = el.children.get(path[1]);
+        let Some(block_path) = self.active_text_block_path() else {
+            return SharedString::default();
+        };
+        if let Some(cache) = self.layout_cache.get(&block_path) {
+            return cache.text.clone();
+        }
+        self.text_block_text(&block_path).unwrap_or_default()
+    }
+
+    fn active_marks(&self) -> Marks {
+        let path = &self.editor.selection().focus.path;
+        match node_at_path(self.editor.doc(), path) {
+            Some(Node::Text(t)) => t.marks.clone(),
+            _ => Marks::default(),
+        }
+    }
+
+    fn row_offset_for_point(&self, point: &CorePoint) -> Option<usize> {
+        let (child_ix, block_path) = point.path.split_last()?;
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return None;
+        };
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+
+        let mut global = 0usize;
+        for (ix, child) in el.children.iter().enumerate() {
+            match child {
+                Node::Text(t) => {
+                    if ix == *child_ix {
+                        return Some(global + point.offset.min(t.text.len()));
+                    }
+                    global += t.text.len();
                 }
+                Node::Void(v) => {
+                    global += v.inline_text_len();
+                }
+                Node::Element(_) => {}
             }
         }
-        match node {
-            Some(Node::Text(t)) => t.text.clone().into(),
-            _ => SharedString::default(),
+
+        Some(global)
+    }
+
+    fn point_for_block_offset(&self, block_path: &[usize], offset: usize) -> Option<CorePoint> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
         }
+
+        Some(Self::point_for_block_offset_in_children(
+            block_path,
+            &el.children,
+            offset,
+        ))
+    }
+
+    fn active_list_type(&self) -> Option<SharedString> {
+        self.editor
+            .run_query::<Option<String>>("list.active_type", None)
+            .ok()
+            .flatten()
+            .map(SharedString::new)
     }
 
     fn set_selection_in_active_block(
@@ -189,11 +325,26 @@ impl RichTextNextState {
         focus: usize,
         cx: &mut Context<Self>,
     ) {
-        let block_ix = self.active_block_index();
-        let path = vec![block_ix, 0];
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let anchor_point = self
+            .point_for_block_offset(&block_path, anchor)
+            .unwrap_or_else(|| {
+                let mut path = block_path.clone();
+                path.push(0);
+                CorePoint::new(path, 0)
+            });
+        let focus_point = self
+            .point_for_block_offset(&block_path, focus)
+            .unwrap_or_else(|| {
+                let mut path = block_path.clone();
+                path.push(0);
+                CorePoint::new(path, 0)
+            });
         let sel = Selection {
-            anchor: CorePoint::new(path.clone(), anchor),
-            focus: CorePoint::new(path, focus),
+            anchor: anchor_point,
+            focus: focus_point,
         };
         self.editor.set_selection(sel);
         _ = self.scroll_cursor_into_view();
@@ -203,42 +354,39 @@ impl RichTextNextState {
 
     fn ordered_active_range(&self) -> Range<usize> {
         let sel = self.editor.selection();
-        if sel.anchor.path != sel.focus.path {
-            return sel.focus.offset..sel.focus.offset;
+        let Some(active_block) = self.active_text_block_path() else {
+            return 0..0;
+        };
+        let anchor_block = sel.anchor.path.split_last().map(|(_, p)| p);
+        let focus_block = sel.focus.path.split_last().map(|(_, p)| p);
+        if anchor_block != Some(active_block.as_slice())
+            || focus_block != Some(active_block.as_slice())
+        {
+            let focus = self.row_offset_for_point(&sel.focus).unwrap_or(0);
+            return focus..focus;
         }
-        let mut a = sel.anchor.offset;
-        let mut b = sel.focus.offset;
+        let mut a = self.row_offset_for_point(&sel.anchor).unwrap_or(0);
+        let mut b = self.row_offset_for_point(&sel.focus).unwrap_or(0);
         if b < a {
             std::mem::swap(&mut a, &mut b);
         }
         a..b
     }
 
-    fn ordered_selection_points(&self) -> (CorePoint, CorePoint) {
-        let sel = self.editor.selection();
-        if sel.anchor.path == sel.focus.path {
-            if sel.focus.offset < sel.anchor.offset {
-                return (sel.focus.clone(), sel.anchor.clone());
+    fn text_block_text(&self, block_path: &[usize]) -> Option<SharedString> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return None;
+        }
+        let mut out = String::new();
+        for child in &el.children {
+            match child {
+                Node::Text(t) => out.push_str(&t.text),
+                Node::Void(v) => out.push_str(&v.inline_text()),
+                Node::Element(_) => {}
             }
-            return (sel.anchor.clone(), sel.focus.clone());
         }
-        if sel.focus.path < sel.anchor.path {
-            return (sel.focus.clone(), sel.anchor.clone());
-        }
-        (sel.anchor.clone(), sel.focus.clone())
-    }
-
-    fn paragraph_text(&self, row: usize) -> Option<SharedString> {
-        let Some(Node::Element(el)) = self.editor.doc().children.get(row) else {
-            return None;
-        };
-        if el.kind != "paragraph" {
-            return None;
-        }
-        let Some(Node::Text(t)) = el.children.first() else {
-            return Some(SharedString::default());
-        };
-        Some(t.text.clone().into())
+        Some(out.into())
     }
 
     fn prev_boundary(text: &str, offset: usize) -> usize {
@@ -261,6 +409,86 @@ impl RichTextNextState {
             ix += 1;
         }
         ix
+    }
+
+    fn inline_void_ranges_in_block(&self, block_path: &[usize]) -> Vec<Range<usize>> {
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return Vec::new();
+        };
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return Vec::new();
+        }
+
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        let mut cursor = 0usize;
+        for child in &el.children {
+            match child {
+                Node::Text(t) => cursor += t.text.len(),
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    if len > 0 {
+                        ranges.push(cursor..cursor + len);
+                        cursor += len;
+                    }
+                }
+                Node::Element(_) => {}
+            }
+        }
+        ranges
+    }
+
+    fn prev_cursor_offset_in_block(
+        &self,
+        block_path: &[usize],
+        text: &str,
+        offset: usize,
+    ) -> usize {
+        if offset == 0 {
+            return 0;
+        }
+
+        let void_ranges = self.inline_void_ranges_in_block(block_path);
+        for range in &void_ranges {
+            if offset > range.start && offset <= range.end {
+                return range.start;
+            }
+        }
+
+        let mut prev = Self::prev_boundary(text, offset);
+        for range in &void_ranges {
+            if prev >= range.start && prev < range.end {
+                prev = range.start;
+                break;
+            }
+        }
+        prev
+    }
+
+    fn next_cursor_offset_in_block(
+        &self,
+        block_path: &[usize],
+        text: &str,
+        offset: usize,
+    ) -> usize {
+        if offset >= text.len() {
+            return text.len();
+        }
+
+        let void_ranges = self.inline_void_ranges_in_block(block_path);
+        for range in &void_ranges {
+            if offset >= range.start && offset < range.end {
+                return range.end;
+            }
+        }
+
+        let mut next = Self::next_boundary(text, offset);
+        for range in &void_ranges {
+            if next > range.start && next <= range.end {
+                next = range.end;
+                break;
+            }
+        }
+        next
     }
 
     fn is_word_char(ch: char) -> bool {
@@ -349,83 +577,303 @@ impl RichTextNextState {
         probe_ix..probe_ix + probe.len_utf8()
     }
 
-    fn line_range(text: &str, offset: usize) -> Range<usize> {
-        if text.is_empty() {
-            return 0..0;
+    fn word_or_void_range_in_block(
+        &self,
+        block_path: &[usize],
+        text: &str,
+        offset: usize,
+    ) -> Range<usize> {
+        for range in self.inline_void_ranges_in_block(block_path) {
+            if offset >= range.start && offset < range.end {
+                return range;
+            }
         }
-
-        let offset = offset.min(text.len());
-        let left = text[..offset].rfind('\n').map(|ix| ix + 1).unwrap_or(0);
-        let right = text[offset..]
-            .find('\n')
-            .map(|ix| offset + ix)
-            .unwrap_or(text.len());
-        left..right
+        Self::word_range(text, offset)
     }
 
-    fn tx_insert_text_at_point(
+    fn clamp_to_char_boundary(s: &str, mut ix: usize) -> usize {
+        ix = ix.min(s.len());
+        while ix > 0 && !s.is_char_boundary(ix) {
+            ix -= 1;
+        }
+        ix
+    }
+
+    fn split_inline_children_at_offset(children: &[Node], offset: usize) -> (Vec<Node>, Vec<Node>) {
+        let mut left: Vec<Node> = Vec::new();
+        let mut right: Vec<Node> = Vec::new();
+
+        let mut cursor = 0usize;
+        let mut splitting = false;
+
+        for child in children {
+            if splitting {
+                right.push(child.clone());
+                continue;
+            }
+
+            match child {
+                Node::Text(text) => {
+                    let len = text.text.len();
+                    if cursor + len <= offset {
+                        left.push(Node::Text(text.clone()));
+                        cursor += len;
+                        continue;
+                    }
+
+                    if cursor >= offset {
+                        splitting = true;
+                        right.push(Node::Text(text.clone()));
+                        continue;
+                    }
+
+                    let local = offset.saturating_sub(cursor).min(len);
+                    let local = Self::clamp_to_char_boundary(&text.text, local);
+
+                    let prefix = text.text.get(..local).unwrap_or("").to_string();
+                    let suffix = text.text.get(local..).unwrap_or("").to_string();
+
+                    if !prefix.is_empty() {
+                        left.push(Node::Text(TextNode {
+                            text: prefix,
+                            marks: text.marks.clone(),
+                        }));
+                    }
+                    if !suffix.is_empty() {
+                        right.push(Node::Text(TextNode {
+                            text: suffix,
+                            marks: text.marks.clone(),
+                        }));
+                    }
+                    splitting = true;
+                }
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    if cursor + len <= offset {
+                        left.push(child.clone());
+                        cursor += len;
+                        continue;
+                    }
+
+                    if cursor >= offset {
+                        splitting = true;
+                        right.push(child.clone());
+                        continue;
+                    }
+
+                    // Offset fell "inside" a void segment. Snap to the nearest boundary so the
+                    // void stays atomic.
+                    let local = offset.saturating_sub(cursor).min(len);
+                    if local <= len / 2 {
+                        splitting = true;
+                        right.push(child.clone());
+                    } else {
+                        left.push(child.clone());
+                        cursor += len;
+                        splitting = true;
+                    }
+                }
+                Node::Element(_) => {
+                    left.push(child.clone());
+                }
+            }
+        }
+
+        (left, right)
+    }
+
+    fn merge_adjacent_text_nodes(nodes: Vec<Node>) -> Vec<Node> {
+        let mut out: Vec<Node> = Vec::new();
+        for node in nodes {
+            match (&mut out.last_mut(), &node) {
+                (Some(Node::Text(prev)), Node::Text(next)) if prev.marks == next.marks => {
+                    prev.text.push_str(&next.text);
+                }
+                _ => out.push(node),
+            }
+        }
+        out
+    }
+
+    fn ensure_has_text_leaf(mut children: Vec<Node>, marks: &Marks) -> Vec<Node> {
+        let has_text = children.iter().any(|n| matches!(n, Node::Text(_)));
+        if !has_text {
+            children.push(Node::Text(TextNode {
+                text: String::new(),
+                marks: marks.clone(),
+            }));
+        }
+        children
+    }
+
+    fn point_for_block_offset_in_children(
+        block_path: &[usize],
+        children: &[Node],
+        offset: usize,
+    ) -> CorePoint {
+        let mut text_nodes: Vec<(usize, usize)> = Vec::new();
+        for (child_ix, child) in children.iter().enumerate() {
+            if let Node::Text(t) = child {
+                text_nodes.push((child_ix, t.text.len()));
+            }
+        }
+        if text_nodes.is_empty() {
+            let mut path = block_path.to_vec();
+            path.push(0);
+            return CorePoint::new(path, 0);
+        }
+
+        let total: usize = children
+            .iter()
+            .map(|node| match node {
+                Node::Text(t) => t.text.len(),
+                Node::Void(v) => v.inline_text_len(),
+                Node::Element(_) => 0,
+            })
+            .sum();
+
+        let mut remaining = offset.min(total);
+        for (child_ix, child) in children.iter().enumerate() {
+            match child {
+                Node::Text(t) => {
+                    let len = t.text.len();
+                    if remaining < len {
+                        let mut path = block_path.to_vec();
+                        path.push(child_ix);
+                        return CorePoint::new(path, remaining);
+                    }
+                    if remaining == len {
+                        if matches!(children.get(child_ix + 1), Some(Node::Text(_))) {
+                            let mut path = block_path.to_vec();
+                            path.push(child_ix + 1);
+                            return CorePoint::new(path, 0);
+                        }
+                        let mut path = block_path.to_vec();
+                        path.push(child_ix);
+                        return CorePoint::new(path, len);
+                    }
+                    remaining = remaining.saturating_sub(len);
+                }
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    if len == 0 {
+                        continue;
+                    }
+                    if remaining < len {
+                        let before = remaining;
+                        let after = len - remaining;
+                        if before <= after {
+                            for (prev_ix, prev) in children.iter().enumerate().take(child_ix).rev()
+                            {
+                                if let Node::Text(t) = prev {
+                                    let mut path = block_path.to_vec();
+                                    path.push(prev_ix);
+                                    return CorePoint::new(path, t.text.len());
+                                }
+                            }
+                        }
+
+                        for (next_ix, next) in children.iter().enumerate().skip(child_ix + 1) {
+                            if matches!(next, Node::Text(_)) {
+                                let mut path = block_path.to_vec();
+                                path.push(next_ix);
+                                return CorePoint::new(path, 0);
+                            }
+                        }
+
+                        let (last_ix, last_len) = text_nodes.last().copied().unwrap();
+                        let mut path = block_path.to_vec();
+                        path.push(last_ix);
+                        return CorePoint::new(path, last_len);
+                    }
+
+                    if remaining == len {
+                        for (next_ix, next) in children.iter().enumerate().skip(child_ix + 1) {
+                            if matches!(next, Node::Text(_)) {
+                                let mut path = block_path.to_vec();
+                                path.push(next_ix);
+                                return CorePoint::new(path, 0);
+                            }
+                        }
+                        let (last_ix, last_len) = text_nodes.last().copied().unwrap();
+                        let mut path = block_path.to_vec();
+                        path.push(last_ix);
+                        return CorePoint::new(path, last_len);
+                    }
+
+                    remaining = remaining.saturating_sub(len);
+                }
+                Node::Element(_) => {}
+            }
+        }
+
+        let (last_ix, last_len) = text_nodes.last().copied().unwrap();
+        let mut path = block_path.to_vec();
+        path.push(last_ix);
+        CorePoint::new(path, last_len)
+    }
+
+    fn tx_replace_range_in_block(
         &self,
-        at: &CorePoint,
+        block_path: &[usize],
+        range: Range<usize>,
         inserted: &str,
+        inserted_marks: &Marks,
+        selection_after: Option<(usize, usize)>,
         source: &'static str,
     ) -> Option<gpui_plate_core::Transaction> {
-        if at.path.len() != 2 || at.path[1] != 0 {
+        if inserted.contains('\n') {
             return None;
         }
-        let row = at.path[0];
-        let Some(existing) = self.paragraph_text(row) else {
+
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
             return None;
+        }
+
+        let old_children = el.children.clone();
+        let row_len = self.block_text_len_in_block(block_path);
+        let start = range.start.min(row_len);
+        let end = range.end.min(row_len).max(start);
+
+        let (left, rest) = Self::split_inline_children_at_offset(&old_children, start);
+        let (_removed, right) = Self::split_inline_children_at_offset(&rest, end - start);
+
+        let mut new_children = left;
+        if !inserted.is_empty() {
+            new_children.push(Node::Text(TextNode {
+                text: inserted.to_string(),
+                marks: inserted_marks.clone(),
+            }));
+        }
+        new_children.extend(right);
+        new_children = Self::merge_adjacent_text_nodes(new_children);
+        new_children = Self::ensure_has_text_leaf(new_children, inserted_marks);
+
+        let (anchor, focus) = if let Some((a, b)) = selection_after {
+            (
+                Self::point_for_block_offset_in_children(block_path, &new_children, a),
+                Self::point_for_block_offset_in_children(block_path, &new_children, b),
+            )
+        } else {
+            let caret = start + inserted.len();
+            let point = Self::point_for_block_offset_in_children(block_path, &new_children, caret);
+            (point.clone(), point)
         };
-
-        let existing = existing.to_string();
-        let len = existing.len();
-        let offset = at.offset.min(len);
-        let tail = existing.get(offset..).unwrap_or("").to_string();
-
-        let parts: Vec<&str> = inserted.split('\n').collect();
-        if parts.len() <= 1 {
-            return Some(
-                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::InsertText {
-                    path: at.path.clone(),
-                    offset,
-                    text: inserted.to_string(),
-                }])
-                .selection_after(Selection::collapsed(CorePoint::new(
-                    at.path.clone(),
-                    offset + inserted.len(),
-                )))
-                .source(source),
-            );
-        }
+        let selection_after = Selection { anchor, focus };
 
         let mut ops = Vec::new();
-        ops.push(gpui_plate_core::Op::RemoveText {
-            path: at.path.clone(),
-            range: offset..len,
-        });
-        if !parts[0].is_empty() {
-            ops.push(gpui_plate_core::Op::InsertText {
-                path: at.path.clone(),
-                offset,
-                text: parts[0].to_string(),
-            });
+        for child_ix in (0..old_children.len()).rev() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in new_children.into_iter().enumerate() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
         }
 
-        let last_ix = parts.len() - 1;
-        for (i, part) in parts.iter().enumerate().skip(1) {
-            let text = if i == last_ix {
-                format!("{part}{tail}")
-            } else {
-                (*part).to_string()
-            };
-            ops.push(gpui_plate_core::Op::InsertNode {
-                path: vec![row + i],
-                node: Node::paragraph(text),
-            });
-        }
-
-        let selection_after =
-            Selection::collapsed(CorePoint::new(vec![row + last_ix, 0], parts[last_ix].len()));
         Some(
             gpui_plate_core::Transaction::new(ops)
                 .selection_after(selection_after)
@@ -433,69 +881,495 @@ impl RichTextNextState {
         )
     }
 
-    fn delete_selection_transaction(&self) -> Option<(gpui_plate_core::Transaction, CorePoint)> {
-        let sel = self.editor.selection();
-        if sel.is_collapsed() {
+    fn tx_replace_range_with_multiline_text_in_block(
+        &self,
+        block_path: &[usize],
+        range: Range<usize>,
+        inserted: &str,
+        inserted_marks: &Marks,
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if el.kind != "paragraph" && el.kind != "list_item" {
             return None;
         }
 
-        let (start, end) = self.ordered_selection_points();
-        if start.path.len() != 2 || end.path.len() != 2 || start.path[1] != 0 || end.path[1] != 0 {
-            return None;
+        let parts: Vec<&str> = inserted.split('\n').collect();
+        if parts.len() <= 1 {
+            return self.tx_replace_range_in_block(
+                block_path,
+                range,
+                inserted,
+                inserted_marks,
+                None,
+                source,
+            );
         }
 
-        let start_row = start.path[0];
-        let end_row = end.path[0];
-        if start_row == end_row {
-            return Some((
-                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
-                    path: start.path.clone(),
-                    range: start.offset..end.offset,
-                }])
-                .selection_after(Selection::collapsed(start.clone()))
-                .source("selection:delete"),
-                start,
-            ));
-        }
+        let is_list_item = el.kind == "list_item";
+        let block_attrs = el.attrs.clone();
 
-        let start_text = self.paragraph_text(start_row)?.to_string();
-        let end_text = self.paragraph_text(end_row)?.to_string();
-        let tail = end_text.get(end.offset..).unwrap_or("").to_string();
-        let start_len = start_text.len();
+        let old_children = el.children.clone();
+        let row_len = self.block_text_len_in_block(block_path);
+        let start = range.start.min(row_len);
+        let end = range.end.min(row_len).max(start);
+
+        let (left, rest) = Self::split_inline_children_at_offset(&old_children, start);
+        let (_removed, right) = Self::split_inline_children_at_offset(&rest, end - start);
+
+        let mut first_children = left;
+        if !parts[0].is_empty() {
+            first_children.push(Node::Text(TextNode {
+                text: parts[0].to_string(),
+                marks: inserted_marks.clone(),
+            }));
+        }
+        first_children = Self::merge_adjacent_text_nodes(first_children);
+        first_children = Self::ensure_has_text_leaf(first_children, inserted_marks);
+
+        let last_ix = parts.len() - 1;
+        let mut inserted_blocks: Vec<Node> = Vec::new();
+        let mut last_children: Vec<Node> = Vec::new();
+
+        for (i, part) in parts.iter().enumerate().skip(1) {
+            let mut children: Vec<Node> = Vec::new();
+            if !part.is_empty() {
+                children.push(Node::Text(TextNode {
+                    text: (*part).to_string(),
+                    marks: inserted_marks.clone(),
+                }));
+            }
+            if i == last_ix {
+                children.extend(right.clone());
+                children = Self::merge_adjacent_text_nodes(children);
+                children = Self::ensure_has_text_leaf(children, inserted_marks);
+                last_children = children.clone();
+            } else {
+                children = Self::merge_adjacent_text_nodes(children);
+                children = Self::ensure_has_text_leaf(children, inserted_marks);
+            }
+
+            let node = if is_list_item {
+                Node::Element(ElementNode {
+                    kind: "list_item".to_string(),
+                    attrs: block_attrs.clone(),
+                    children,
+                })
+            } else {
+                Node::Element(ElementNode {
+                    kind: "paragraph".to_string(),
+                    attrs: Default::default(),
+                    children,
+                })
+            };
+            inserted_blocks.push(node);
+        }
 
         let mut ops = Vec::new();
-        ops.push(gpui_plate_core::Op::RemoveText {
-            path: start.path.clone(),
-            range: start.offset..start_len,
-        });
-        if !tail.is_empty() {
-            ops.push(gpui_plate_core::Op::InsertText {
-                path: start.path.clone(),
-                offset: start.offset,
-                text: tail,
-            });
+        for child_ix in (0..old_children.len()).rev() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in first_children.into_iter().enumerate() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
         }
 
-        for row in (start_row + 1..=end_row).rev() {
-            ops.push(gpui_plate_core::Op::RemoveNode { path: vec![row] });
+        let (block_ix, parent_path) = block_path.split_last()?;
+        for (i, node) in inserted_blocks.into_iter().enumerate() {
+            let mut path = parent_path.to_vec();
+            path.push(block_ix + i + 1);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
         }
 
-        Some((
+        let mut last_block_path = parent_path.to_vec();
+        last_block_path.push(block_ix + last_ix);
+        let caret_offset = parts[last_ix].len();
+        let caret_point = Self::point_for_block_offset_in_children(
+            &last_block_path,
+            &last_children,
+            caret_offset,
+        );
+
+        Some(
             gpui_plate_core::Transaction::new(ops)
-                .selection_after(Selection::collapsed(start.clone()))
-                .source("selection:delete_multi_paragraph"),
-            start,
-        ))
+                .selection_after(Selection::collapsed(caret_point))
+                .source(source),
+        )
+    }
+
+    fn tx_insert_multiline_text_at_block_offset(
+        &self,
+        block_path: &[usize],
+        offset: usize,
+        inserted: &str,
+        inserted_marks: &Marks,
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        self.tx_replace_range_with_multiline_text_in_block(
+            block_path,
+            offset..offset,
+            inserted,
+            inserted_marks,
+            source,
+        )
+    }
+
+    fn delete_selection_transaction(&self) -> Option<gpui_plate_core::Transaction> {
+        let selection = self.editor.selection().clone();
+        if selection.is_collapsed() {
+            return None;
+        }
+
+        let mut start = selection.anchor.clone();
+        let mut end = selection.focus.clone();
+        if start.path == end.path {
+            if end.offset < start.offset {
+                std::mem::swap(&mut start, &mut end);
+            }
+        } else if end.path < start.path {
+            std::mem::swap(&mut start, &mut end);
+        }
+
+        let start_offset = self.row_offset_for_point(&start)?;
+        let end_offset = self.row_offset_for_point(&end)?;
+
+        let start_block: Vec<usize> = start.path.split_last().map(|(_, p)| p.to_vec())?;
+        let end_block: Vec<usize> = end.path.split_last().map(|(_, p)| p.to_vec())?;
+
+        let marks = self.active_marks();
+
+        if start_block == end_block {
+            return self.tx_replace_range_in_block(
+                &start_block,
+                start_offset..end_offset,
+                "",
+                &marks,
+                None,
+                "selection:delete",
+            );
+        }
+
+        let start_el = element_at_path(self.editor.doc(), &start_block)?;
+        let end_el = element_at_path(self.editor.doc(), &end_block)?;
+        if (start_el.kind != "paragraph" && start_el.kind != "list_item")
+            || (end_el.kind != "paragraph" && end_el.kind != "list_item")
+        {
+            return None;
+        }
+
+        let (start_ix, start_parent) = start_block.split_last()?;
+        let (end_ix, end_parent) = end_block.split_last()?;
+
+        let list_compatible = if start_el.kind == "list_item" {
+            if end_el.kind != "list_item" {
+                false
+            } else {
+                let start_type = start_el.attrs.get("list_type").and_then(|v| v.as_str());
+                let end_type = end_el.attrs.get("list_type").and_then(|v| v.as_str());
+                let start_level = start_el
+                    .attrs
+                    .get("list_level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let end_level = end_el
+                    .attrs
+                    .get("list_level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                start_type == end_type && start_level == end_level
+            }
+        } else {
+            start_el.kind == end_el.kind
+        };
+
+        let same_parent = start_parent == end_parent && *start_ix <= *end_ix;
+        if list_compatible && same_parent {
+            let start_children = start_el.children.clone();
+            let end_children = end_el.children.clone();
+
+            let (start_left, _start_right) =
+                Self::split_inline_children_at_offset(&start_children, start_offset);
+            let (_end_left, end_right) =
+                Self::split_inline_children_at_offset(&end_children, end_offset);
+
+            let mut merged_children = start_left;
+            merged_children.extend(end_right);
+            merged_children = Self::merge_adjacent_text_nodes(merged_children);
+            merged_children = Self::ensure_has_text_leaf(merged_children, &marks);
+
+            let selection_after = Selection::collapsed(Self::point_for_block_offset_in_children(
+                &start_block,
+                &merged_children,
+                start_offset,
+            ));
+
+            let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+            for child_ix in (0..start_children.len()).rev() {
+                let mut path = start_block.clone();
+                path.push(child_ix);
+                ops.push(gpui_plate_core::Op::RemoveNode { path });
+            }
+            for (child_ix, node) in merged_children.into_iter().enumerate() {
+                let mut path = start_block.clone();
+                path.push(child_ix);
+                ops.push(gpui_plate_core::Op::InsertNode { path, node });
+            }
+
+            for ix in (*start_ix + 1..=*end_ix).rev() {
+                let mut path = start_parent.to_vec();
+                path.push(ix);
+                ops.push(gpui_plate_core::Op::RemoveNode { path });
+            }
+
+            return Some(
+                gpui_plate_core::Transaction::new(ops)
+                    .selection_after(selection_after)
+                    .source("selection:delete_multi_block_merge"),
+            );
+        }
+
+        let blocks = text_block_paths(self.editor.doc());
+        let start_pos = blocks.iter().position(|p| p == &start_block)?;
+        let end_pos = blocks.iter().position(|p| p == &end_block)?;
+        let (start_pos, end_pos) = if start_pos <= end_pos {
+            (start_pos, end_pos)
+        } else {
+            (end_pos, start_pos)
+        };
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        let mut selection_after: Option<Selection> = None;
+
+        for (ix, block_path) in blocks.iter().enumerate().take(end_pos + 1).skip(start_pos) {
+            let len = self.block_text_len_in_block(block_path);
+            let range = if ix == start_pos {
+                start_offset..len
+            } else if ix == end_pos {
+                0..end_offset.min(len)
+            } else {
+                0..len
+            };
+            if range.start >= range.end {
+                continue;
+            }
+
+            let Some(tx) = self.tx_replace_range_in_block(
+                block_path,
+                range,
+                "",
+                &marks,
+                None,
+                "selection:delete:block",
+            ) else {
+                continue;
+            };
+
+            if selection_after.is_none() && ix == start_pos {
+                selection_after = tx.selection_after.clone();
+            }
+            ops.extend(tx.ops);
+        }
+
+        let selection_after = selection_after.unwrap_or_else(|| {
+            Selection::collapsed(
+                self.point_for_block_offset(&start_block, start_offset)
+                    .unwrap_or_else(|| CorePoint::new(start.path.clone(), start.offset)),
+            )
+        });
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source("selection:delete_multi_block_clear"),
+        )
     }
 
     fn delete_selection_if_any(&mut self, cx: &mut Context<Self>) -> Option<CorePoint> {
-        let (tx, collapse_to) = self.delete_selection_transaction()?;
+        let tx = self.delete_selection_transaction()?;
         self.push_tx(tx, cx);
-        Some(collapse_to)
+        Some(self.editor.selection().focus.clone())
     }
 
-    fn offset_for_point(&self, row: usize, point: gpui::Point<Pixels>) -> Option<usize> {
-        let cache = self.layout_cache.get(row).and_then(|c| c.as_ref())?;
+    fn tx_join_block_with_previous_in_block(
+        &self,
+        block_path: &[usize],
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        let (block_ix, parent_path) = block_path.split_last()?;
+        if *block_ix == 0 {
+            return None;
+        }
+
+        let mut prev_path = parent_path.to_vec();
+        prev_path.push(block_ix.saturating_sub(1));
+
+        let doc = self.editor.doc();
+        let prev_el = element_at_path(doc, &prev_path)?;
+        let cur_el = element_at_path(doc, block_path)?;
+
+        if (prev_el.kind != "paragraph" && prev_el.kind != "list_item")
+            || (cur_el.kind != "paragraph" && cur_el.kind != "list_item")
+        {
+            return None;
+        }
+
+        if cur_el.kind == "list_item" {
+            if prev_el.kind != "list_item" {
+                return None;
+            }
+            let cur_type = cur_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let prev_type = prev_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let cur_level = cur_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let prev_level = prev_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if cur_type != prev_type || cur_level != prev_level {
+                return None;
+            }
+        }
+
+        let caret_offset = self.block_text_len_in_block(&prev_path);
+        let marks = self.active_marks();
+
+        let mut merged_children = prev_el.children.clone();
+        merged_children.extend(cur_el.children.clone());
+        merged_children = Self::merge_adjacent_text_nodes(merged_children);
+        merged_children = Self::ensure_has_text_leaf(merged_children, &marks);
+
+        let selection_after = Selection::collapsed(Self::point_for_block_offset_in_children(
+            &prev_path,
+            &merged_children,
+            caret_offset,
+        ));
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        for child_ix in (0..prev_el.children.len()).rev() {
+            let mut path = prev_path.clone();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in merged_children.into_iter().enumerate() {
+            let mut path = prev_path.clone();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+        ops.push(gpui_plate_core::Op::RemoveNode {
+            path: block_path.to_vec(),
+        });
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source),
+        )
+    }
+
+    fn tx_join_block_with_next_in_block(
+        &self,
+        block_path: &[usize],
+        source: &'static str,
+    ) -> Option<gpui_plate_core::Transaction> {
+        let (block_ix, parent_path) = block_path.split_last()?;
+        let mut next_path = parent_path.to_vec();
+        next_path.push(block_ix + 1);
+
+        let doc = self.editor.doc();
+        let cur_el = element_at_path(doc, block_path)?;
+        let next_el = element_at_path(doc, &next_path)?;
+
+        if (cur_el.kind != "paragraph" && cur_el.kind != "list_item")
+            || (next_el.kind != "paragraph" && next_el.kind != "list_item")
+        {
+            return None;
+        }
+
+        if cur_el.kind == "list_item" {
+            if next_el.kind != "list_item" {
+                return None;
+            }
+            let cur_type = cur_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let next_type = next_el.attrs.get("list_type").and_then(|v| v.as_str());
+            let cur_level = cur_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let next_level = next_el
+                .attrs
+                .get("list_level")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if cur_type != next_type || cur_level != next_level {
+                return None;
+            }
+        }
+
+        let caret_offset = self.block_text_len_in_block(block_path);
+        let marks = self.active_marks();
+
+        let mut merged_children = cur_el.children.clone();
+        merged_children.extend(next_el.children.clone());
+        merged_children = Self::merge_adjacent_text_nodes(merged_children);
+        merged_children = Self::ensure_has_text_leaf(merged_children, &marks);
+
+        let selection_after = Selection::collapsed(Self::point_for_block_offset_in_children(
+            block_path,
+            &merged_children,
+            caret_offset,
+        ));
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        for child_ix in (0..cur_el.children.len()).rev() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::RemoveNode { path });
+        }
+        for (child_ix, node) in merged_children.into_iter().enumerate() {
+            let mut path = block_path.to_vec();
+            path.push(child_ix);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+        ops.push(gpui_plate_core::Op::RemoveNode { path: next_path });
+
+        Some(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source),
+        )
+    }
+
+    fn prev_text_block_path(&self, block_path: &[usize]) -> Option<Vec<usize>> {
+        let ix = self
+            .text_block_order
+            .iter()
+            .position(|p| p.as_slice() == block_path)?;
+        ix.checked_sub(1)
+            .and_then(|prev| self.text_block_order.get(prev).cloned())
+    }
+
+    fn next_text_block_path(&self, block_path: &[usize]) -> Option<Vec<usize>> {
+        let ix = self
+            .text_block_order
+            .iter()
+            .position(|p| p.as_slice() == block_path)?;
+        self.text_block_order.get(ix + 1).cloned()
+    }
+
+    fn offset_for_point_in_block(
+        &self,
+        block_path: &[usize],
+        point: gpui::Point<Pixels>,
+    ) -> Option<usize> {
+        let cache = self.layout_cache.get(block_path)?;
         let mut local = match cache.text_layout.index_for_position(point) {
             Ok(ix) | Err(ix) => ix,
         };
@@ -503,57 +1377,98 @@ impl RichTextNextState {
         Some(local)
     }
 
-    fn block_text_len(&self, row: usize) -> usize {
-        if let Some(Node::Element(el)) = self.editor.doc().children.get(row)
-            && el.kind == "paragraph"
-        {
-            if let Some(Node::Text(t)) = el.children.first() {
-                return t.text.len();
-            }
-        }
-        0
-    }
+    fn link_at_offset(&self, block_path: &[usize], offset: usize) -> Option<String> {
+        let cache = self.layout_cache.get(block_path)?;
 
-    fn paragraph_row_for_point(&self, point: gpui::Point<Pixels>) -> Option<usize> {
-        let mut first: Option<usize> = None;
-        let mut last: Option<usize> = None;
-
-        for (row, cache) in self.layout_cache.iter().enumerate() {
-            let Some(cache) = cache.as_ref() else {
-                continue;
-            };
-            first.get_or_insert(row);
-            last = Some(row);
-            if point.y >= cache.bounds.top() && point.y <= cache.bounds.bottom() {
-                return Some(row);
+        let candidates = [offset, offset.saturating_sub(1)];
+        for candidate in candidates {
+            for seg in &cache.segments {
+                if seg.len == 0 {
+                    continue;
+                }
+                if candidate >= seg.start && candidate < seg.start + seg.len {
+                    return seg.marks.link.clone();
+                }
             }
-        }
-
-        // Clicked outside any cached line; clamp to nearest known paragraph row.
-        if let (Some(first), Some(last)) = (first, last) {
-            if let Some(first_cache) = self.layout_cache.get(first).and_then(|c| c.as_ref())
-                && point.y < first_cache.bounds.top()
-            {
-                return Some(first);
-            }
-            return Some(last);
         }
 
         None
     }
 
+    fn block_text_len_in_block(&self, block_path: &[usize]) -> usize {
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return 0;
+        };
+        if el.kind != "paragraph" && el.kind != "list_item" {
+            return 0;
+        }
+
+        el.children
+            .iter()
+            .map(|child| match child {
+                Node::Text(t) => t.text.len(),
+                Node::Void(v) => v.inline_text_len(),
+                Node::Element(_) => 0,
+            })
+            .sum()
+    }
+
+    fn text_block_path_for_point(&self, point: gpui::Point<Pixels>) -> Option<Vec<usize>> {
+        for (path, cache) in &self.layout_cache {
+            if cache.bounds.contains(&point) {
+                return Some(path.clone());
+            }
+        }
+
+        let mut best: Option<(Pixels, Vec<usize>)> = None;
+        for (path, cache) in &self.layout_cache {
+            let dist = if point.y < cache.bounds.top() {
+                cache.bounds.top() - point.y
+            } else if point.y > cache.bounds.bottom() {
+                point.y - cache.bounds.bottom()
+            } else {
+                px(0.)
+            };
+            match &best {
+                None => best = Some((dist, path.clone())),
+                Some((best_dist, _)) if dist < *best_dist => best = Some((dist, path.clone())),
+                _ => {}
+            }
+        }
+        best.map(|(_, path)| path)
+    }
+
     fn push_tx(&mut self, tx: gpui_plate_core::Transaction, cx: &mut Context<Self>) {
         if self.editor.apply(tx).is_ok() {
             _ = self.scroll_cursor_into_view();
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
             cx.notify();
         }
     }
 
+    fn run_command_and_refresh(
+        &mut self,
+        id: &'static str,
+        args: Option<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.editor.run_command(id, args).is_ok() {
+            _ = self.scroll_cursor_into_view();
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     fn scroll_cursor_into_view(&mut self) -> bool {
-        let Some(row) = self.editor.selection().focus.path.first().copied() else {
+        let Some(block_path) = self.active_text_block_path() else {
             return false;
         };
-        let Some(cache) = self.layout_cache.get(row).and_then(|c| c.as_ref()) else {
+        let Some(cache) = self.layout_cache.get(block_path.as_slice()) else {
             return false;
         };
         let viewport = self.viewport_bounds;
@@ -562,10 +1477,8 @@ impl RichTextNextState {
         }
 
         let caret_ix = self
-            .editor
-            .selection()
-            .focus
-            .offset
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
             .min(cache.text_layout.len());
         let Some(pos) = cache.text_layout.position_for_index(caret_ix).or_else(|| {
             cache
@@ -605,41 +1518,62 @@ impl RichTextNextState {
             return;
         }
 
-        let text = self.active_text();
-        let range = self.ordered_active_range();
-        if !range.is_empty() {
-            self.push_tx(
-                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
-                    path: self.active_text_path().unwrap_or_default(),
-                    range: range.clone(),
-                }])
-                .selection_after(Selection::collapsed(CorePoint::new(
-                    self.active_text_path().unwrap_or_default(),
-                    range.start,
-                )))
-                .source("key:backspace"),
-                cx,
-            );
+        let Some(block_path) = self.active_text_block_path() else {
             return;
-        }
-
-        let cursor = self.editor.selection().focus.offset;
-        let start = Self::prev_boundary(text.as_str(), cursor);
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(text.len());
+        let start = self.prev_cursor_offset_in_block(&block_path, text.as_str(), cursor);
         if start == cursor {
+            if cursor == 0 {
+                if let Some((block_ix, parent_path)) = block_path.split_last()
+                    && *block_ix > 0
+                {
+                    let mut prev_path = parent_path.to_vec();
+                    prev_path.push(block_ix.saturating_sub(1));
+
+                    if matches!(
+                        node_at_path(self.editor.doc(), &prev_path),
+                        Some(Node::Void(v)) if v.kind == "divider"
+                    ) {
+                        self.push_tx(
+                            gpui_plate_core::Transaction::new(vec![
+                                gpui_plate_core::Op::RemoveNode { path: prev_path },
+                            ])
+                            .source("key:backspace:remove_divider"),
+                            cx,
+                        );
+                        return;
+                    }
+
+                    if let Some(tx) =
+                        self.tx_join_block_with_previous_in_block(&block_path, "key:backspace:join")
+                    {
+                        self.push_tx(tx, cx);
+                        return;
+                    }
+                }
+
+                if self.active_list_type().is_some() {
+                    _ = self.run_command_and_refresh("list.unwrap", None, cx);
+                }
+            }
             return;
         }
-        self.push_tx(
-            gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
-                path: self.active_text_path().unwrap_or_default(),
-                range: start..cursor,
-            }])
-            .selection_after(Selection::collapsed(CorePoint::new(
-                self.active_text_path().unwrap_or_default(),
-                start,
-            )))
-            .source("key:backspace"),
-            cx,
-        );
+        let marks = self.active_marks();
+        if let Some(tx) = self.tx_replace_range_in_block(
+            &block_path,
+            start..cursor,
+            "",
+            &marks,
+            None,
+            "key:backspace",
+        ) {
+            self.push_tx(tx, cx);
+        }
     }
 
     pub(super) fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
@@ -647,88 +1581,168 @@ impl RichTextNextState {
             return;
         }
 
-        let text = self.active_text();
-        let range = self.ordered_active_range();
-        if !range.is_empty() {
-            self.backspace(&Backspace, _window, cx);
+        let Some(block_path) = self.active_text_block_path() else {
             return;
-        }
-
-        let cursor = self.editor.selection().focus.offset;
-        let end = Self::next_boundary(text.as_str(), cursor);
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(text.len());
+        let end = self.next_cursor_offset_in_block(&block_path, text.as_str(), cursor);
         if end == cursor {
+            if cursor == text.len()
+                && let Some((block_ix, parent_path)) = block_path.split_last()
+            {
+                let mut next_path = parent_path.to_vec();
+                next_path.push(block_ix + 1);
+
+                if matches!(
+                    node_at_path(self.editor.doc(), &next_path),
+                    Some(Node::Void(v)) if v.kind == "divider"
+                ) {
+                    self.push_tx(
+                        gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode {
+                            path: next_path,
+                        }])
+                        .source("key:delete:remove_divider"),
+                        cx,
+                    );
+                    return;
+                }
+
+                if let Some(tx) =
+                    self.tx_join_block_with_next_in_block(&block_path, "key:delete:join")
+                {
+                    self.push_tx(tx, cx);
+                }
+            }
             return;
         }
-        self.push_tx(
-            gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveText {
-                path: self.active_text_path().unwrap_or_default(),
-                range: cursor..end,
-            }])
-            .selection_after(Selection::collapsed(CorePoint::new(
-                self.active_text_path().unwrap_or_default(),
-                cursor,
-            )))
-            .source("key:delete"),
-            cx,
-        );
+        let marks = self.active_marks();
+        if let Some(tx) =
+            self.tx_replace_range_in_block(&block_path, cursor..end, "", &marks, None, "key:delete")
+        {
+            self.push_tx(tx, cx);
+        }
     }
 
     pub(super) fn enter(&mut self, _: &Enter, _window: &mut Window, cx: &mut Context<Self>) {
         _ = self.delete_selection_if_any(cx);
 
-        let block_ix = self.active_block_index();
-        let path = self.active_text_path().unwrap_or_default();
-        if path.len() < 2 {
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let Some(el) = element_at_path(self.editor.doc(), &block_path) else {
+            return;
+        };
+        let block_kind = el.kind.as_str();
+
+        let text_len = self.block_text_len_in_block(&block_path);
+        let cursor = self
+            .row_offset_for_point(&self.editor.selection().focus)
+            .unwrap_or(0)
+            .min(text_len);
+
+        if block_kind == "list_item" && text_len == 0 && cursor == 0 {
+            _ = self.run_command_and_refresh("list.unwrap", None, cx);
             return;
         }
 
-        let text = self.active_text();
-        let cursor = self.editor.selection().focus.offset.min(text.len());
-        let tail = text.as_str().get(cursor..).unwrap_or("").to_string();
-        let len = text.len();
-
-        let new_block_ix = block_ix.saturating_add(1);
-        let tx = gpui_plate_core::Transaction::new(vec![
-            gpui_plate_core::Op::RemoveText {
-                path: path.clone(),
-                range: cursor..len,
+        let marks = self.active_marks();
+        if let Some(tx) = self.tx_insert_multiline_text_at_block_offset(
+            &block_path,
+            cursor,
+            "\n",
+            &marks,
+            if block_kind == "list_item" {
+                "key:enter:split_list_item"
+            } else {
+                "key:enter:split_paragraph"
             },
-            gpui_plate_core::Op::InsertNode {
-                path: vec![new_block_ix],
-                node: Node::paragraph(tail),
-            },
-        ])
-        .selection_after(Selection::collapsed(CorePoint::new(
-            vec![new_block_ix, 0],
-            0,
-        )))
-        .source("key:enter:split_paragraph");
-        self.push_tx(tx, cx);
+        ) {
+            self.push_tx(tx, cx);
+        }
     }
 
     pub(super) fn left(&mut self, _: &MoveLeft, _window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.active_text();
         let sel = self.editor.selection().clone();
         if !sel.is_collapsed() {
-            let range = self.ordered_active_range();
-            self.set_selection_in_active_block(range.start, range.start, cx);
+            let mut start = sel.anchor.clone();
+            let mut end = sel.focus.clone();
+            if start.path == end.path {
+                if end.offset < start.offset {
+                    std::mem::swap(&mut start, &mut end);
+                }
+            } else if end.path < start.path {
+                std::mem::swap(&mut start, &mut end);
+            }
+            self.set_selection_points(start.clone(), start, cx);
             return;
         }
-        let cursor = sel.focus.offset;
-        let new_cursor = Self::prev_boundary(text.as_str(), cursor);
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == 0 {
+            if let Some(prev_path) = self.prev_text_block_path(&block_path) {
+                let offset = self.block_text_len_in_block(&prev_path);
+                let point = self
+                    .point_for_block_offset(&prev_path, offset)
+                    .unwrap_or_else(|| {
+                        let mut path = prev_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                self.set_selection_points(point.clone(), point, cx);
+                return;
+            }
+        }
+        let new_cursor = self.prev_cursor_offset_in_block(&block_path, text.as_str(), cursor);
         self.set_selection_in_active_block(new_cursor, new_cursor, cx);
     }
 
     pub(super) fn right(&mut self, _: &MoveRight, _window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.active_text();
         let sel = self.editor.selection().clone();
         if !sel.is_collapsed() {
-            let range = self.ordered_active_range();
-            self.set_selection_in_active_block(range.end, range.end, cx);
+            let mut start = sel.anchor.clone();
+            let mut end = sel.focus.clone();
+            if start.path == end.path {
+                if end.offset < start.offset {
+                    std::mem::swap(&mut start, &mut end);
+                }
+            } else if end.path < start.path {
+                std::mem::swap(&mut start, &mut end);
+            }
+            self.set_selection_points(end.clone(), end, cx);
             return;
         }
-        let cursor = sel.focus.offset;
-        let new_cursor = Self::next_boundary(text.as_str(), cursor);
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == text.len() {
+            if let Some(next_path) = self.next_text_block_path(&block_path) {
+                let point = self
+                    .point_for_block_offset(&next_path, 0)
+                    .unwrap_or_else(|| {
+                        let mut path = next_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                self.set_selection_points(point.clone(), point, cx);
+                return;
+            }
+        }
+        let new_cursor = self.next_cursor_offset_in_block(&block_path, text.as_str(), cursor);
         self.set_selection_in_active_block(new_cursor, new_cursor, cx);
     }
 
@@ -738,16 +1752,45 @@ impl RichTextNextState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = self.active_text();
         let sel = self.editor.selection().clone();
-        let cursor = sel.focus.offset;
-        let new_cursor = Self::prev_boundary(text.as_str(), cursor);
-        let anchor = if sel.is_collapsed() {
-            cursor
-        } else {
-            sel.anchor.offset
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
         };
-        self.set_selection_in_active_block(anchor, new_cursor, cx);
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == 0 {
+            if let Some(prev_path) = self.prev_text_block_path(&block_path) {
+                let focus = self
+                    .point_for_block_offset(&prev_path, self.block_text_len_in_block(&prev_path))
+                    .unwrap_or_else(|| {
+                        let mut path = prev_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                let anchor = if sel.is_collapsed() {
+                    self.point_for_block_offset(&block_path, cursor)
+                        .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+                } else {
+                    sel.anchor.clone()
+                };
+                self.set_selection_points(anchor, focus, cx);
+                return;
+            }
+        }
+        let new_cursor = self.prev_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        let focus = self
+            .point_for_block_offset(&block_path, new_cursor)
+            .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset));
+        let anchor = if sel.is_collapsed() {
+            self.point_for_block_offset(&block_path, cursor)
+                .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+        } else {
+            sel.anchor.clone()
+        };
+        self.set_selection_points(anchor, focus, cx);
     }
 
     pub(super) fn select_right(
@@ -756,28 +1799,97 @@ impl RichTextNextState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = self.active_text();
         let sel = self.editor.selection().clone();
-        let cursor = sel.focus.offset;
-        let new_cursor = Self::next_boundary(text.as_str(), cursor);
-        let anchor = if sel.is_collapsed() {
-            cursor
-        } else {
-            sel.anchor.offset
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
         };
-        self.set_selection_in_active_block(anchor, new_cursor, cx);
+        let text = self.text_block_text(&block_path).unwrap_or_default();
+        let cursor = self
+            .row_offset_for_point(&sel.focus)
+            .unwrap_or(0)
+            .min(text.len());
+        if cursor == text.len() {
+            if let Some(next_path) = self.next_text_block_path(&block_path) {
+                let focus = self
+                    .point_for_block_offset(&next_path, 0)
+                    .unwrap_or_else(|| {
+                        let mut path = next_path.clone();
+                        path.push(0);
+                        CorePoint::new(path, 0)
+                    });
+                let anchor = if sel.is_collapsed() {
+                    self.point_for_block_offset(&block_path, cursor)
+                        .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+                } else {
+                    sel.anchor.clone()
+                };
+                self.set_selection_points(anchor, focus, cx);
+                return;
+            }
+        }
+        let new_cursor = self.next_cursor_offset_in_block(&block_path, text.as_str(), cursor);
+        let focus = self
+            .point_for_block_offset(&block_path, new_cursor)
+            .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset));
+        let anchor = if sel.is_collapsed() {
+            self.point_for_block_offset(&block_path, cursor)
+                .unwrap_or_else(|| CorePoint::new(sel.focus.path.clone(), sel.focus.offset))
+        } else {
+            sel.anchor.clone()
+        };
+        self.set_selection_points(anchor, focus, cx);
     }
 
     pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.undo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
             cx.notify();
         }
     }
 
     pub(super) fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.redo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
             cx.notify();
         }
+    }
+
+    pub(super) fn copy(
+        &mut self,
+        _: &gpui_manos_plate::Copy,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_copy(cx);
+    }
+
+    pub(super) fn cut(
+        &mut self,
+        _: &gpui_manos_plate::Cut,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_cut(cx);
+    }
+
+    pub(super) fn paste(
+        &mut self,
+        _: &gpui_manos_plate::Paste,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_paste(cx);
+    }
+
+    pub(super) fn select_all(
+        &mut self,
+        _: &gpui_manos_plate::SelectAll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_select_all(cx);
     }
 
     pub(super) fn insert_divider(
@@ -786,63 +1898,277 @@ impl RichTextNextState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.editor.run_command("core.insert_divider", None).is_ok() {
-            cx.notify();
-        }
+        _ = self.run_command_and_refresh("core.insert_divider", None, cx);
+    }
+
+    pub(super) fn insert_mention(
+        &mut self,
+        _: &InsertMention,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "label": "Alice" });
+        _ = self.run_command_and_refresh("mention.insert", Some(args), cx);
+    }
+
+    pub(super) fn toggle_bold(
+        &mut self,
+        _: &ToggleBold,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
+    }
+
+    pub(super) fn toggle_bulleted_list(
+        &mut self,
+        _: &ToggleBulletedList,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("list.toggle_bulleted", None, cx);
+    }
+
+    pub(super) fn toggle_ordered_list(
+        &mut self,
+        _: &ToggleOrderedList,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("list.toggle_ordered", None, cx);
     }
 
     pub fn command_undo(&mut self, cx: &mut Context<Self>) {
         if self.editor.undo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
             cx.notify();
         }
     }
 
     pub fn command_redo(&mut self, cx: &mut Context<Self>) {
         if self.editor.redo() {
+            self.layout_cache.clear();
+            self.text_block_order = text_block_paths(self.editor.doc());
             cx.notify();
         }
     }
 
     pub fn command_insert_divider(&mut self, cx: &mut Context<Self>) {
-        if self.editor.run_command("core.insert_divider", None).is_ok() {
-            cx.notify();
+        _ = self.run_command_and_refresh("core.insert_divider", None, cx);
+    }
+
+    pub fn command_insert_mention(&mut self, label: String, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "label": label });
+        _ = self.run_command_and_refresh("mention.insert", Some(args), cx);
+    }
+
+    pub fn command_toggle_bold(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
+    }
+
+    pub fn command_toggle_bulleted_list(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("list.toggle_bulleted", None, cx);
+    }
+
+    pub fn command_toggle_ordered_list(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("list.toggle_ordered", None, cx);
+    }
+
+    pub fn command_insert_table(&mut self, rows: usize, cols: usize, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "rows": rows, "cols": cols });
+        _ = self.run_command_and_refresh("table.insert", Some(args), cx);
+    }
+
+    pub fn command_insert_table_row_below(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.insert_row_below", None, cx);
+    }
+
+    pub fn command_insert_table_col_right(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.insert_col_right", None, cx);
+    }
+
+    pub fn command_delete_table_row(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.delete_row", None, cx);
+    }
+
+    pub fn command_delete_table_col(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.delete_col", None, cx);
+    }
+
+    pub fn command_set_link(&mut self, url: String, cx: &mut Context<Self>) {
+        // UX: if there's no selection, apply link to the word under the caret so users get an
+        // immediate visual confirmation (instead of only affecting subsequent input).
+        if self.editor.selection().is_collapsed() {
+            if let Some(block_path) = self.active_text_block_path()
+                && let Some(text) = self.text_block_text(&block_path)
+            {
+                let cursor = self
+                    .row_offset_for_point(&self.editor.selection().focus)
+                    .unwrap_or(0)
+                    .min(text.len());
+                let text = text.as_str();
+                let mut range = Self::word_range(text, cursor);
+
+                let mut selected = text.get(range.clone()).unwrap_or("");
+                if range.start >= range.end || selected.chars().all(|ch| ch.is_whitespace()) {
+                    // If we landed on whitespace, try the next non-whitespace run to the right.
+                    let mut ix = range.end.min(text.len());
+                    while ix < text.len() {
+                        let Some(ch) = text.get(ix..).and_then(|s| s.chars().next()) else {
+                            break;
+                        };
+                        if !ch.is_whitespace() {
+                            range = Self::word_range(text, ix);
+                            selected = text.get(range.clone()).unwrap_or("");
+                            break;
+                        }
+                        ix = Self::next_boundary(text, ix);
+                    }
+                }
+
+                if range.start >= range.end || selected.chars().all(|ch| ch.is_whitespace()) {
+                    // If there's nothing meaningful to the right, try the left.
+                    let mut ix = range.start.min(text.len());
+                    while ix > 0 {
+                        let prev = Self::prev_boundary(text, ix);
+                        let Some(ch) = text.get(prev..).and_then(|s| s.chars().next()) else {
+                            break;
+                        };
+                        if !ch.is_whitespace() {
+                            range = Self::word_range(text, prev);
+                            selected = text.get(range.clone()).unwrap_or("");
+                            break;
+                        }
+                        ix = prev;
+                    }
+                }
+
+                if range.start < range.end && !selected.chars().all(|ch| ch.is_whitespace()) {
+                    self.set_selection_in_active_block(range.start, range.end, cx);
+                }
+            }
         }
+
+        let args = serde_json::json!({ "url": url });
+        _ = self.run_command_and_refresh("marks.set_link", Some(args), cx);
+    }
+
+    pub fn command_unset_link(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.unset_link", None, cx);
+    }
+
+    pub fn is_bold_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("marks.is_bold_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn has_link_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("marks.has_link_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn active_link_url(&self) -> Option<String> {
+        self.editor
+            .run_query::<Marks>("marks.get_active", None)
+            .ok()
+            .and_then(|m| m.link)
+    }
+
+    pub fn is_bulleted_list_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>(
+                "list.is_active",
+                Some(serde_json::json!({ "type": "bulleted" })),
+            )
+            .unwrap_or(false)
+    }
+
+    pub fn is_ordered_list_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>(
+                "list.is_active",
+                Some(serde_json::json!({ "type": "ordered" })),
+            )
+            .unwrap_or(false)
+    }
+
+    pub fn is_table_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("table.is_active", None)
+            .unwrap_or(false)
     }
 
     pub fn command_copy(&mut self, cx: &mut Context<Self>) {
-        let sel = self.editor.selection().clone();
-        if sel.is_collapsed() {
+        let selection = self.editor.selection().clone();
+        if selection.is_collapsed() {
             return;
         }
 
-        let (start, end) = self.ordered_selection_points();
-        if start.path.len() == 2 && end.path.len() == 2 && start.path[1] == 0 && end.path[1] == 0 {
-            let start_row = start.path[0];
-            let end_row = end.path[0];
-            if start_row == end_row {
-                let text = self.paragraph_text(start_row).unwrap_or_default();
-                let selected = text
-                    .as_str()
-                    .get(start.offset..end.offset)
-                    .unwrap_or("")
-                    .to_string();
-                cx.write_to_clipboard(ClipboardItem::new_string(selected));
-                return;
+        let mut start = selection.anchor.clone();
+        let mut end = selection.focus.clone();
+        if start.path == end.path {
+            if end.offset < start.offset {
+                std::mem::swap(&mut start, &mut end);
             }
+        } else if end.path < start.path {
+            std::mem::swap(&mut start, &mut end);
+        }
 
-            let mut out = String::new();
-            let start_text = self.paragraph_text(start_row).unwrap_or_default();
-            out.push_str(start_text.as_str().get(start.offset..).unwrap_or(""));
-            out.push('\n');
-            for row in (start_row + 1)..end_row {
-                let mid = self.paragraph_text(row).unwrap_or_default();
-                out.push_str(mid.as_str());
+        let start_offset = self.row_offset_for_point(&start).unwrap_or(0);
+        let end_offset = self.row_offset_for_point(&end).unwrap_or(0);
+
+        let Some(start_block) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
+            return;
+        };
+        let Some(end_block) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
+            return;
+        };
+
+        if start_block == end_block {
+            let text = self.text_block_text(&start_block).unwrap_or_default();
+            let start = start_offset.min(text.len());
+            let end = end_offset.min(text.len()).max(start);
+            let selected = text.as_str().get(start..end).unwrap_or("").to_string();
+            cx.write_to_clipboard(ClipboardItem::new_string(selected));
+            return;
+        }
+
+        let blocks = text_block_paths(self.editor.doc());
+        let Some(start_pos) = blocks.iter().position(|p| p == &start_block) else {
+            return;
+        };
+        let Some(end_pos) = blocks.iter().position(|p| p == &end_block) else {
+            return;
+        };
+        let (start_pos, end_pos) = if start_pos <= end_pos {
+            (start_pos, end_pos)
+        } else {
+            (end_pos, start_pos)
+        };
+
+        let mut out = String::new();
+        for (ix, block_path) in blocks.iter().enumerate().take(end_pos + 1).skip(start_pos) {
+            let text = self.text_block_text(block_path).unwrap_or_default();
+            if ix == start_pos {
+                let start = start_offset.min(text.len());
+                out.push_str(text.as_str().get(start..).unwrap_or(""));
+                out.push('\n');
+            } else if ix == end_pos {
+                let end = end_offset.min(text.len());
+                out.push_str(text.as_str().get(..end).unwrap_or(""));
+            } else {
+                out.push_str(text.as_str());
                 out.push('\n');
             }
-            let end_text = self.paragraph_text(end_row).unwrap_or_default();
-            out.push_str(end_text.as_str().get(..end.offset).unwrap_or(""));
-            cx.write_to_clipboard(ClipboardItem::new_string(out));
         }
+
+        cx.write_to_clipboard(ClipboardItem::new_string(out));
     }
 
     pub fn command_cut(&mut self, cx: &mut Context<Self>) {
@@ -863,35 +2189,42 @@ impl RichTextNextState {
         let insert_at = self
             .delete_selection_if_any(cx)
             .unwrap_or_else(|| self.editor.selection().focus.clone());
-        let path = insert_at.path.clone();
+        let Some((_, block_path)) = insert_at.path.split_last() else {
+            return;
+        };
+        let offset = self.row_offset_for_point(&insert_at).unwrap_or(0);
+        let marks = self.active_marks();
 
-        if new_text.contains('\n') {
-            if let Some(tx) = self.tx_insert_text_at_point(&insert_at, &new_text, "command:paste") {
-                self.push_tx(tx, cx);
-                return;
-            }
+        if let Some(tx) = self.tx_insert_multiline_text_at_block_offset(
+            block_path,
+            offset,
+            &new_text,
+            &marks,
+            "command:paste",
+        ) {
+            self.push_tx(tx, cx);
         }
-
-        let mut ops = Vec::new();
-        ops.push(gpui_plate_core::Op::InsertText {
-            path: path.clone(),
-            offset: insert_at.offset,
-            text: new_text.clone(),
-        });
-
-        let tx = gpui_plate_core::Transaction::new(ops)
-            .selection_after(Selection::collapsed(CorePoint::new(
-                path,
-                insert_at.offset + new_text.len(),
-            )))
-            .source("command:paste");
-        self.push_tx(tx, cx);
     }
 
     pub fn command_select_all(&mut self, cx: &mut Context<Self>) {
-        let row = self.active_block_index();
-        let len = self.block_text_len(row);
-        self.set_selection_in_row(row, 0, len, cx);
+        let blocks = text_block_paths(self.editor.doc());
+        let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
+            return;
+        };
+
+        let anchor = self.point_for_block_offset(first, 0).unwrap_or_else(|| {
+            let mut path = first.clone();
+            path.push(0);
+            CorePoint::new(path, 0)
+        });
+        let focus = self
+            .point_for_block_offset(last, self.block_text_len_in_block(last))
+            .unwrap_or_else(|| {
+                let mut path = last.clone();
+                path.push(0);
+                CorePoint::new(path, 0)
+            });
+        self.set_selection_points(anchor, focus, cx);
     }
 }
 
@@ -919,9 +2252,23 @@ impl EntityInputHandler for RichTextNextState {
         let text = self.active_text();
         let range = self.ordered_active_range();
         let utf16 = byte_to_utf16_range(text.as_str(), range.clone());
+
+        let sel = self.editor.selection();
+        let anchor_offset = self.row_offset_for_point(&sel.anchor).unwrap_or(0);
+        let focus_offset = self.row_offset_for_point(&sel.focus).unwrap_or(0);
+        let reversed = if let Some(active_block) = self.active_text_block_path() {
+            let anchor_block = sel.anchor.path.split_last().map(|(_, p)| p);
+            let focus_block = sel.focus.path.split_last().map(|(_, p)| p);
+            anchor_block == Some(active_block.as_slice())
+                && focus_block == Some(active_block.as_slice())
+                && focus_offset < anchor_offset
+        } else {
+            false
+        };
+
         Some(UTF16Selection {
             range: utf16,
-            reversed: self.editor.selection().focus.offset < self.editor.selection().anchor.offset,
+            reversed,
         })
     }
 
@@ -939,30 +2286,34 @@ impl EntityInputHandler for RichTextNextState {
             .or_else(|| self.ime_marked_range.clone())
             .unwrap_or_else(|| self.ordered_active_range());
 
-        let mut ops = Vec::new();
-        let path = self.active_text_path().unwrap_or_default();
-
-        if range_bytes.start < range_bytes.end {
-            ops.push(gpui_plate_core::Op::RemoveText {
-                path: path.clone(),
-                range: range_bytes.clone(),
-            });
-        }
-
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let marks = self.active_marks();
         let inserted = new_text.replace("\r\n", "\n").replace('\r', "\n");
-        if !inserted.is_empty() {
-            ops.push(gpui_plate_core::Op::InsertText {
-                path: path.clone(),
-                offset: range_bytes.start,
-                text: inserted.clone(),
-            });
-        }
 
-        let new_cursor = range_bytes.start + inserted.len();
-        let tx = gpui_plate_core::Transaction::new(ops)
-            .selection_after(Selection::collapsed(CorePoint::new(path, new_cursor)))
-            .source("ime:replace_text");
-        self.push_tx(tx, cx);
+        let tx = if inserted.contains('\n') {
+            self.tx_replace_range_with_multiline_text_in_block(
+                &block_path,
+                range_bytes.clone(),
+                &inserted,
+                &marks,
+                "ime:replace_text",
+            )
+        } else {
+            self.tx_replace_range_in_block(
+                &block_path,
+                range_bytes.clone(),
+                &inserted,
+                &marks,
+                None,
+                "ime:replace_text",
+            )
+        };
+
+        if let Some(tx) = tx {
+            self.push_tx(tx, cx);
+        }
         // Committed input ends any active preedit range.
         self.ime_marked_range = None;
     }
@@ -997,23 +2348,13 @@ impl EntityInputHandler for RichTextNextState {
             .or_else(|| self.ime_marked_range.clone())
             .unwrap_or_else(|| self.ordered_active_range());
 
-        let mut ops = Vec::new();
-        let path = self.active_text_path().unwrap_or_default();
-
-        if range_bytes.start < range_bytes.end {
-            ops.push(gpui_plate_core::Op::RemoveText {
-                path: path.clone(),
-                range: range_bytes.clone(),
-            });
-        }
-
+        let Some(block_path) = self.active_text_block_path() else {
+            return;
+        };
+        let marks = self.active_marks();
         let inserted = new_text.replace("\r\n", "\n").replace('\r', "\n");
-        if !inserted.is_empty() {
-            ops.push(gpui_plate_core::Op::InsertText {
-                path: path.clone(),
-                offset: range_bytes.start,
-                text: inserted.clone(),
-            });
+        if inserted.contains('\n') {
+            return;
         }
 
         let inserted_len = inserted.len();
@@ -1024,25 +2365,25 @@ impl EntityInputHandler for RichTextNextState {
         };
         self.ime_marked_range = marked.clone();
 
-        let selection_after =
+        let selection_after_offsets =
             if let (Some(marked), Some(sel_utf16)) = (marked, new_selected_range_utf16) {
                 let rel_start = utf16_to_byte(inserted.as_str(), sel_utf16.start);
                 let rel_end = utf16_to_byte(inserted.as_str(), sel_utf16.end);
-                Selection {
-                    anchor: CorePoint::new(path.clone(), marked.start + rel_start),
-                    focus: CorePoint::new(path.clone(), marked.start + rel_end),
-                }
+                Some((marked.start + rel_start, marked.start + rel_end))
             } else {
-                Selection::collapsed(CorePoint::new(
-                    path.clone(),
-                    range_bytes.start + inserted_len,
-                ))
+                None
             };
 
-        let tx = gpui_plate_core::Transaction::new(ops)
-            .selection_after(selection_after)
-            .source("ime:replace_and_mark_text");
-        self.push_tx(tx, cx);
+        if let Some(tx) = self.tx_replace_range_in_block(
+            &block_path,
+            range_bytes.clone(),
+            &inserted,
+            &marks,
+            selection_after_offsets,
+            "ime:replace_and_mark_text",
+        ) {
+            self.push_tx(tx, cx);
+        }
     }
 
     fn bounds_for_range(
@@ -1052,8 +2393,8 @@ impl EntityInputHandler for RichTextNextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let row = self.active_block_index();
-        let cache = self.layout_cache.get(row).and_then(|c| c.as_ref())?;
+        let block_path = self.active_text_block_path()?;
+        let cache = self.layout_cache.get(block_path.as_slice())?;
         let text = cache.text.as_str();
         let start = utf16_to_byte(text, range_utf16.start);
         let pos = cache.text_layout.position_for_index(start)?;
@@ -1070,8 +2411,8 @@ impl EntityInputHandler for RichTextNextState {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let row = self.active_block_index();
-        let byte_ix = self.offset_for_point(row, point)?;
+        let block_path = self.active_text_block_path()?;
+        let byte_ix = self.offset_for_point_in_block(&block_path, point)?;
         let text = self.active_text();
         Some(byte_to_utf16(text.as_str(), byte_ix))
     }
@@ -1085,61 +2426,83 @@ impl gpui::Focusable for RichTextNextState {
 
 pub struct RichTextNextLineElement {
     state: Entity<RichTextNextState>,
-    row: usize,
+    block_path: Vec<usize>,
     styled_text: StyledText,
     text: SharedString,
+    segments: Vec<InlineTextSegment>,
 }
 
 impl RichTextNextLineElement {
-    pub fn new(state: Entity<RichTextNextState>, row: usize) -> Self {
+    pub fn new(state: Entity<RichTextNextState>, block_path: Vec<usize>) -> Self {
         Self {
             state,
-            row,
+            block_path,
             styled_text: StyledText::new(SharedString::default()),
             text: SharedString::default(),
+            segments: Vec::new(),
         }
     }
 
-    fn paint_selection_positions(
-        start_position: Point<Pixels>,
-        end_position: Point<Pixels>,
+    fn paint_selection_range(
+        layout: &gpui::TextLayout,
+        range: Range<usize>,
         bounds: &Bounds<Pixels>,
         line_height: Pixels,
         window: &mut Window,
         selection_color: gpui::Hsla,
     ) {
-        if start_position.y == end_position.y {
-            window.paint_quad(gpui::quad(
-                Bounds::from_corners(
-                    start_position,
-                    point(end_position.x, end_position.y + line_height),
-                ),
-                px(0.),
-                selection_color,
-                gpui::Edges::default(),
-                gpui::transparent_black(),
-                gpui::BorderStyle::default(),
-            ));
+        let start_ix = range.start.min(layout.len());
+        let end_ix = range.end.min(layout.len());
+        if start_ix >= end_ix {
             return;
         }
 
-        window.paint_quad(gpui::quad(
-            Bounds::from_corners(
-                start_position,
-                point(bounds.right(), start_position.y + line_height),
-            ),
-            px(0.),
-            selection_color,
-            gpui::Edges::default(),
-            gpui::transparent_black(),
-            gpui::BorderStyle::default(),
-        ));
+        let Some(first_pos) = layout.position_for_index(0).or_else(|| {
+            layout
+                .position_for_index(layout.len())
+                .or_else(|| Some(bounds.origin))
+        }) else {
+            return;
+        };
+        let origin = first_pos;
 
-        if end_position.y > start_position.y + line_height {
+        let Some(line_layout) = layout.line_layout_for_index(start_ix) else {
+            return;
+        };
+
+        let mut boundaries: Vec<usize> = line_layout
+            .wrap_boundaries()
+            .iter()
+            .filter_map(|boundary| {
+                let run = line_layout.unwrapped_layout.runs.get(boundary.run_ix)?;
+                run.glyphs.get(boundary.glyph_ix).map(|g| g.index)
+            })
+            .collect();
+
+        // `wrap_boundaries` is empty for non-wrapping text; treat it as a single visual line.
+        boundaries.push(line_layout.len());
+        boundaries.dedup();
+
+        let mut seg_start = 0usize;
+        for (seg_ix, seg_end) in boundaries.into_iter().enumerate() {
+            let seg_start_ix = seg_start;
+            seg_start = seg_end;
+
+            let a = start_ix.max(seg_start_ix);
+            let b = end_ix.min(seg_end);
+            if a >= b {
+                continue;
+            }
+
+            let seg_origin_x = line_layout.unwrapped_layout.x_for_index(seg_start_ix);
+            let start_x = line_layout.unwrapped_layout.x_for_index(a) - seg_origin_x;
+            let end_x = line_layout.unwrapped_layout.x_for_index(b) - seg_origin_x;
+
+            let y = origin.y + line_height * seg_ix as f32;
             window.paint_quad(gpui::quad(
                 Bounds::from_corners(
-                    point(bounds.left(), start_position.y + line_height),
-                    point(bounds.right(), end_position.y),
+                    point(origin.x + start_x, y),
+                    point(origin.x + end_x, y + line_height),
                 ),
                 px(0.),
                 selection_color,
@@ -1148,18 +2511,6 @@ impl RichTextNextLineElement {
                 gpui::BorderStyle::default(),
             ));
         }
-
-        window.paint_quad(gpui::quad(
-            Bounds::from_corners(
-                point(bounds.left(), end_position.y),
-                point(end_position.x, end_position.y + line_height),
-            ),
-            px(0.),
-            selection_color,
-            gpui::Edges::default(),
-            gpui::transparent_black(),
-            gpui::BorderStyle::default(),
-        ));
     }
 }
 
@@ -1190,67 +2541,152 @@ impl Element for RichTextNextLineElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let (text, marks, marked_range) = {
+        let (text, segments, marked_range) = {
             let state = self.state.read(cx);
-            let Some(Node::Element(el)) = state.editor.doc().children.get(self.row) else {
+            let Some(el) = element_at_path(state.editor.doc(), &self.block_path) else {
                 return (window.request_layout(gpui::Style::default(), [], cx), ());
             };
-            if el.kind != "paragraph" {
+            if el.kind != "paragraph" && el.kind != "list_item" {
                 self.text = SharedString::default();
                 return (window.request_layout(gpui::Style::default(), [], cx), ());
             }
-            let Some(Node::Text(t)) = el.children.first() else {
-                return (window.request_layout(gpui::Style::default(), [], cx), ());
-            };
-            let active_row = state.active_block_index();
-            let marked = (active_row == self.row)
+
+            let mut combined = String::new();
+            let mut segments = Vec::new();
+            for (child_ix, child) in el.children.iter().enumerate() {
+                match child {
+                    Node::Text(t) => {
+                        let start = combined.len();
+                        combined.push_str(&t.text);
+                        segments.push(InlineTextSegment {
+                            child_ix,
+                            start,
+                            len: t.text.len(),
+                            marks: t.marks.clone(),
+                            kind: InlineTextSegmentKind::Text,
+                        });
+                    }
+                    Node::Void(v) => {
+                        let display = v.inline_text();
+                        let start = combined.len();
+                        combined.push_str(&display);
+                        segments.push(InlineTextSegment {
+                            child_ix,
+                            start,
+                            len: display.len(),
+                            marks: Marks::default(),
+                            kind: InlineTextSegmentKind::Void {
+                                kind: v.kind.clone().into(),
+                            },
+                        });
+                    }
+                    Node::Element(_) => {}
+                }
+            }
+            if segments.is_empty() {
+                segments.push(InlineTextSegment {
+                    child_ix: 0,
+                    start: 0,
+                    len: 0,
+                    marks: Marks::default(),
+                    kind: InlineTextSegmentKind::Text,
+                });
+            }
+
+            let marked = (state.active_text_block_path().as_ref() == Some(&self.block_path))
                 .then(|| state.ime_marked_range.clone())
                 .flatten();
-            (SharedString::new(t.text.clone()), t.marks.clone(), marked)
+            (SharedString::new(combined), segments, marked)
         };
 
         self.text = text.clone();
+        self.segments = segments.clone();
+
         let render_text: SharedString = if text.is_empty() { " ".into() } else { text };
-
-        let mut style = window.text_style();
-        if marks.bold {
-            style.font_weight = FontWeight::BOLD;
-        }
-        if marks.link.is_some() {
-            style.color = cx.theme().blue;
-            style.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(cx.theme().blue),
-                wavy: false,
-            });
-        }
-
-        let run_len = render_text.len().max(1);
-        let mut runs = Vec::new();
 
         let marked_range = marked_range
             .filter(|_| !self.text.is_empty())
             .map(|r| r.start.min(self.text.len())..r.end.min(self.text.len()))
             .filter(|r| r.start < r.end);
 
-        if let Some(marked) = marked_range {
-            if marked.start > 0 {
-                runs.push(style.clone().to_run(marked.start));
-            }
+        let mut runs = Vec::new();
 
-            let mut marked_style = style.clone();
-            marked_style.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(window.text_style().color),
-                wavy: false,
-            });
-            runs.push(marked_style.to_run(marked.len()));
-
-            if marked.end < run_len {
-                runs.push(style.to_run(run_len - marked.end));
+        let base_style = window.text_style();
+        if self.text.is_empty() {
+            let marks = segments
+                .first()
+                .map(|s| s.marks.clone())
+                .unwrap_or_default();
+            let mut style = base_style.clone();
+            if marks.bold {
+                style.font_weight = FontWeight::BOLD;
             }
+            if marks.link.is_some() {
+                style.color = cx.theme().blue;
+                style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(cx.theme().blue),
+                    wavy: false,
+                });
+            }
+            runs.push(style.to_run(1));
         } else {
-            runs.push(style.to_run(run_len));
+            for seg in segments.iter().filter(|s| s.len > 0) {
+                let mut style = base_style.clone();
+                if seg.marks.bold {
+                    style.font_weight = FontWeight::BOLD;
+                }
+                if seg.marks.link.is_some() {
+                    style.color = cx.theme().blue;
+                    style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(cx.theme().blue),
+                        wavy: false,
+                    });
+                }
+                if matches!(
+                    &seg.kind,
+                    InlineTextSegmentKind::Void { kind } if kind.as_ref() == "mention"
+                ) {
+                    style.color = cx.theme().foreground;
+                    style.background_color = Some(cx.theme().muted);
+                    style.underline = None;
+                    style.font_weight = FontWeight::MEDIUM;
+                }
+
+                if let Some(marked) = marked_range.clone() {
+                    let seg_start = seg.start;
+                    let seg_end = seg.start + seg.len;
+                    let sel_start = marked.start.max(seg_start);
+                    let sel_end = marked.end.min(seg_end);
+                    if sel_start >= sel_end {
+                        runs.push(style.to_run(seg.len));
+                        continue;
+                    }
+
+                    let before = sel_start - seg_start;
+                    let inside = sel_end - sel_start;
+                    let after = seg_end - sel_end;
+
+                    if before > 0 {
+                        runs.push(style.clone().to_run(before));
+                    }
+
+                    let mut marked_style = style.clone();
+                    marked_style.underline = Some(UnderlineStyle {
+                        thickness: px(1.),
+                        color: Some(window.text_style().color),
+                        wavy: false,
+                    });
+                    runs.push(marked_style.to_run(inside));
+
+                    if after > 0 {
+                        runs.push(style.to_run(after));
+                    }
+                } else {
+                    runs.push(style.to_run(seg.len));
+                }
+            }
         }
 
         self.styled_text = StyledText::new(render_text.clone()).with_runs(runs);
@@ -1273,17 +2709,19 @@ impl Element for RichTextNextLineElement {
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
 
         let text_layout = self.styled_text.layout().clone();
-        let row = self.row;
+        let block_path = self.block_path.clone();
         let text = self.text.clone();
+        let segments = self.segments.clone();
         self.state.update(cx, |state, _| {
-            if state.layout_cache.len() <= row {
-                state.layout_cache.resize_with(row + 1, || None);
-            }
-            state.layout_cache[row] = Some(LineLayoutCache {
-                bounds,
-                text_layout: text_layout.clone(),
-                text,
-            });
+            state.layout_cache.insert(
+                block_path,
+                LineLayoutCache {
+                    bounds,
+                    text_layout: text_layout.clone(),
+                    text,
+                    segments,
+                },
+            );
         });
 
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
@@ -1313,13 +2751,23 @@ impl Element for RichTextNextLineElement {
                 state.focus_handle.is_focused(window),
             )
         };
-        let path = vec![self.row, 0];
         let layout = self.styled_text.layout().clone();
         let line_height = layout.line_height();
 
         if selection.is_collapsed() {
-            if selection.focus.path == path && is_focused {
-                let caret_ix = selection.focus.offset.min(layout.len());
+            if selection
+                .focus
+                .path
+                .split_last()
+                .map(|(_, p)| p == self.block_path.as_slice())
+                .unwrap_or(false)
+                && is_focused
+            {
+                let caret_ix = {
+                    let state = self.state.read(cx);
+                    state.row_offset_for_point(&selection.focus).unwrap_or(0)
+                }
+                .min(layout.len());
                 if let Some(pos) = layout
                     .position_for_index(caret_ix)
                     .or_else(|| layout.position_for_index(layout.len()))
@@ -1337,7 +2785,6 @@ impl Element for RichTextNextLineElement {
             return;
         }
 
-        // Highlight selections over root paragraph text nodes (`[row, 0]`).
         let mut start = selection.anchor.clone();
         let mut end = selection.focus.clone();
         if start.path == end.path {
@@ -1347,23 +2794,34 @@ impl Element for RichTextNextLineElement {
         } else if end.path < start.path {
             std::mem::swap(&mut start, &mut end);
         }
-        if start.path.len() != 2 || end.path.len() != 2 || start.path[1] != 0 || end.path[1] != 0 {
+        if start.path.len() < 2 || end.path.len() < 2 {
             return;
         }
 
-        let start_row = start.path[0];
-        let end_row = end.path[0];
-        if self.row < start_row || self.row > end_row {
+        let Some(start_block) = start.path.split_last().map(|(_, p)| p) else {
+            return;
+        };
+        let Some(end_block) = end.path.split_last().map(|(_, p)| p) else {
+            return;
+        };
+        if self.block_path.as_slice() < start_block || self.block_path.as_slice() > end_block {
             return;
         }
 
         let row_len = self.text.len();
-        let (a, b) = if start_row == end_row {
-            (start.offset.min(row_len), end.offset.min(row_len))
-        } else if self.row == start_row {
-            (start.offset.min(row_len), row_len)
-        } else if self.row == end_row {
-            (0, end.offset.min(row_len))
+        let (a, b) = if start_block == end_block {
+            let state = self.state.read(cx);
+            let a = state.row_offset_for_point(&start).unwrap_or(0).min(row_len);
+            let b = state.row_offset_for_point(&end).unwrap_or(0).min(row_len);
+            (a, b)
+        } else if self.block_path.as_slice() == start_block {
+            let state = self.state.read(cx);
+            let a = state.row_offset_for_point(&start).unwrap_or(0).min(row_len);
+            (a, row_len)
+        } else if self.block_path.as_slice() == end_block {
+            let state = self.state.read(cx);
+            let b = state.row_offset_for_point(&end).unwrap_or(0).min(row_len);
+            (0, b)
         } else {
             (0, row_len)
         };
@@ -1372,21 +2830,14 @@ impl Element for RichTextNextLineElement {
             return;
         }
 
-        if let (Some(start_pos), Some(end_pos)) = (
-            layout.position_for_index(a.min(layout.len())),
-            layout
-                .position_for_index(b.min(layout.len()))
-                .or_else(|| layout.position_for_index(layout.len())),
-        ) {
-            Self::paint_selection_positions(
-                start_pos,
-                end_pos,
-                &bounds,
-                line_height,
-                window,
-                cx.theme().selection,
-            );
-        }
+        Self::paint_selection_range(
+            &layout,
+            a..b,
+            &bounds,
+            line_height,
+            window,
+            cx.theme().selection,
+        );
     }
 }
 
@@ -1481,24 +2932,52 @@ impl Element for RichTextNextInputHandlerElement {
                     return;
                 }
 
+                // Cmd/Ctrl-click opens a link instead of moving the caret.
+                if event.modifiers.secondary() && !event.modifiers.shift {
+                    let url = {
+                        let this = state.read(cx);
+                        let Some(block_path) = this.text_block_path_for_point(event.position)
+                        else {
+                            return;
+                        };
+                        let offset = this
+                            .offset_for_point_in_block(&block_path, event.position)
+                            .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                        this.link_at_offset(&block_path, offset)
+                    };
+                    if let Some(url) = url {
+                        cx.open_url(&url);
+                        return;
+                    }
+                }
+
                 let focus_handle = { state.read(cx).focus_handle.clone() };
                 window.focus(&focus_handle);
 
                 state.update(cx, |this, cx| {
-                    let Some(row) = this.paragraph_row_for_point(event.position) else {
+                    let Some(block_path) = this.text_block_path_for_point(event.position) else {
                         return;
                     };
 
                     let offset = this
-                        .offset_for_point(row, event.position)
-                        .unwrap_or_else(|| this.block_text_len(row));
-                    let focus = CorePoint::new(vec![row, 0], offset);
+                        .offset_for_point_in_block(&block_path, event.position)
+                        .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                    let focus = this
+                        .point_for_block_offset(&block_path, offset)
+                        .unwrap_or_else(|| {
+                            let mut path = block_path.clone();
+                            path.push(0);
+                            CorePoint::new(path, 0)
+                        });
 
                     if event.click_count >= 3 {
-                        let text = this.paragraph_text(row).unwrap_or_default();
-                        let range = RichTextNextState::line_range(text.as_str(), offset);
-                        let anchor = CorePoint::new(vec![row, 0], range.start);
-                        let focus = CorePoint::new(vec![row, 0], range.end);
+                        let range = 0..this.block_text_len_in_block(&block_path);
+                        let anchor = this
+                            .point_for_block_offset(&block_path, range.start)
+                            .unwrap_or_else(|| focus.clone());
+                        let focus = this
+                            .point_for_block_offset(&block_path, range.end)
+                            .unwrap_or_else(|| focus.clone());
                         this.set_selection_points(anchor, focus, cx);
                         // Do not enter "drag selecting" mode on multi-click. This avoids tiny mouse
                         // movements between down/up being interpreted as a drag that expands the
@@ -1509,10 +2988,15 @@ impl Element for RichTextNextInputHandlerElement {
                     }
 
                     if event.click_count == 2 {
-                        let text = this.paragraph_text(row).unwrap_or_default();
-                        let range = RichTextNextState::word_range(text.as_str(), offset);
-                        let anchor = CorePoint::new(vec![row, 0], range.start);
-                        let focus = CorePoint::new(vec![row, 0], range.end);
+                        let text = this.text_block_text(&block_path).unwrap_or_default();
+                        let range =
+                            this.word_or_void_range_in_block(&block_path, text.as_str(), offset);
+                        let anchor = this
+                            .point_for_block_offset(&block_path, range.start)
+                            .unwrap_or_else(|| focus.clone());
+                        let focus = this
+                            .point_for_block_offset(&block_path, range.end)
+                            .unwrap_or_else(|| focus.clone());
                         this.set_selection_points(anchor.clone(), focus, cx);
                         this.selecting = false;
                         this.selection_anchor = None;
@@ -1542,13 +3026,19 @@ impl Element for RichTextNextInputHandlerElement {
                     if !this.selecting {
                         return;
                     }
-                    let Some(row) = this.paragraph_row_for_point(event.position) else {
+                    let Some(block_path) = this.text_block_path_for_point(event.position) else {
                         return;
                     };
                     let offset = this
-                        .offset_for_point(row, event.position)
-                        .unwrap_or_else(|| this.block_text_len(row));
-                    let focus = CorePoint::new(vec![row, 0], offset);
+                        .offset_for_point_in_block(&block_path, event.position)
+                        .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                    let focus = this
+                        .point_for_block_offset(&block_path, offset)
+                        .unwrap_or_else(|| {
+                            let mut path = block_path.clone();
+                            path.push(0);
+                            CorePoint::new(path, 0)
+                        });
                     let anchor = this
                         .selection_anchor
                         .clone()
@@ -1584,19 +3074,185 @@ impl Render for RichTextNextState {
             self.did_auto_focus = true;
         }
 
-        let doc_len = self.editor.doc().children.len();
-        if self.layout_cache.len() > doc_len {
-            self.layout_cache.truncate(doc_len);
-        } else if self.layout_cache.len() < doc_len {
-            self.layout_cache.resize_with(doc_len, || None);
-        }
-
         let mut blocks: Vec<AnyElement> = Vec::new();
         for (row, node) in self.editor.doc().children.iter().enumerate() {
             match node {
                 Node::Element(el) if el.kind == "paragraph" => {
-                    blocks
-                        .push(RichTextNextLineElement::new(state.clone(), row).into_any_element());
+                    blocks.push(
+                        RichTextNextLineElement::new(state.clone(), vec![row]).into_any_element(),
+                    );
+                }
+                Node::Element(el) if el.kind == "list_item" => {
+                    let list_type = el
+                        .attrs
+                        .get("list_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("bulleted");
+                    let marker = if list_type == "ordered" {
+                        let ix = el
+                            .attrs
+                            .get("list_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1);
+                        format!("{ix}.")
+                    } else {
+                        "•".to_string()
+                    };
+                    let level = el
+                        .attrs
+                        .get("list_level")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let indent = px(16. * level as f32);
+                    blocks.push(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(8.))
+                            .pl(indent)
+                            .child(
+                                div()
+                                    .w(px(24.))
+                                    .flex()
+                                    .justify_end()
+                                    .text_color(theme.muted_foreground)
+                                    .child(marker),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(RichTextNextLineElement::new(state.clone(), vec![row])),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                Node::Element(el) if el.kind == "table" => {
+                    let mut rows: Vec<AnyElement> = Vec::new();
+                    for (row_ix, row_node) in el.children.iter().enumerate() {
+                        let Node::Element(row_el) = row_node else {
+                            continue;
+                        };
+                        if row_el.kind != "table_row" {
+                            continue;
+                        }
+
+                        let mut cells: Vec<AnyElement> = Vec::new();
+                        for (cell_ix, cell_node) in row_el.children.iter().enumerate() {
+                            let Node::Element(cell_el) = cell_node else {
+                                continue;
+                            };
+                            if cell_el.kind != "table_cell" {
+                                continue;
+                            }
+
+                            let mut cell_blocks: Vec<AnyElement> = Vec::new();
+                            for (block_ix, block_node) in cell_el.children.iter().enumerate() {
+                                let block_path = vec![row, row_ix, cell_ix, block_ix];
+                                match block_node {
+                                    Node::Element(block_el) if block_el.kind == "paragraph" => {
+                                        cell_blocks.push(
+                                            RichTextNextLineElement::new(state.clone(), block_path)
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    Node::Element(block_el) if block_el.kind == "list_item" => {
+                                        let list_type = block_el
+                                            .attrs
+                                            .get("list_type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("bulleted");
+                                        let marker = if list_type == "ordered" {
+                                            let ix = block_el
+                                                .attrs
+                                                .get("list_index")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(1);
+                                            format!("{ix}.")
+                                        } else {
+                                            "•".to_string()
+                                        };
+                                        let level = block_el
+                                            .attrs
+                                            .get("list_level")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let indent = px(16. * level as f32);
+                                        cell_blocks.push(
+                                            div()
+                                                .flex()
+                                                .flex_row()
+                                                .items_start()
+                                                .gap(px(8.))
+                                                .pl(indent)
+                                                .child(
+                                                    div()
+                                                        .w(px(24.))
+                                                        .flex()
+                                                        .justify_end()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(marker),
+                                                )
+                                                .child(div().flex_1().min_w(px(0.)).child(
+                                                    RichTextNextLineElement::new(
+                                                        state.clone(),
+                                                        block_path,
+                                                    ),
+                                                ))
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    Node::Void(v) if v.kind == "divider" => {
+                                        cell_blocks.push(
+                                            div()
+                                                .py(px(8.))
+                                                .child(div().w_full().h(px(1.)).bg(theme.border))
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    _ => {
+                                        cell_blocks.push(
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .italic()
+                                                .child("<unknown cell block>")
+                                                .into_any_element(),
+                                        );
+                                    }
+                                }
+                            }
+
+                            cells.push(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .p(px(6.))
+                                    .child(div().flex_col().gap(px(6.)).children(cell_blocks))
+                                    .into_any_element(),
+                            );
+                        }
+
+                        rows.push(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(6.))
+                                .children(cells)
+                                .into_any_element(),
+                        );
+                    }
+
+                    blocks.push(
+                        div()
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded(theme.radius / 2.)
+                            .p(px(6.))
+                            .child(div().flex_col().gap(px(6.)).children(rows))
+                            .into_any_element(),
+                    );
                 }
                 Node::Void(v) if v.kind == "divider" => {
                     blocks.push(
@@ -1611,7 +3267,14 @@ impl Render for RichTextNextState {
                         div()
                             .text_color(theme.muted_foreground)
                             .italic()
-                            .child(format!("<unknown node at {}>", row))
+                            .child(format!(
+                                "<unknown node at {row}: {:?}>",
+                                self.editor.doc().children.get(row).map(|n| match n {
+                                    Node::Element(el) => el.kind.as_str(),
+                                    Node::Void(v) => v.kind.as_str(),
+                                    Node::Text(_) => "text",
+                                })
+                            ))
                             .into_any_element(),
                     );
                 }
@@ -1640,7 +3303,15 @@ impl Render for RichTextNextState {
                     .on_action(window.listener_for(&state, RichTextNextState::select_right))
                     .on_action(window.listener_for(&state, RichTextNextState::undo))
                     .on_action(window.listener_for(&state, RichTextNextState::redo))
+                    .on_action(window.listener_for(&state, RichTextNextState::copy))
+                    .on_action(window.listener_for(&state, RichTextNextState::cut))
+                    .on_action(window.listener_for(&state, RichTextNextState::paste))
+                    .on_action(window.listener_for(&state, RichTextNextState::select_all))
                     .on_action(window.listener_for(&state, RichTextNextState::insert_divider))
+                    .on_action(window.listener_for(&state, RichTextNextState::insert_mention))
+                    .on_action(window.listener_for(&state, RichTextNextState::toggle_bold))
+                    .on_action(window.listener_for(&state, RichTextNextState::toggle_bulleted_list))
+                    .on_action(window.listener_for(&state, RichTextNextState::toggle_ordered_list))
             })
             .child(
                 div()
@@ -1696,6 +3367,7 @@ pub struct RichTextNextExample {
     app_menu_bar: Entity<AppMenuBar>,
     editor: Entity<RichTextNextState>,
     file_path: Option<PathBuf>,
+    link_input: Entity<InputState>,
 }
 
 impl RichTextNextExample {
@@ -1708,10 +3380,16 @@ impl RichTextNextExample {
         // Ensure typing works immediately without a first click.
         let focus_handle = editor.read(cx).focus_handle();
         window.focus(&focus_handle);
+        let link_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("https://example.com", window, cx);
+            state
+        });
         Self {
             app_menu_bar,
             editor,
             file_path: None,
+            link_input,
         }
     }
 
@@ -1721,6 +3399,39 @@ impl RichTextNextExample {
         cx: &mut App,
     ) -> Entity<Self> {
         cx.new(|cx| Self::new(app_menu_bar, window, cx))
+    }
+
+    fn open_link_dialog(&self, initial: String, window: &mut Window, cx: &mut Context<Self>) {
+        let link_input = self.link_input.clone();
+        let editor = self.editor.clone();
+
+        link_input.update(cx, |state, cx| {
+            state.set_value(initial, window, cx);
+        });
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let link_input = link_input.clone();
+            let editor = editor.clone();
+            let handle = link_input.focus_handle(cx);
+            window.focus(&handle);
+            dialog
+                .title("Set Link")
+                .w(px(520.))
+                .child(div().p(px(12.)).child(Input::new(&link_input).w_full()))
+                .on_ok(move |_, window, cx| {
+                    let url = link_input.read(cx).value().trim().to_string();
+                    editor.update(cx, |editor, cx| {
+                        if url.is_empty() {
+                            editor.command_unset_link(cx);
+                        } else {
+                            editor.command_set_link(url, cx);
+                        }
+                    });
+                    let handle = editor.read(cx).focus_handle();
+                    window.focus(&handle);
+                    true
+                })
+        });
     }
 
     fn open_from_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1825,8 +3536,18 @@ impl RichTextNextExample {
 impl Render for RichTextNextExample {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let can_undo = self.editor.read(cx).can_undo();
-        let can_redo = self.editor.read(cx).can_redo();
+        let (can_undo, can_redo, bold, link, bulleted, ordered, table_active) = {
+            let editor = self.editor.read(cx);
+            (
+                editor.can_undo(),
+                editor.can_redo(),
+                editor.is_bold_active(),
+                editor.has_link_active(),
+                editor.is_bulleted_list_active(),
+                editor.is_ordered_list_active(),
+                editor.is_table_active(),
+            )
+        };
 
         div()
             .size_full()
@@ -1924,6 +3645,124 @@ impl Render for RichTextNextExample {
                                     .update(cx, |ed, cx| ed.command_insert_divider(cx));
                                 let handle = this.editor.read(cx).focus_handle();
                                 window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("mention", PlateIconName::MessageSquareText)
+                            .tooltip("Insert mention (Cmd/Ctrl+Shift+M)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor.update(cx, |ed, cx| {
+                                    ed.command_insert_mention("Alice".into(), cx)
+                                });
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("table", PlateIconName::Table)
+                            .tooltip("Insert table (2×2)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_insert_table(2, 2, cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("table-row", PlateIconName::ArrowDownToLine)
+                            .disabled(!table_active)
+                            .tooltip("Insert row below")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_insert_table_row_below(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("table-col", PlateIconName::IndentIncrease)
+                            .disabled(!table_active)
+                            .tooltip("Insert column right")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_insert_table_col_right(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new(
+                            "table-delete-row",
+                            PlateIconName::ArrowUpToLine,
+                        )
+                        .disabled(!table_active)
+                        .tooltip("Delete row")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.editor
+                                .update(cx, |ed, cx| ed.command_delete_table_row(cx));
+                            let handle = this.editor.read(cx).focus_handle();
+                            window.focus(&handle);
+                        })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new(
+                            "table-delete-col",
+                            PlateIconName::IndentDecrease,
+                        )
+                        .disabled(!table_active)
+                        .tooltip("Delete column")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.editor
+                                .update(cx, |ed, cx| ed.command_delete_table_col(cx));
+                            let handle = this.editor.read(cx).focus_handle();
+                            window.focus(&handle);
+                        })),
+                    )
+                    .child(PlateToolbarSeparator)
+                    .child(
+                        PlateToolbarIconButton::new("bold", PlateIconName::Bold)
+                            .selected(bold)
+                            .tooltip("Bold (Cmd/Ctrl+B)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor.update(cx, |ed, cx| ed.command_toggle_bold(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("list", PlateIconName::List)
+                            .selected(bulleted)
+                            .tooltip("Bulleted list (Cmd/Ctrl+Shift+8)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_toggle_bulleted_list(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("list-ordered", PlateIconName::ListOrdered)
+                            .selected(ordered)
+                            .tooltip("Ordered list (Cmd/Ctrl+Shift+7)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_toggle_ordered_list(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("link", PlateIconName::Link)
+                            .selected(link)
+                            .tooltip(if link {
+                                "Edit link (clear URL to remove)"
+                            } else {
+                                "Set link"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let initial =
+                                    this.editor.read(cx).active_link_url().unwrap_or_default();
+                                this.open_link_dialog(initial, window, cx);
                             })),
                     )
                     .child(PlateToolbarSeparator)

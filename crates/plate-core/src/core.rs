@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::ops::{Op, Path, Transaction};
-use crate::plugin::{CommandError, CommandSpec, NodeSpec, NormalizePass, PluginRegistry};
+use crate::plugin::{
+    CommandError, CommandSpec, NodeSpec, NormalizePass, PluginRegistry, QueryError,
+};
 
 pub type Attrs = BTreeMap<String, serde_json::Value>;
 pub type ElementKind = String;
@@ -56,6 +60,40 @@ pub struct VoidNode {
     pub kind: ElementKind,
     #[serde(default)]
     pub attrs: Attrs,
+}
+
+impl VoidNode {
+    pub fn inline_text(&self) -> String {
+        match self.kind.as_str() {
+            "mention" => {
+                let label = self
+                    .attrs
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("mention");
+                if label.starts_with('@') {
+                    label.to_string()
+                } else {
+                    format!("@{label}")
+                }
+            }
+            _ => "□".to_string(),
+        }
+    }
+
+    pub fn inline_text_len(&self) -> usize {
+        match self.kind.as_str() {
+            "mention" => {
+                let label = self
+                    .attrs
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("mention");
+                label.len() + (!label.starts_with('@') as usize)
+            }
+            _ => 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,6 +201,15 @@ impl Editor {
         Self::new(doc, selection, registry)
     }
 
+    pub fn with_richtext_plugins() -> Self {
+        let registry = PluginRegistry::richtext();
+        let doc = Document {
+            children: vec![Node::paragraph("")],
+        };
+        let selection = Selection::collapsed(Point::new(vec![0, 0], 0));
+        Self::new(doc, selection, registry)
+    }
+
     pub fn doc(&self) -> &Document {
         &self.doc
     }
@@ -193,25 +240,30 @@ impl Editor {
             return false;
         };
 
-        let selection_before = self.selection.clone();
-        let mut redo_inverse: Vec<Op> = Vec::new();
-        for op in record.inverse_ops.iter().cloned() {
+        let UndoRecord {
+            inverse_ops,
+            selection_before,
+            selection_after,
+        } = record;
+
+        let mut redo_ops: Vec<Op> = Vec::new();
+        for op in inverse_ops.iter().cloned() {
             if let Ok(inv) = self.apply_op(op) {
-                redo_inverse.push(inv);
+                redo_ops.push(inv);
             } else {
                 // If we can't apply inverse ops, bail out and stop mutating further.
                 break;
             }
         }
+        redo_ops.reverse();
 
-        let selection_after = record.selection_before.clone();
-        self.selection = selection_after.clone();
+        self.selection = selection_before.clone();
         self.normalize_in_place();
 
         self.redo_stack.push(UndoRecord {
-            inverse_ops: redo_inverse,
             selection_before,
             selection_after,
+            inverse_ops: redo_ops,
         });
         true
     }
@@ -221,24 +273,29 @@ impl Editor {
             return false;
         };
 
-        let selection_before = self.selection.clone();
-        let mut undo_inverse: Vec<Op> = Vec::new();
-        for op in record.inverse_ops.iter().cloned() {
+        let UndoRecord {
+            inverse_ops,
+            selection_before,
+            selection_after,
+        } = record;
+
+        let mut undo_ops: Vec<Op> = Vec::new();
+        for op in inverse_ops.iter().cloned() {
             if let Ok(inv) = self.apply_op(op) {
-                undo_inverse.push(inv);
+                undo_ops.push(inv);
             } else {
                 break;
             }
         }
+        undo_ops.reverse();
 
-        let selection_after = record.selection_after.clone();
         self.selection = selection_after.clone();
         self.normalize_in_place();
 
         self.undo_stack.push(UndoRecord {
-            inverse_ops: undo_inverse,
             selection_before,
             selection_after,
+            inverse_ops: undo_ops,
         });
         true
     }
@@ -256,8 +313,9 @@ impl Editor {
             self.selection = sel;
         }
 
-        let inverse_normalize = self.normalize_with_inverse_ops()?;
-        inverse_ops.extend(inverse_normalize);
+        let mut inverse_normalize = self.normalize_with_inverse_ops()?;
+        inverse_ops.append(&mut inverse_normalize);
+        inverse_ops.reverse();
 
         self.normalize_selection_in_place();
 
@@ -285,6 +343,22 @@ impl Editor {
             return Err(CommandError::new(format!("Unknown command: {id}")));
         };
         (command.handler)(self, args)
+    }
+
+    pub fn run_query_json(&self, id: &str, args: Option<Value>) -> Result<Value, QueryError> {
+        let Some(query) = self.registry.query(id) else {
+            return Err(QueryError::new(format!("Unknown query: {id}")));
+        };
+        (query.handler)(self, args)
+    }
+
+    pub fn run_query<T>(&self, id: &str, args: Option<Value>) -> Result<T, QueryError>
+    where
+        T: DeserializeOwned,
+    {
+        let value = self.run_query_json(id, args)?;
+        serde_json::from_value(value)
+            .map_err(|err| QueryError::new(format!("Failed to decode query result: {err}")))
     }
 
     fn normalize_in_place(&mut self) {
@@ -319,6 +393,7 @@ impl Editor {
                 let text_node = node_text_mut(&mut self.doc, &path)?;
                 let offset = clamp_to_char_boundary(&text_node.text, offset);
                 text_node.text.insert_str(offset, &text);
+                transform_selection_insert_text(&mut self.selection, &path, offset, text.len());
                 Ok(Op::RemoveText {
                     path,
                     range: offset..offset + text.len(),
@@ -339,6 +414,7 @@ impl Editor {
                 }
                 let removed = text_node.text[start..end].to_string();
                 text_node.text.replace_range(start..end, "");
+                transform_selection_remove_text(&mut self.selection, &path, start..end);
                 Ok(Op::InsertText {
                     path,
                     offset: start,
@@ -347,10 +423,12 @@ impl Editor {
             }
             Op::InsertNode { path, node } => {
                 insert_node(&mut self.doc, &path, node)?;
+                transform_selection_insert_node(&mut self.selection, &path);
                 Ok(Op::RemoveNode { path })
             }
             Op::RemoveNode { path } => {
                 let removed = remove_node(&mut self.doc, &path)?;
+                transform_selection_remove_node(&mut self.selection, &path, &removed, &self.doc);
                 Ok(Op::InsertNode {
                     path,
                     node: removed,
@@ -366,6 +444,11 @@ impl Editor {
                     }
                 };
                 Ok(Op::SetNodeAttrs { path, patch: old })
+            }
+            Op::SetTextMarks { path, marks } => {
+                let text_node = node_text_mut(&mut self.doc, &path)?;
+                let old = std::mem::replace(&mut text_node.marks, marks);
+                Ok(Op::SetTextMarks { path, marks: old })
             }
         }
     }
@@ -392,6 +475,137 @@ fn clamp_to_char_boundary(s: &str, mut ix: usize) -> usize {
         ix -= 1;
     }
     ix
+}
+
+fn transform_selection_insert_text(
+    selection: &mut Selection,
+    path: &[usize],
+    offset: usize,
+    len: usize,
+) {
+    for point in [&mut selection.anchor, &mut selection.focus] {
+        if point.path == path && point.offset >= offset {
+            point.offset = point.offset.saturating_add(len);
+        }
+    }
+}
+
+fn transform_selection_remove_text(
+    selection: &mut Selection,
+    path: &[usize],
+    range: std::ops::Range<usize>,
+) {
+    let removed_len = range.end.saturating_sub(range.start);
+    for point in [&mut selection.anchor, &mut selection.focus] {
+        if point.path != path {
+            continue;
+        }
+        if point.offset <= range.start {
+            continue;
+        }
+        if point.offset >= range.end {
+            point.offset = point.offset.saturating_sub(removed_len);
+        } else {
+            point.offset = range.start;
+        }
+    }
+}
+
+fn transform_selection_insert_node(selection: &mut Selection, path: &[usize]) {
+    if path.is_empty() {
+        return;
+    }
+    let (parent_path, index) = path.split_at(path.len() - 1);
+    let index = index[0];
+
+    for point in [&mut selection.anchor, &mut selection.focus] {
+        if point.path.len() <= parent_path.len() {
+            continue;
+        }
+        if !point.path.starts_with(parent_path) {
+            continue;
+        }
+        let depth = parent_path.len();
+        if point.path[depth] >= index {
+            point.path[depth] += 1;
+        }
+    }
+}
+
+fn transform_selection_remove_node(
+    selection: &mut Selection,
+    path: &[usize],
+    removed: &Node,
+    doc_after_remove: &Document,
+) {
+    if path.is_empty() {
+        return;
+    }
+    let (parent_path, index) = path.split_at(path.len() - 1);
+    let index = index[0];
+
+    let merge_prefix_len = match (removed, index.checked_sub(1)) {
+        (Node::Text(removed_text), Some(left_index)) => {
+            let mut left_path = parent_path.to_vec();
+            left_path.push(left_index);
+            match node_ref(doc_after_remove, &left_path) {
+                Some(Node::Text(left_text))
+                    if left_text.marks == removed_text.marks
+                        && left_text.text.ends_with(&removed_text.text) =>
+                {
+                    Some(left_text.text.len().saturating_sub(removed_text.text.len()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    for point in [&mut selection.anchor, &mut selection.focus] {
+        if point.path.len() <= parent_path.len() {
+            continue;
+        }
+        if !point.path.starts_with(parent_path) {
+            continue;
+        }
+        let depth = parent_path.len();
+        let ix = point.path[depth];
+        if ix > index {
+            point.path[depth] = ix - 1;
+            continue;
+        }
+        if ix < index {
+            continue;
+        }
+
+        // Point was inside the removed subtree. Map it to a nearby point.
+        if let (Some(prefix), Node::Text(removed_text), Some(left_index)) =
+            (merge_prefix_len, removed, index.checked_sub(1))
+        {
+            point.path.truncate(depth + 1);
+            point.path[depth] = left_index;
+            point.offset = (prefix + point.offset).min(prefix + removed_text.text.len());
+        } else {
+            point.path.truncate(depth + 1);
+            point.path[depth] = index.saturating_sub(1);
+            point.offset = 0;
+        }
+    }
+}
+
+fn node_ref<'a>(doc: &'a Document, path: &[usize]) -> Option<&'a Node> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut node = doc.children.get(path[0])?;
+    for &ix in path.iter().skip(1) {
+        node = match node {
+            Node::Element(el) => el.children.get(ix)?,
+            Node::Void(_) | Node::Text(_) => return None,
+        };
+    }
+    Some(node)
 }
 
 fn node_mut<'a>(doc: &'a mut Document, path: &[usize]) -> Result<&'a mut Node, PathError> {

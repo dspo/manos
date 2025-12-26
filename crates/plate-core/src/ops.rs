@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{AttrPatch, Node, Selection};
+use crate::core::{AttrPatch, Marks, Node, Selection};
 
 pub type Path = Vec<usize>;
 
@@ -33,6 +33,11 @@ pub enum Op {
         #[serde(default)]
         path: Path,
         patch: AttrPatch,
+    },
+    SetTextMarks {
+        #[serde(default)]
+        path: Path,
+        marks: Marks,
     },
 }
 
