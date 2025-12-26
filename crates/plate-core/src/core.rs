@@ -107,6 +107,18 @@ pub struct TextNode {
 pub struct Marks {
     #[serde(default)]
     pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub strikethrough: bool,
+    #[serde(default)]
+    pub code: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight_color: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
 }

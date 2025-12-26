@@ -6,7 +6,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_plate_core::{
-    Document, Editor, ElementNode, Marks, Node, PlateValue, Point as CorePoint, Selection, TextNode,
+    ChildConstraint, Document, Editor, ElementNode, Marks, Node, NodeRole, PlateValue,
+    PluginRegistry, Point as CorePoint, Selection, TextNode,
 };
 
 pub(super) const CONTEXT: &str = "RichText";
@@ -30,6 +31,10 @@ actions!(
         InsertDivider,
         InsertMention,
         ToggleBold,
+        ToggleItalic,
+        ToggleUnderline,
+        ToggleStrikethrough,
+        ToggleCode,
         ToggleBulletedList,
         ToggleOrderedList,
     ]
@@ -64,6 +69,22 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-b", ToggleBold, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-b", ToggleBold, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-i", ToggleItalic, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-i", ToggleItalic, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-u", ToggleUnderline, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-u", ToggleUnderline, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-x", ToggleStrikethrough, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-x", ToggleStrikethrough, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-e", ToggleCode, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-e", ToggleCode, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-shift-8", ToggleBulletedList, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -113,8 +134,25 @@ fn element_at_path<'a>(doc: &'a Document, path: &[usize]) -> Option<&'a ElementN
     }
 }
 
-fn text_block_paths(doc: &Document) -> Vec<Vec<usize>> {
-    fn walk(nodes: &[Node], path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+fn is_text_block_kind(registry: &PluginRegistry, kind: &str) -> bool {
+    registry
+        .node_specs()
+        .get(kind)
+        .map(|spec| {
+            spec.role == NodeRole::Block
+                && !spec.is_void
+                && spec.children == ChildConstraint::InlineOnly
+        })
+        .unwrap_or(false)
+}
+
+fn text_block_paths(doc: &Document, registry: &PluginRegistry) -> Vec<Vec<usize>> {
+    fn walk(
+        nodes: &[Node],
+        path: &mut Vec<usize>,
+        out: &mut Vec<Vec<usize>>,
+        registry: &PluginRegistry,
+    ) {
         for (ix, node) in nodes.iter().enumerate() {
             let Node::Element(el) = node else {
                 continue;
@@ -122,10 +160,10 @@ fn text_block_paths(doc: &Document) -> Vec<Vec<usize>> {
 
             path.push(ix);
 
-            if el.kind == "paragraph" || el.kind == "list_item" {
+            if is_text_block_kind(registry, &el.kind) {
                 out.push(path.clone());
             } else {
-                walk(&el.children, path, out);
+                walk(&el.children, path, out, registry);
             }
 
             path.pop();
@@ -133,7 +171,7 @@ fn text_block_paths(doc: &Document) -> Vec<Vec<usize>> {
     }
 
     let mut out = Vec::new();
-    walk(&doc.children, &mut Vec::new(), &mut out);
+    walk(&doc.children, &mut Vec::new(), &mut out, registry);
     out
 }
 
@@ -177,7 +215,7 @@ impl RichTextState {
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle().tab_stop(true);
         let editor = Editor::with_richtext_plugins();
-        let text_block_order = text_block_paths(editor.doc());
+        let text_block_order = text_block_paths(editor.doc(), editor.registry());
         Self {
             focus_handle,
             scroll_handle: ScrollHandle::new(),
@@ -217,7 +255,7 @@ impl RichTextState {
         );
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
         self.layout_cache.clear();
-        self.text_block_order = text_block_paths(self.editor.doc());
+        self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
         self.ime_marked_range = None;
         cx.notify();
     }
@@ -253,7 +291,7 @@ impl RichTextState {
         self.text_block_text(&block_path).unwrap_or_default()
     }
 
-    fn active_marks(&self) -> Marks {
+    pub fn active_marks(&self) -> Marks {
         let path = &self.editor.selection().focus.path;
         match node_at_path(self.editor.doc(), path) {
             Some(Node::Text(t)) => t.marks.clone(),
@@ -266,7 +304,7 @@ impl RichTextState {
         let Some(el) = element_at_path(self.editor.doc(), block_path) else {
             return None;
         };
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return None;
         }
 
@@ -291,7 +329,7 @@ impl RichTextState {
 
     fn point_for_block_offset(&self, block_path: &[usize], offset: usize) -> Option<CorePoint> {
         let el = element_at_path(self.editor.doc(), block_path)?;
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return None;
         }
 
@@ -366,7 +404,7 @@ impl RichTextState {
 
     fn text_block_text(&self, block_path: &[usize]) -> Option<SharedString> {
         let el = element_at_path(self.editor.doc(), block_path)?;
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return None;
         }
         let mut out = String::new();
@@ -406,7 +444,7 @@ impl RichTextState {
         let Some(el) = element_at_path(self.editor.doc(), block_path) else {
             return Vec::new();
         };
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return Vec::new();
         }
 
@@ -818,7 +856,7 @@ impl RichTextState {
         }
 
         let el = element_at_path(self.editor.doc(), block_path)?;
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return None;
         }
 
@@ -881,7 +919,7 @@ impl RichTextState {
         source: &'static str,
     ) -> Option<gpui_plate_core::Transaction> {
         let el = element_at_path(self.editor.doc(), block_path)?;
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return None;
         }
 
@@ -1045,8 +1083,8 @@ impl RichTextState {
 
         let start_el = element_at_path(self.editor.doc(), &start_block)?;
         let end_el = element_at_path(self.editor.doc(), &end_block)?;
-        if (start_el.kind != "paragraph" && start_el.kind != "list_item")
-            || (end_el.kind != "paragraph" && end_el.kind != "list_item")
+        if !is_text_block_kind(self.editor.registry(), &start_el.kind)
+            || !is_text_block_kind(self.editor.registry(), &end_el.kind)
         {
             return None;
         }
@@ -1122,7 +1160,7 @@ impl RichTextState {
             );
         }
 
-        let blocks = text_block_paths(self.editor.doc());
+        let blocks = text_block_paths(self.editor.doc(), self.editor.registry());
         let start_pos = blocks.iter().position(|p| p == &start_block)?;
         let end_pos = blocks.iter().position(|p| p == &end_block)?;
         let (start_pos, end_pos) = if start_pos <= end_pos {
@@ -1201,8 +1239,8 @@ impl RichTextState {
         let prev_el = element_at_path(doc, &prev_path)?;
         let cur_el = element_at_path(doc, block_path)?;
 
-        if (prev_el.kind != "paragraph" && prev_el.kind != "list_item")
-            || (cur_el.kind != "paragraph" && cur_el.kind != "list_item")
+        if !is_text_block_kind(self.editor.registry(), &prev_el.kind)
+            || !is_text_block_kind(self.editor.registry(), &cur_el.kind)
         {
             return None;
         }
@@ -1277,8 +1315,8 @@ impl RichTextState {
         let cur_el = element_at_path(doc, block_path)?;
         let next_el = element_at_path(doc, &next_path)?;
 
-        if (cur_el.kind != "paragraph" && cur_el.kind != "list_item")
-            || (next_el.kind != "paragraph" && next_el.kind != "list_item")
+        if !is_text_block_kind(self.editor.registry(), &cur_el.kind)
+            || !is_text_block_kind(self.editor.registry(), &next_el.kind)
         {
             return None;
         }
@@ -1390,7 +1428,7 @@ impl RichTextState {
         let Some(el) = element_at_path(self.editor.doc(), block_path) else {
             return 0;
         };
-        if el.kind != "paragraph" && el.kind != "list_item" {
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
             return 0;
         }
 
@@ -1433,7 +1471,7 @@ impl RichTextState {
         if self.editor.apply(tx).is_ok() {
             _ = self.scroll_cursor_into_view();
             self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc());
+            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
     }
@@ -1447,7 +1485,7 @@ impl RichTextState {
         if self.editor.run_command(id, args).is_ok() {
             _ = self.scroll_cursor_into_view();
             self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc());
+            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
             true
         } else {
@@ -1834,7 +1872,7 @@ impl RichTextState {
     pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.undo() {
             self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc());
+            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
     }
@@ -1842,7 +1880,7 @@ impl RichTextState {
     pub(super) fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.redo() {
             self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc());
+            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
     }
@@ -1897,6 +1935,42 @@ impl RichTextState {
         _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
     }
 
+    pub(super) fn toggle_italic(
+        &mut self,
+        _: &ToggleItalic,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("marks.toggle_italic", None, cx);
+    }
+
+    pub(super) fn toggle_underline(
+        &mut self,
+        _: &ToggleUnderline,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("marks.toggle_underline", None, cx);
+    }
+
+    pub(super) fn toggle_strikethrough(
+        &mut self,
+        _: &ToggleStrikethrough,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("marks.toggle_strikethrough", None, cx);
+    }
+
+    pub(super) fn toggle_code(
+        &mut self,
+        _: &ToggleCode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.run_command_and_refresh("marks.toggle_code", None, cx);
+    }
+
     pub(super) fn toggle_bulleted_list(
         &mut self,
         _: &ToggleBulletedList,
@@ -1918,7 +1992,7 @@ impl RichTextState {
     pub fn command_undo(&mut self, cx: &mut Context<Self>) {
         if self.editor.undo() {
             self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc());
+            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
     }
@@ -1926,7 +2000,7 @@ impl RichTextState {
     pub fn command_redo(&mut self, cx: &mut Context<Self>) {
         if self.editor.redo() {
             self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc());
+            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
     }
@@ -1941,8 +2015,51 @@ impl RichTextState {
         _ = self.run_command_and_refresh("mention.insert", Some(args), cx);
     }
 
+    pub fn command_set_heading(&mut self, level: u64, cx: &mut Context<Self>) {
+        let args = serde_json::json!({ "level": level });
+        _ = self.run_command_and_refresh("block.set_heading", Some(args), cx);
+    }
+
+    pub fn command_unset_heading(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("block.unset_heading", None, cx);
+    }
+
     pub fn command_toggle_bold(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
+    }
+
+    pub fn command_toggle_italic(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.toggle_italic", None, cx);
+    }
+
+    pub fn command_toggle_underline(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.toggle_underline", None, cx);
+    }
+
+    pub fn command_toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.toggle_strikethrough", None, cx);
+    }
+
+    pub fn command_toggle_code(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.toggle_code", None, cx);
+    }
+
+    pub fn command_set_text_color(&mut self, color: String, cx: &mut Context<Self>) {
+        let args = serde_json::json!({ "color": color });
+        _ = self.run_command_and_refresh("marks.set_text_color", Some(args), cx);
+    }
+
+    pub fn command_unset_text_color(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.unset_text_color", None, cx);
+    }
+
+    pub fn command_set_highlight_color(&mut self, color: String, cx: &mut Context<Self>) {
+        let args = serde_json::json!({ "color": color });
+        _ = self.run_command_and_refresh("marks.set_highlight_color", Some(args), cx);
+    }
+
+    pub fn command_unset_highlight_color(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("marks.unset_highlight_color", None, cx);
     }
 
     pub fn command_toggle_bulleted_list(&mut self, cx: &mut Context<Self>) {
@@ -2080,6 +2197,13 @@ impl RichTextState {
             .unwrap_or(false)
     }
 
+    pub fn heading_level(&self) -> Option<u64> {
+        self.editor
+            .run_query::<Option<u64>>("block.heading_level", None)
+            .ok()
+            .flatten()
+    }
+
     pub fn command_copy(&mut self, cx: &mut Context<Self>) {
         let selection = self.editor.selection().clone();
         if selection.is_collapsed() {
@@ -2115,7 +2239,7 @@ impl RichTextState {
             return;
         }
 
-        let blocks = text_block_paths(self.editor.doc());
+        let blocks = text_block_paths(self.editor.doc(), self.editor.registry());
         let Some(start_pos) = blocks.iter().position(|p| p == &start_block) else {
             return;
         };
@@ -2183,7 +2307,7 @@ impl RichTextState {
     }
 
     pub fn command_select_all(&mut self, cx: &mut Context<Self>) {
-        let blocks = text_block_paths(self.editor.doc());
+        let blocks = text_block_paths(self.editor.doc(), self.editor.registry());
         let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
             return;
         };
@@ -2406,6 +2530,7 @@ pub struct RichTextLineElement {
     styled_text: StyledText,
     text: SharedString,
     segments: Vec<InlineTextSegment>,
+    base_text_style: Option<TextStyle>,
 }
 
 impl RichTextLineElement {
@@ -2416,7 +2541,13 @@ impl RichTextLineElement {
             styled_text: StyledText::new(SharedString::default()),
             text: SharedString::default(),
             segments: Vec::new(),
+            base_text_style: None,
         }
+    }
+
+    pub fn with_base_text_style(mut self, style: TextStyle) -> Self {
+        self.base_text_style = Some(style);
+        self
     }
 
     fn paint_selection_range(
@@ -2522,7 +2653,7 @@ impl Element for RichTextLineElement {
             let Some(el) = element_at_path(state.editor.doc(), &self.block_path) else {
                 return (window.request_layout(gpui::Style::default(), [], cx), ());
             };
-            if el.kind != "paragraph" && el.kind != "list_item" {
+            if !is_text_block_kind(state.editor.registry(), &el.kind) {
                 self.text = SharedString::default();
                 return (window.request_layout(gpui::Style::default(), [], cx), ());
             }
@@ -2587,48 +2718,79 @@ impl Element for RichTextLineElement {
 
         let mut runs = Vec::new();
 
-        let base_style = window.text_style();
+        let theme = cx.theme();
+        let base_style = self
+            .base_text_style
+            .clone()
+            .unwrap_or_else(|| window.text_style());
+        let apply_marks = |mut style: TextStyle,
+                           marks: &Marks,
+                           kind: &InlineTextSegmentKind,
+                           theme: &gpui_component::Theme|
+         -> TextStyle {
+            if marks.bold {
+                style.font_weight = FontWeight::BOLD;
+            }
+            if marks.italic {
+                style.font_style = FontStyle::Italic;
+            }
+            if marks.code {
+                style.font_family = theme.mono_font_family.clone();
+                if style.background_color.is_none() {
+                    style.background_color = Some(theme.muted);
+                }
+            }
+
+            if let Some(color) = marks.highlight_color.as_deref().and_then(parse_hex_color) {
+                style.background_color = Some(color);
+            }
+            if let Some(color) = marks.text_color.as_deref().and_then(parse_hex_color) {
+                style.color = color;
+            }
+
+            let is_link = marks.link.is_some();
+            if is_link {
+                style.color = theme.blue;
+            }
+            if marks.underline || is_link {
+                style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(style.color),
+                    wavy: false,
+                });
+            }
+            if marks.strikethrough {
+                style.strikethrough = Some(StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(style.color),
+                });
+            }
+
+            if matches!(
+                kind,
+                InlineTextSegmentKind::Void { kind } if kind.as_ref() == "mention"
+            ) {
+                style.color = theme.foreground;
+                style.background_color = Some(theme.muted);
+                style.underline = None;
+                style.strikethrough = None;
+                style.font_weight = FontWeight::MEDIUM;
+            }
+
+            style
+        };
+
         if self.text.is_empty() {
             let marks = segments
                 .first()
                 .map(|s| s.marks.clone())
                 .unwrap_or_default();
-            let mut style = base_style.clone();
-            if marks.bold {
-                style.font_weight = FontWeight::BOLD;
-            }
-            if marks.link.is_some() {
-                style.color = cx.theme().blue;
-                style.underline = Some(UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(cx.theme().blue),
-                    wavy: false,
-                });
-            }
+            let kind = InlineTextSegmentKind::Text;
+            let style = apply_marks(base_style.clone(), &marks, &kind, theme);
             runs.push(style.to_run(1));
         } else {
             for seg in segments.iter().filter(|s| s.len > 0) {
-                let mut style = base_style.clone();
-                if seg.marks.bold {
-                    style.font_weight = FontWeight::BOLD;
-                }
-                if seg.marks.link.is_some() {
-                    style.color = cx.theme().blue;
-                    style.underline = Some(UnderlineStyle {
-                        thickness: px(1.),
-                        color: Some(cx.theme().blue),
-                        wavy: false,
-                    });
-                }
-                if matches!(
-                    &seg.kind,
-                    InlineTextSegmentKind::Void { kind } if kind.as_ref() == "mention"
-                ) {
-                    style.color = cx.theme().foreground;
-                    style.background_color = Some(cx.theme().muted);
-                    style.underline = None;
-                    style.font_weight = FontWeight::MEDIUM;
-                }
+                let style = apply_marks(base_style.clone(), &seg.marks, &seg.kind, theme);
 
                 if let Some(marked) = marked_range.clone() {
                     let seg_start = seg.start;
@@ -3053,11 +3215,6 @@ impl Render for RichTextState {
         let mut blocks: Vec<AnyElement> = Vec::new();
         for (row, node) in self.editor.doc().children.iter().enumerate() {
             match node {
-                Node::Element(el) if el.kind == "paragraph" => {
-                    blocks.push(
-                        RichTextLineElement::new(state.clone(), vec![row]).into_any_element(),
-                    );
-                }
                 Node::Element(el) if el.kind == "list_item" => {
                     let list_type = el
                         .attrs
@@ -3103,6 +3260,31 @@ impl Render for RichTextState {
                             .into_any_element(),
                     );
                 }
+                Node::Element(el) if is_text_block_kind(self.editor.registry(), &el.kind) => {
+                    let mut line = RichTextLineElement::new(state.clone(), vec![row]);
+                    if el.kind == "heading" {
+                        let level = el
+                            .attrs
+                            .get("level")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1)
+                            .clamp(1, 6);
+                        let mut style = window.text_style();
+                        let size = match level {
+                            1 => 28.0,
+                            2 => 22.0,
+                            3 => 18.0,
+                            4 => 16.0,
+                            5 => 14.0,
+                            _ => 13.0,
+                        };
+                        style.font_size = px(size).into();
+                        style.line_height = px(size * 1.25).into();
+                        style.font_weight = FontWeight::SEMIBOLD;
+                        line = line.with_base_text_style(style);
+                    }
+                    blocks.push(line.into_any_element());
+                }
                 Node::Element(el) if el.kind == "table" => {
                     let mut rows: Vec<AnyElement> = Vec::new();
                     for (row_ix, row_node) in el.children.iter().enumerate() {
@@ -3126,12 +3308,6 @@ impl Render for RichTextState {
                             for (block_ix, block_node) in cell_el.children.iter().enumerate() {
                                 let block_path = vec![row, row_ix, cell_ix, block_ix];
                                 match block_node {
-                                    Node::Element(block_el) if block_el.kind == "paragraph" => {
-                                        cell_blocks.push(
-                                            RichTextLineElement::new(state.clone(), block_path)
-                                                .into_any_element(),
-                                        );
-                                    }
                                     Node::Element(block_el) if block_el.kind == "list_item" => {
                                         let list_type = block_el
                                             .attrs
@@ -3177,6 +3353,37 @@ impl Render for RichTextState {
                                                 ))
                                                 .into_any_element(),
                                         );
+                                    }
+                                    Node::Element(block_el)
+                                        if is_text_block_kind(
+                                            self.editor.registry(),
+                                            &block_el.kind,
+                                        ) =>
+                                    {
+                                        let mut line =
+                                            RichTextLineElement::new(state.clone(), block_path);
+                                        if block_el.kind == "heading" {
+                                            let level = block_el
+                                                .attrs
+                                                .get("level")
+                                                .and_then(|v| v.as_u64())
+                                                .unwrap_or(1)
+                                                .clamp(1, 6);
+                                            let mut style = window.text_style();
+                                            let size = match level {
+                                                1 => 28.0,
+                                                2 => 22.0,
+                                                3 => 18.0,
+                                                4 => 16.0,
+                                                5 => 14.0,
+                                                _ => 13.0,
+                                            };
+                                            style.font_size = px(size).into();
+                                            style.line_height = px(size * 1.25).into();
+                                            style.font_weight = FontWeight::SEMIBOLD;
+                                            line = line.with_base_text_style(style);
+                                        }
+                                        cell_blocks.push(line.into_any_element());
                                     }
                                     Node::Void(v) if v.kind == "divider" => {
                                         cell_blocks.push(
@@ -3286,6 +3493,10 @@ impl Render for RichTextState {
                     .on_action(window.listener_for(&state, RichTextState::insert_divider))
                     .on_action(window.listener_for(&state, RichTextState::insert_mention))
                     .on_action(window.listener_for(&state, RichTextState::toggle_bold))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_italic))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_underline))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_strikethrough))
+                    .on_action(window.listener_for(&state, RichTextState::toggle_code))
                     .on_action(window.listener_for(&state, RichTextState::toggle_bulleted_list))
                     .on_action(window.listener_for(&state, RichTextState::toggle_ordered_list))
             })
@@ -3337,4 +3548,8 @@ fn byte_to_utf16(s: &str, byte_ix: usize) -> usize {
 
 fn byte_to_utf16_range(s: &str, range: Range<usize>) -> Range<usize> {
     byte_to_utf16(s, range.start)..byte_to_utf16(s, range.end)
+}
+
+fn parse_hex_color(value: &str) -> Option<gpui::Hsla> {
+    gpui::Rgba::try_from(value).ok().map(gpui::Hsla::from)
 }

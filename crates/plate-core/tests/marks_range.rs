@@ -83,3 +83,55 @@ fn toggle_bold_only_affects_selection_range() {
     assert_eq!(t.text, "abcde");
     assert!(!t.marks.bold);
 }
+
+#[test]
+fn toggle_italic_only_affects_selection_range() {
+    let doc = Document {
+        children: vec![Node::paragraph("abcde")],
+    };
+    let selection = Selection {
+        anchor: Point::new(vec![0, 0], 1),
+        focus: Point::new(vec![0, 0], 3),
+    };
+    let mut editor = Editor::new(doc, selection, PluginRegistry::richtext());
+
+    editor.run_command("marks.toggle_italic", None).unwrap();
+
+    let doc = editor.doc();
+    let Node::Element(paragraph) = &doc.children[0] else {
+        panic!("expected paragraph element");
+    };
+    assert_eq!(paragraph.kind, "paragraph");
+    assert_eq!(paragraph.children.len(), 3);
+
+    let texts: Vec<_> = paragraph
+        .children
+        .iter()
+        .map(|n| match n {
+            Node::Text(t) => (t.text.clone(), t.marks.italic),
+            _ => ("".to_string(), false),
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            ("a".to_string(), false),
+            ("bc".to_string(), true),
+            ("de".to_string(), false),
+        ]
+    );
+
+    editor.run_command("marks.toggle_italic", None).unwrap();
+    let doc = editor.doc();
+    let Node::Element(paragraph) = &doc.children[0] else {
+        panic!("expected paragraph element");
+    };
+    assert_eq!(paragraph.kind, "paragraph");
+    assert_eq!(paragraph.children.len(), 1);
+
+    let Node::Text(t) = &paragraph.children[0] else {
+        panic!("expected paragraph text");
+    };
+    assert_eq!(t.text, "abcde");
+    assert!(!t.marks.italic);
+}

@@ -27,10 +27,41 @@ fn marks_queries_reflect_active_marks_at_focus() {
         true
     );
 
+    assert_eq!(
+        editor
+            .run_query::<bool>("marks.is_italic_active", None)
+            .unwrap(),
+        false
+    );
+    editor.run_command("marks.toggle_italic", None).unwrap();
+    assert_eq!(
+        editor
+            .run_query::<bool>("marks.is_italic_active", None)
+            .unwrap(),
+        true
+    );
+
     let active = editor
         .run_query::<gpui_plate_core::Marks>("marks.get_active", None)
         .unwrap();
     assert!(active.bold);
+    assert!(active.italic);
+
+    editor
+        .run_command(
+            "marks.set_text_color",
+            Some(serde_json::json!({ "color": "#ff0000ff" })),
+        )
+        .unwrap();
+    let active = editor
+        .run_query::<gpui_plate_core::Marks>("marks.get_active", None)
+        .unwrap();
+    assert_eq!(active.text_color.as_deref(), Some("#ff0000ff"));
+    editor.run_command("marks.unset_text_color", None).unwrap();
+    let active = editor
+        .run_query::<gpui_plate_core::Marks>("marks.get_active", None)
+        .unwrap();
+    assert_eq!(active.text_color, None);
 }
 
 #[test]

@@ -304,8 +304,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
-- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.set_link`、`marks.unset_link`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
-- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.has_link_active`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
+- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
+- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
 - 代码位置：`crates/plate-core/src/plugin.rs`
 
 ### 当前进度（阶段性）
@@ -316,6 +316,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 已记录问题：双击选词对中文边界不理想，见 [`docs/richtext-known-issues.md`](richtext-known-issues.md)。
 - Iteration 6（Table）已实现：TablePlugin（schema + normalize + commands + query）与 `richtext` 的 table 可编辑闭环。
 - Iteration 7（壳层替换）已实现：`gpui-manos-plate` 已从旧 `crates/rich_text` monolith 切换为 `gpui-plate-core` 驱动的最终架构实现。
+- Iteration 8（Marks Pro）已实现：Italic/Underline/Strike/Code/Colors（命令/查询/渲染/工具栏）闭环。
+- Iteration 9（Schema-driven TextBlock + Heading）已实现：text block 判定由 `node_specs` 驱动；新增 Heading 插件与 toolbar dropdown（H1/H2/H3/Paragraph）。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -559,6 +561,126 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 文档：`docs/richtext-extensibility.md`、`docs/richtext-plugin-system-plan.md`、`docs/richtext-known-issues.md` 链接与入口说明准确
 
 ---
+
+### Iteration 8：工具栏增强（Marks Pro：Italic/Underline/Strike/Code/Colors）
+
+> 背景：旧实现的 toolbar 能力更丰富；当前 `richtext` 示例为验证最终架构（core/view/plugin/IME/serialize）只落了最小必要插件集，因此 UI 能力与旧示例不对齐是**阶段性现象**。本迭代目标是在**不牺牲底层设计**的前提下，用插件体系把“高频 inline 格式能力”补齐，并把 toolbar 丰富度拉回到可展示的水平。
+
+**要实现什么**
+- `gpui-plate-core`（data/model + commands/queries）：
+  - 扩展 `Marks`：`italic/underline/strikethrough/code`（bool）与 `text_color/highlight_color`（可选颜色，建议存 RGBA hex 字符串，如 `#rrggbbaa`）。
+  - 扩展 marks commands（均为稳定 string id）：
+    - `marks.toggle_italic`
+    - `marks.toggle_underline`
+    - `marks.toggle_strikethrough`
+    - `marks.toggle_code`
+    - `marks.set_text_color` / `marks.unset_text_color`（args：`{ "color": "#rrggbbaa" }`）
+    - `marks.set_highlight_color` / `marks.unset_highlight_color`（args：`{ "color": "#rrggbbaa" }`）
+  - 扩展 marks queries（至少提供 bool query 供工具层直取）：
+    - `marks.is_italic_active` / `marks.is_underline_active` / `marks.is_strikethrough_active` / `marks.is_code_active`
+- `gpui-manos-plate`（view）：
+  - 渲染：将上述 marks 映射到 gpui `TextStyle`（`font_style/underline/strikethrough/background_color/font_family/text color`）。
+  - 快捷键（Mac/Win-Linux）：`Cmd/Ctrl+I/U`（italic/underline），`Cmd/Ctrl+Shift+X`（strike），`Cmd/Ctrl+E`（code）。（如有冲突可调整，但需写入文档）
+- `story`（示例）：
+  - toolbar 增加对应按钮与颜色选择器（`PlateToolbarIconButton` + `PlateToolbarColorPicker`），并保持“只依赖 command/query”。
+  - 颜色选择器行为：选择颜色→ set；清空颜色→ unset。
+
+**怎么实现（关键做法）**
+- core：
+  - 复用现有“range marks”机制（`toggle_mark_at_caret` + `apply_mark_range`），新增一个通用的 `toggle_bool_mark`/`set_optional_mark` 级别 helper，避免为每个 mark 复制一份“跨 blocks 扫描”的逻辑。
+  - 颜色值不引入 gpui 类型：落到 `String`（RGBA hex）即可；view 负责解析到 `Hsla/Rgba`。
+- view：
+  - `link` 的渲染优先级高于 `text_color`（链接永远蓝色 + underline）；其余 marks 叠加。
+  - `code` 的 monospace 使用 `cx.theme().mono_font_family`，背景色建议使用 theme 的 muted（若用户显式设置 highlight_color 则以用户值为准）。
+
+**要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
+- 手动验收清单（Iteration 8 通过标准）：
+  - **四种格式按钮**：Bold/Italic/Underline/Strike/Code 均可切换；对选区生效、对 caret（collapsed selection）会影响后续输入。
+  - **快捷键**：`Cmd/Ctrl+I/U/Shift+X/E` 行为与按钮一致，Undo/Redo 可回滚。
+  - **颜色**：
+    - 选择 Text color → 选区文字变色；清空 → 恢复默认色。
+    - 选择 Highlight → 背景高亮；清空 → 取消高亮。
+  - **跨 blocks**：跨两段（paragraph 或 list_item）拖拽选区后执行 italic/underline/strike/color，两个 block 都被正确分割并应用 marks。
+  - **表格 cell**：在 table cell 内选择文本后应用 marks（含颜色），行为与普通段落一致。
+  - **JSON round-trip**：Save As → Open 后 marks（含颜色）不丢失，展示一致。
+
+### Iteration 9：视图层泛化（TextBlock 由 Schema 驱动）+ Heading
+
+> 目标：新增一个“heading”这类 text block 时，不再需要在 view 层到处硬编码 `paragraph/list_item`；并通过 Heading 插件验证“新增 block 能力 = core 插件 + 少量 UI”，让扩展路径更接近 Plate。
+
+**要实现什么**
+- `gpui-manos-plate`（view）：
+  - 将 “text block 判定” 从硬编码改为由 `PluginRegistry::node_specs()` 驱动：
+    - `NodeRole::Block` + `ChildConstraint::InlineOnly` + `!is_void` ⇒ 视为 text block
+  - 将 `text_block_paths()`、`row_offset_for_point()`、IME range 计算等全部迁移到“schema-driven text block”判断。
+  - 支持对不同 text block kind 注入“block-level base TextStyle”（为 heading/quote 等做准备）。
+- `gpui-plate-core`（model + plugins）：
+  - 新增 `HeadingPlugin`：
+    - kind：`heading`（attrs：`level: 1..=6`，默认为 1）
+    - schema：Block + InlineOnly
+    - commands：`block.set_heading`（args：`{ "level": 1..6 }`）、`block.unset_heading`
+    - query：`block.heading_level -> Option<u64>`（selection 是否在 heading 内）
+- `story`：
+  - toolbar 增加 Heading dropdown（Heading 1/2/3/Paragraph），仅通过 command/query 驱动。
+
+**怎么实现（关键做法）**
+- view：
+  - 引入 `is_text_block_kind(kind)`，只依赖 core 的 `node_specs`；未来新增 text block kind 不再修改一堆 `if el.kind == ...`。
+  - `RichTextLineElement` 增加可选 `base_text_style: Option<TextStyle>`（或等价参数），用于 heading 调整字号/字重/行高。
+- core：
+  - `block.set_heading/unset_heading` 本质是“替换当前 block kind + attrs”，必须走 ops/transaction，避免 bypass normalize/undo。
+
+**要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
+- 手动验收清单（Iteration 9 通过标准）：
+  - **Heading 设置**：Heading dropdown 可切换 H1/H2/H3/Paragraph；渲染字号变化明显。
+  - **编辑一致性**：Heading 内输入/删除/Undo/Redo 正常；跨段落选区切换 heading 不会破坏 selection。
+  - **跨容器**：在 table cell 内设置 heading，行为与普通段落一致。
+  - **JSON round-trip**：Save As → Open 后 heading 的 `kind/attrs` 不丢失，展示一致。
+
+### Iteration 10：容器型 Block（递归渲染 + hit-test）+ Blockquote
+
+> 目标：补齐 Plate/Slate 常见的“容器节点”能力（blockquote、callout、columns…），并把 view 层从“仅支持顶层 blocks + 特例 table”升级为“通用递归 block 渲染”。
+
+**要实现什么**
+- `gpui-manos-plate`（view）：
+  - 支持递归渲染 container element（children 为 block），并让其中的 text blocks 仍使用统一的 `block_path` 缓存与 hit-test/IME 映射。
+- `gpui-plate-core`：
+  - `BlockquotePlugin`：
+    - kind：`blockquote`（schema：Block + BlockOnly）
+    - commands：`blockquote.wrap_selection`、`blockquote.unwrap`（selection 所在 quote）
+    - normalize：quote 至少包含 1 个 paragraph（空 quote 自动补齐）
+- `story`：
+  - toolbar 增加 Quote 按钮（wrap/unwrap）。
+
+**要验收什么**
+- **Wrap/Unwrap**：选中 1~N 个段落点击 Quote → 变成 blockquote 容器；再点一次可还原。
+- **容器内编辑**：quote 内输入/换行/Undo/Redo 正常；鼠标点击可正确定位 caret。
+- **JSON round-trip**：Save As → Open 后 quote 结构稳定（normalize 后不漂移）。
+
+### Iteration 11：Task/Todo（checkbox）与可交互前缀
+
+> 目标：恢复旧示例中最有辨识度的 “todo item + checkbox” 体验，并验证“可交互 inline UI 前缀”在新架构下的落地方式（click hitbox → command → tx → undo）。
+
+**要实现什么**
+- `gpui-plate-core`：
+  - `TodoPlugin`：
+    - kind：`todo_item`（schema：Block + InlineOnly，attrs：`checked: bool`）
+    - commands：`todo.toggle`（切换当前 block）、`todo.toggle_checked`
+    - query：`todo.is_active`、`todo.is_checked`
+- `gpui-manos-plate`（view）：
+  - todo 前缀渲染 checkbox，并提供可点击 hitbox（点击触发 `todo.toggle_checked`）。
+- `story`：
+  - toolbar 增加 Todo 按钮。
+
+**要验收什么**
+- **插入/切换**：点击 Todo 将 paragraph 变为 todo_item，再点还原。
+- **勾选**：点击 checkbox 勾选/取消；Undo/Redo 可回滚。
+- **跨 blocks**：跨多行选区 toggle todo，不会破坏 selection（可选择按“只作用于 focus block”定义，但需写清楚并在示例中保持一致）。
+- **JSON round-trip**：Save As → Open 后 `checked` 状态与渲染一致。
 
 ## 9. 风险与对策
 

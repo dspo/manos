@@ -141,6 +141,7 @@ impl PluginRegistry {
             Box::new(CoreNormalizePlugin),
             Box::new(CoreCommandsPlugin),
             Box::new(MarksCommandsPlugin),
+            Box::new(HeadingPlugin),
             Box::new(ListPlugin),
             Box::new(TablePlugin),
             Box::new(MentionPlugin),
@@ -648,6 +649,58 @@ impl PlatePlugin for MarksCommandsPlugin {
                 }),
             },
             CommandSpec {
+                id: "marks.toggle_italic".to_string(),
+                label: "Toggle italic".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    toggle_italic(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle italic: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "marks.toggle_underline".to_string(),
+                label: "Toggle underline".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    toggle_underline(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle underline: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "marks.toggle_strikethrough".to_string(),
+                label: "Toggle strikethrough".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    toggle_strikethrough(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle strikethrough: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "marks.toggle_code".to_string(),
+                label: "Toggle code".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    toggle_code(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle code: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
                 id: "marks.set_link".to_string(),
                 label: "Set link".to_string(),
                 handler: std::sync::Arc::new(|editor, args| {
@@ -679,6 +732,70 @@ impl PlatePlugin for MarksCommandsPlugin {
                         })
                 }),
             },
+            CommandSpec {
+                id: "marks.set_text_color".to_string(),
+                label: "Set text color".to_string(),
+                handler: std::sync::Arc::new(|editor, args| {
+                    let color = args
+                        .as_ref()
+                        .and_then(|v| v.get("color"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::new("Missing args.color"))?
+                        .to_string();
+                    set_text_color(editor, color)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to set text color: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "marks.unset_text_color".to_string(),
+                label: "Unset text color".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    unset_text_color(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to unset text color: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "marks.set_highlight_color".to_string(),
+                label: "Set highlight color".to_string(),
+                handler: std::sync::Arc::new(|editor, args| {
+                    let color = args
+                        .as_ref()
+                        .and_then(|v| v.get("color"))
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::new("Missing args.color"))?
+                        .to_string();
+                    set_highlight_color(editor, color)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to set highlight color: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "marks.unset_highlight_color".to_string(),
+                label: "Unset highlight color".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    unset_highlight_color(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to unset highlight color: {e:?}"))
+                            })
+                        })
+                }),
+            },
         ]
     }
 
@@ -698,12 +815,181 @@ impl PlatePlugin for MarksCommandsPlugin {
                 }),
             },
             QuerySpec {
+                id: "marks.is_italic_active".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    Ok(Value::Bool(active_marks(editor).italic))
+                }),
+            },
+            QuerySpec {
+                id: "marks.is_underline_active".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    Ok(Value::Bool(active_marks(editor).underline))
+                }),
+            },
+            QuerySpec {
+                id: "marks.is_strikethrough_active".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    Ok(Value::Bool(active_marks(editor).strikethrough))
+                }),
+            },
+            QuerySpec {
+                id: "marks.is_code_active".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    Ok(Value::Bool(active_marks(editor).code))
+                }),
+            },
+            QuerySpec {
                 id: "marks.has_link_active".to_string(),
                 handler: std::sync::Arc::new(|editor, _args| {
                     Ok(Value::Bool(active_marks(editor).link.is_some()))
                 }),
             },
         ]
+    }
+}
+
+struct HeadingPlugin;
+
+impl PlatePlugin for HeadingPlugin {
+    fn id(&self) -> &'static str {
+        "heading"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "heading".to_string(),
+            role: NodeRole::Block,
+            is_void: false,
+            children: ChildConstraint::InlineOnly,
+        }]
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeHeadingLevels)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec {
+                id: "block.set_heading".to_string(),
+                label: "Set heading".to_string(),
+                handler: std::sync::Arc::new(|editor, args| {
+                    let level = args
+                        .as_ref()
+                        .and_then(|v| v.get("level"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1)
+                        .clamp(1, 6);
+                    set_heading(editor, level)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to set heading: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "block.unset_heading".to_string(),
+                label: "Unset heading".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    unset_heading(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to unset heading: {e:?}"))
+                            })
+                        })
+                }),
+            },
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "block.heading_level".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| Ok(active_heading_level(editor))),
+        }]
+    }
+}
+
+struct NormalizeHeadingLevels;
+
+impl NormalizePass for NormalizeHeadingLevels {
+    fn id(&self) -> &'static str {
+        "heading.normalize_levels"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_container(
+            children: &[Node],
+            parent_path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                if el.kind == "heading" {
+                    let level = el
+                        .attrs
+                        .get("level")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1)
+                        .clamp(1, 6);
+                    let current = el.attrs.get("level").and_then(|v| v.as_u64());
+                    if current != Some(level) {
+                        let mut set = Attrs::default();
+                        set.insert(
+                            "level".to_string(),
+                            Value::Number(serde_json::Number::from(level)),
+                        );
+                        let mut path = parent_path.clone();
+                        path.push(ix);
+                        ops.push(Op::SetNodeAttrs {
+                            path,
+                            patch: crate::core::AttrPatch {
+                                set,
+                                remove: Vec::new(),
+                            },
+                        });
+                    }
+                }
+            }
+
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                let spec_children = registry
+                    .node_specs
+                    .get(&el.kind)
+                    .map(|s| s.children.clone())
+                    .unwrap_or(ChildConstraint::Any);
+                if spec_children == ChildConstraint::InlineOnly || el.children.is_empty() {
+                    continue;
+                }
+
+                parent_path.push(ix);
+                normalize_container(&el.children, parent_path, registry, ops);
+                parent_path.pop();
+            }
+        }
+
+        normalize_container(&doc.children, &mut Vec::new(), registry, &mut ops);
+
+        ops
     }
 }
 
@@ -1162,6 +1448,121 @@ fn active_list_type(editor: &crate::core::Editor) -> Option<String> {
         .get("list_type")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn active_heading_level(editor: &crate::core::Editor) -> Value {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return Value::Null;
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return Value::Null;
+    };
+    if el.kind != "heading" {
+        return Value::Null;
+    }
+    let level = el
+        .attrs
+        .get("level")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .clamp(1, 6);
+    Value::Number(serde_json::Number::from(level))
+}
+
+fn set_heading(editor: &mut crate::core::Editor, level: u64) -> Result<Transaction, String> {
+    let level = level.clamp(1, 6);
+    let focus = editor.selection().focus.clone();
+    let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
+    if block_path.is_empty() {
+        return Err("No active block".into());
+    }
+    let Some(node) = node_at_path(editor.doc(), block_path).cloned() else {
+        return Err("No active block".into());
+    };
+    let selection_after = editor.selection().clone();
+
+    let Node::Element(el) = node else {
+        return Err("Active block is not a text block".into());
+    };
+    let spec_children = editor
+        .registry()
+        .node_specs()
+        .get(&el.kind)
+        .map(|s| s.children.clone())
+        .unwrap_or(ChildConstraint::Any);
+    if spec_children != ChildConstraint::InlineOnly {
+        return Err("Active block is not a text block".into());
+    }
+
+    let current_level = (el.kind == "heading")
+        .then(|| el.attrs.get("level").and_then(|v| v.as_u64()))
+        .flatten()
+        .unwrap_or(1)
+        .clamp(1, 6);
+    if el.kind == "heading" && current_level == level {
+        return Ok(Transaction::new(Vec::new()).source("command:block.set_heading"));
+    }
+
+    let mut attrs = Attrs::default();
+    attrs.insert(
+        "level".to_string(),
+        Value::Number(serde_json::Number::from(level)),
+    );
+    let next = Node::Element(ElementNode {
+        kind: "heading".to_string(),
+        attrs,
+        children: el.children,
+    });
+
+    Ok(Transaction::new(vec![
+        Op::RemoveNode {
+            path: block_path.to_vec(),
+        },
+        Op::InsertNode {
+            path: block_path.to_vec(),
+            node: next,
+        },
+    ])
+    .selection_after(selection_after)
+    .source("command:block.set_heading"))
+}
+
+fn unset_heading(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let focus = editor.selection().focus.clone();
+    let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
+    if block_path.is_empty() {
+        return Err("No active block".into());
+    }
+    let Some(node) = node_at_path(editor.doc(), block_path).cloned() else {
+        return Err("No active block".into());
+    };
+    let selection_after = editor.selection().clone();
+
+    let Node::Element(el) = node else {
+        return Err("Active block is not a text block".into());
+    };
+    if el.kind != "heading" {
+        return Ok(Transaction::new(Vec::new()).source("command:block.unset_heading"));
+    }
+
+    let next = Node::Element(ElementNode {
+        kind: "paragraph".to_string(),
+        attrs: Attrs::default(),
+        children: el.children,
+    });
+
+    Ok(Transaction::new(vec![
+        Op::RemoveNode {
+            path: block_path.to_vec(),
+        },
+        Op::InsertNode {
+            path: block_path.to_vec(),
+            node: next,
+        },
+    ])
+    .selection_after(selection_after)
+    .source("command:block.unset_heading"))
 }
 
 fn toggle_list(editor: &mut crate::core::Editor, list_type: &str) -> Result<(), String> {
@@ -1876,21 +2277,12 @@ fn active_marks(editor: &crate::core::Editor) -> Marks {
     }
 }
 
-fn toggle_bold(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
-    let sel = editor.selection().clone();
-    if sel.is_collapsed() {
-        return toggle_mark_at_caret(editor, |mut marks| {
-            marks.bold = !marks.bold;
-            marks
-        })
-        .map(|(ops, selection_after)| {
-            Transaction::new(ops)
-                .selection_after(selection_after)
-                .source("command:marks.toggle_bold")
-        });
-    }
-
-    let (start, end) = ordered_selection_points(&sel);
+fn all_selected_text_nodes_have_mark(
+    editor: &crate::core::Editor,
+    sel: &Selection,
+    get: fn(&Marks) -> bool,
+) -> Result<bool, String> {
+    let (start, end) = ordered_selection_points(sel);
     let Some(start_block_path) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
         return Err("Selection start is not in a text block".into());
     };
@@ -1913,10 +2305,10 @@ fn toggle_bold(editor: &mut crate::core::Editor) -> Result<Transaction, String> 
     } else {
         (end_index, start_index)
     };
+
     let start_inline_ix = start.path.last().copied().unwrap_or(0);
     let end_inline_ix = end.path.last().copied().unwrap_or(0);
 
-    let mut all_bold = true;
     for (block_index, block) in blocks
         .iter()
         .enumerate()
@@ -1966,27 +2358,161 @@ fn toggle_bold(editor: &mut crate::core::Editor) -> Result<Transaction, String> 
                 continue;
             }
             if let Node::Text(t) = node {
-                if !t.marks.bold {
-                    all_bold = false;
-                    break;
+                if !get(&t.marks) {
+                    return Ok(false);
                 }
             }
         }
-        if !all_bold {
-            break;
-        }
     }
-    let target = !all_bold;
 
+    Ok(true)
+}
+
+fn toggle_bool_mark(
+    editor: &mut crate::core::Editor,
+    get: fn(&Marks) -> bool,
+    set: fn(&mut Marks, bool),
+    source: &'static str,
+) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    if sel.is_collapsed() {
+        return toggle_mark_at_caret(editor, |mut marks| {
+            let target = !get(&marks);
+            set(&mut marks, target);
+            marks
+        })
+        .map(|(ops, selection_after)| {
+            Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source)
+        });
+    }
+
+    let all_set = all_selected_text_nodes_have_mark(editor, &sel, get)?;
+    let target = !all_set;
     apply_mark_range(editor, &sel, &|mut marks: Marks| {
-        marks.bold = target;
+        set(&mut marks, target);
         marks
     })
     .map(|(ops, selection_after)| {
         Transaction::new(ops)
             .selection_after(selection_after)
-            .source("command:marks.toggle_bold")
+            .source(source)
     })
+}
+
+fn set_optional_string_mark(
+    editor: &mut crate::core::Editor,
+    set: fn(&mut Marks, Option<String>),
+    value: Option<String>,
+    source: &'static str,
+) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    if sel.is_collapsed() {
+        return toggle_mark_at_caret(editor, |mut marks| {
+            set(&mut marks, value.clone());
+            marks
+        })
+        .map(|(ops, selection_after)| {
+            Transaction::new(ops)
+                .selection_after(selection_after)
+                .source(source)
+        });
+    }
+
+    apply_mark_range(editor, &sel, &|mut marks: Marks| {
+        set(&mut marks, value.clone());
+        marks
+    })
+    .map(|(ops, selection_after)| {
+        Transaction::new(ops)
+            .selection_after(selection_after)
+            .source(source)
+    })
+}
+
+fn toggle_bold(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    toggle_bool_mark(
+        editor,
+        |m| m.bold,
+        |m, v| m.bold = v,
+        "command:marks.toggle_bold",
+    )
+}
+
+fn toggle_italic(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    toggle_bool_mark(
+        editor,
+        |m| m.italic,
+        |m, v| m.italic = v,
+        "command:marks.toggle_italic",
+    )
+}
+
+fn toggle_underline(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    toggle_bool_mark(
+        editor,
+        |m| m.underline,
+        |m, v| m.underline = v,
+        "command:marks.toggle_underline",
+    )
+}
+
+fn toggle_strikethrough(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    toggle_bool_mark(
+        editor,
+        |m| m.strikethrough,
+        |m, v| m.strikethrough = v,
+        "command:marks.toggle_strikethrough",
+    )
+}
+
+fn toggle_code(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    toggle_bool_mark(
+        editor,
+        |m| m.code,
+        |m, v| m.code = v,
+        "command:marks.toggle_code",
+    )
+}
+
+fn set_text_color(editor: &mut crate::core::Editor, color: String) -> Result<Transaction, String> {
+    set_optional_string_mark(
+        editor,
+        |m, v| m.text_color = v,
+        Some(color),
+        "command:marks.set_text_color",
+    )
+}
+
+fn unset_text_color(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    set_optional_string_mark(
+        editor,
+        |m, v| m.text_color = v,
+        None,
+        "command:marks.unset_text_color",
+    )
+}
+
+fn set_highlight_color(
+    editor: &mut crate::core::Editor,
+    color: String,
+) -> Result<Transaction, String> {
+    set_optional_string_mark(
+        editor,
+        |m, v| m.highlight_color = v,
+        Some(color),
+        "command:marks.set_highlight_color",
+    )
+}
+
+fn unset_highlight_color(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    set_optional_string_mark(
+        editor,
+        |m, v| m.highlight_color = v,
+        None,
+        "command:marks.unset_highlight_color",
+    )
 }
 
 fn set_link(editor: &mut crate::core::Editor, url: String) -> Result<Transaction, String> {
