@@ -64,7 +64,9 @@ Notes:
 - Argument keys default to `camelCase` (same as Tauri). For example `fn foo(user_name: String)` expects `{ userName: "..." }`.
 - You can opt out with `#[gpui_manos_webview::command(rename_all = "snake_case")]`.
 - `generate_handler![...]` detects duplicate command names at compile time.
-- Commands are currently synchronous. Return types supported:
+- Commands can be synchronous or `async fn` (async is executed via a simple `block_on`, not a full Tokio runtime).
+- `ipc://` custom-protocol invokes run command execution off-thread; postMessage fallback executes on the IPC handler thread.
+- Return types supported:
   - `T: serde::Serialize`
   - `Result<T, E>`: default `E: ToString` (rejects with a JSON string); opt-in `#[gpui_manos_webview::command(error = "json")]` for `E: serde::Serialize` (rejects with structured JSON)
 

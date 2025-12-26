@@ -110,6 +110,12 @@ JS 侧（注入脚本）
 目标
 - 支持 `async fn` 命令，或支持 `#[command(async)]` 将同步命令 offload 到后台执行，避免 UI 卡顿。
 
+当前状态（已落地第一版）
+- ✅ `#[command]` 支持 `async fn`（通过 `gpui_manos_webview::async_runtime::block_on` 执行）。
+- ✅ `ipc://` custom-protocol 路径的命令执行会 offload 到后台线程，并在完成后再 `respond(...)`，避免阻塞处理线程。
+- ⚠️ `block_on` 不是完整的 async runtime（当前基于 `pollster`）；如果命令依赖 Tokio（如 `tokio::time`/IO），仍需要后续引入 runtime（见下方方案 A）。
+- ⚠️ postMessage fallback 仍在 IPC handler 线程内执行命令（仅在 custom protocol 被阻断时才会走到）。
+
 建议实现路径（择一或组合）
 - 方案 A（可控但侵入）：新增可选 feature 引入 `tokio`（或其它 executor），在 IPC handler 里 `spawn` 并延后 `responder.respond(...)`。
 - 方案 B（更贴 GPUI）：复用 GPUI 的任务/线程池能力（如果存在稳定 API），在后台执行并回到主线程响应。

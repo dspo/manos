@@ -13,15 +13,7 @@ use syn::{
 pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attributes as AttributeArgs);
     let function = parse_macro_input!(item as ItemFn);
-
-    if function.sig.asyncness.is_some() {
-        return syn::Error::new_spanned(
-            function.sig.fn_token,
-            "async commands are not supported yet",
-        )
-        .to_compile_error()
-        .into();
-    }
+    let is_async = function.sig.asyncness.is_some();
 
     let mut root: Path = syn::parse_str("::gpui_manos_webview").expect("valid default root path");
     let mut rename_all = "camelCase".to_string();
@@ -187,10 +179,15 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let call = if arg_idents.is_empty() {
+    let base_call = if arg_idents.is_empty() {
         quote!(#command_fn())
     } else {
         quote!(#command_fn(#(#arg_idents),*))
+    };
+    let call = if is_async {
+        quote!(#root::async_runtime::block_on(#base_call))
+    } else {
+        base_call
     };
 
     let respond = match &function.sig.output {

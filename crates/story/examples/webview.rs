@@ -31,7 +31,11 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
 
         let builder = gpui_manos_webview::Builder::new()
             .with_webview_id(WebViewId::from("webview"))
-            .invoke_handler(gpui_manos_webview::generate_handler![greet]);
+            .invoke_handler(gpui_manos_webview::generate_handler![
+                greet,
+                greet_async,
+                greet_slow
+            ]);
 
         let builder = if index_html.exists() {
             builder.serve_static(static_root.to_string_lossy().to_string())
@@ -51,6 +55,8 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
         };
 
         let webview = builder.build_as_child(window).unwrap();
+        #[cfg(debug_assertions)]
+        webview.open_devtools();
 
         WebView::new(webview, window, cx)
     })
@@ -59,6 +65,17 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
 #[gpui_manos_webview::command]
 fn greet(name: String) -> Result<String, String> {
     Ok(format!("Hello, {}! (from GPUI)", name))
+}
+
+#[gpui_manos_webview::command]
+async fn greet_async(name: String) -> Result<String, String> {
+    Ok(format!("Hello, {}! (from GPUI async)", name))
+}
+
+#[gpui_manos_webview::command]
+fn greet_slow(name: String) -> Result<String, String> {
+    std::thread::sleep(std::time::Duration::from_millis(750));
+    Ok(format!("Hello, {}! (from GPUI slow)", name))
 }
 
 fn escape_html(input: &str) -> String {

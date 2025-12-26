@@ -13,6 +13,7 @@ serialize-to-javascript.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 mime_guess = "2.0"
+pollster = "0.4"
 
 [lib]
 path = "src/lib.rs"

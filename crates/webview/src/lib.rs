@@ -24,6 +24,14 @@ pub use gpui_manos_webview_macros::{
 
 const INVOKE_KEY: &str = "gpui";
 
+pub mod async_runtime {
+    use std::future::Future;
+
+    pub fn block_on<F: Future>(future: F) -> F::Output {
+        pollster::block_on(future)
+    }
+}
+
 thread_local! {
     static IPC_WEBVIEWS: RefCell<HashMap<String, Weak<wry::WebView>>> =
         RefCell::new(HashMap::new());
@@ -399,24 +407,26 @@ impl<'a> Builder<'a> {
                         raw_path.strip_prefix('/').unwrap_or(raw_path.as_str()),
                     );
 
-                    if let Some(ref handler) = invoke_handler {
-                        let invoke = Invoke { command, request };
-                        if let Some(response) = handler(invoke) {
-                            respond(responder, response);
-                            return;
-                        }
+                    let invoke_handler = invoke_handler.clone();
+                    let api_handler = handlers.get(&command).cloned();
 
-                        respond(responder, ipc::not_found(raw_path));
-                        return;
-                    }
+                    std::thread::spawn(move || {
+                        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || {
+                                if let Some(handler) = invoke_handler {
+                                    handler(Invoke { command, request })
+                                        .unwrap_or_else(|| ipc::not_found(raw_path))
+                                } else if let Some(handler) = api_handler {
+                                    handler(request)
+                                } else {
+                                    ipc::not_found(raw_path)
+                                }
+                            },
+                        ))
+                        .unwrap_or_else(|_| ipc::internal_error("invoke handler panicked"));
 
-                    if let Some(handler) = handlers.get(&command) {
-                        let response = handler(request);
                         respond(responder, response);
-                        return;
-                    }
-
-                    respond(responder, ipc::not_found(raw_path));
+                    });
                 },
             )
         })
