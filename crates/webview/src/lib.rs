@@ -340,21 +340,26 @@ impl<'a> Builder<'a> {
                     .unwrap_or_default();
                 let content_type = content_type.split(',').next().unwrap_or_default();
 
-                let data = match content_type {
-                    "application/json" => serde_json::from_slice::<serde_json::Value>(&body)
-                        .unwrap_or_else(|_| {
-                            serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
-                        }),
-                    "text/plain" => {
-                        serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+                let js_arg = match content_type {
+                    "application/json" => {
+                        let data = serde_json::from_slice::<serde_json::Value>(&body)
+                            .unwrap_or_else(|_| {
+                                serde_json::Value::String(
+                                    String::from_utf8_lossy(&body).into_owned(),
+                                )
+                            });
+                        serde_json::to_string(&data).unwrap_or_else(|_| "null".to_string())
                     }
-                    _ => serde_json::to_value(body).unwrap_or(serde_json::Value::Null),
+                    "text/plain" => serde_json::to_string(&String::from_utf8_lossy(&body))
+                        .unwrap_or_else(|_| "null".to_string()),
+                    _ => {
+                        let bytes_as_json_array =
+                            serde_json::to_string(&body).unwrap_or_else(|_| "[]".to_string());
+                        format!("new Uint8Array({bytes_as_json_array}).buffer")
+                    }
                 };
 
-                let data = serde_json::to_string(&data).unwrap_or_else(|_| "null".to_string());
-                let js = format!(
-                    "window.__TAURI_INTERNALS__.runCallback({callback_id}, {data});"
-                );
+                let js = format!("window.__TAURI_INTERNALS__.runCallback({callback_id}, {js_arg});");
 
                 let Some(webview) = ipc_webview_for_label(message.webview_label.as_deref())
                 else {
@@ -501,8 +506,10 @@ fn from_hex(byte: u8) -> Option<u8> {
 pub mod ipc {
     use super::*;
     use http::HeaderValue;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     pub const IPC_CHANNEL_PREFIX: &str = "__CHANNEL__:";
     pub const FETCH_CHANNEL_DATA_COMMAND: &str = "plugin:__TAURI_CHANNEL__|fetch";
@@ -516,9 +523,27 @@ pub mod ipc {
     const MAX_JSON_DIRECT_EXECUTE_THRESHOLD: usize = 8192;
     const MAX_RAW_DIRECT_EXECUTE_THRESHOLD: usize = 1024;
 
+    const CHANNEL_DATA_TTL: Duration = Duration::from_secs(60);
+    const CHANNEL_DATA_MAX_ENTRIES: usize = 128;
+    const CHANNEL_DATA_MAX_BYTES: usize = 128 * 1024 * 1024;
+
     static PLATFORM_DISPATCHER: OnceLock<Arc<dyn gpui::PlatformDispatcher>> = OnceLock::new();
     static CHANNEL_DATA_COUNTER: AtomicU32 = AtomicU32::new(0);
-    static CHANNEL_DATA_QUEUE: OnceLock<Mutex<HashMap<u32, InvokeResponseBody>>> = OnceLock::new();
+    static CHANNEL_DATA_QUEUE: OnceLock<Mutex<ChannelDataQueue>> = OnceLock::new();
+
+    #[derive(Debug)]
+    struct ChannelDataEntry {
+        inserted_at: Instant,
+        size_bytes: usize,
+        body: InvokeResponseBody,
+    }
+
+    #[derive(Debug, Default)]
+    struct ChannelDataQueue {
+        entries: HashMap<u32, ChannelDataEntry>,
+        order: VecDeque<u32>,
+        total_bytes: usize,
+    }
 
     pub(crate) fn init_platform_dispatcher(dispatcher: Arc<dyn gpui::PlatformDispatcher>) {
         let _ = PLATFORM_DISPATCHER.set(dispatcher);
@@ -677,13 +702,64 @@ pub mod ipc {
         }
     }
 
-    fn channel_data_queue() -> &'static Mutex<HashMap<u32, InvokeResponseBody>> {
-        CHANNEL_DATA_QUEUE.get_or_init(|| Mutex::new(HashMap::new()))
+    fn channel_data_queue() -> &'static Mutex<ChannelDataQueue> {
+        CHANNEL_DATA_QUEUE.get_or_init(|| Mutex::new(ChannelDataQueue::default()))
+    }
+
+    fn response_body_size(body: &InvokeResponseBody) -> usize {
+        match body {
+            InvokeResponseBody::Json(json) => json.len(),
+            InvokeResponseBody::Raw(bytes) => bytes.len(),
+        }
+    }
+
+    fn prune_channel_data_queue(queue: &mut ChannelDataQueue, now: Instant) {
+        loop {
+            while matches!(queue.order.front(), Some(id) if !queue.entries.contains_key(id)) {
+                queue.order.pop_front();
+            }
+
+            let Some(&oldest_id) = queue.order.front() else {
+                break;
+            };
+
+            let Some(oldest_entry) = queue.entries.get(&oldest_id) else {
+                continue;
+            };
+
+            let is_expired = now.duration_since(oldest_entry.inserted_at) > CHANNEL_DATA_TTL;
+            let over_entries_limit = queue.entries.len() > CHANNEL_DATA_MAX_ENTRIES;
+            let over_bytes_limit =
+                queue.total_bytes > CHANNEL_DATA_MAX_BYTES && queue.entries.len() > 1;
+
+            if !(is_expired || over_entries_limit || over_bytes_limit) {
+                break;
+            }
+
+            queue.order.pop_front();
+            if let Some(entry) = queue.entries.remove(&oldest_id) {
+                queue.total_bytes = queue.total_bytes.saturating_sub(entry.size_bytes);
+            }
+        }
     }
 
     fn store_channel_data(body: InvokeResponseBody) -> u32 {
         let id = CHANNEL_DATA_COUNTER.fetch_add(1, Ordering::Relaxed);
-        channel_data_queue().lock().unwrap().insert(id, body);
+        let now = Instant::now();
+        let size_bytes = response_body_size(&body);
+
+        let mut queue = channel_data_queue().lock().unwrap();
+        queue.total_bytes = queue.total_bytes.saturating_add(size_bytes);
+        queue.order.push_back(id);
+        queue.entries.insert(
+            id,
+            ChannelDataEntry {
+                inserted_at: now,
+                size_bytes,
+                body,
+            },
+        );
+        prune_channel_data_queue(&mut queue, now);
         id
     }
 
@@ -697,12 +773,17 @@ pub mod ipc {
             return bad_request("missing channel id header");
         };
 
-        let body = channel_data_queue().lock().unwrap().remove(&id);
+        let now = Instant::now();
+        let mut queue = channel_data_queue().lock().unwrap();
+        prune_channel_data_queue(&mut queue, now);
+        let body = queue.entries.remove(&id);
         let Some(body) = body else {
             return not_found(format!("channel data {id}"));
         };
+        queue.order.retain(|existing_id| *existing_id != id);
+        queue.total_bytes = queue.total_bytes.saturating_sub(body.size_bytes);
 
-        match body {
+        match body.body {
             InvokeResponseBody::Json(json_string) => {
                 respond(Response::new(json_string.into_bytes(), "application/json"))
             }

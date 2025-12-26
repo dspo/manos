@@ -66,10 +66,11 @@ Notes:
 - `generate_handler![...]` detects duplicate command names at compile time.
 - Commands can be synchronous or `async fn` (async is executed via a simple `block_on`, not a full Tokio runtime).
 - `ipc://` custom-protocol invokes run command execution off-thread; postMessage fallback executes on the IPC handler thread.
-- Binary responses: return `gpui_manos_webview::ipc::Response::binary(...)` to resolve `ArrayBuffer` on the frontend (custom-protocol path).
+- Binary responses: return `gpui_manos_webview::ipc::Response::binary(...)` to resolve `ArrayBuffer` on the frontend (custom-protocol and postMessage fallback; fallback uses `eval` + `Uint8Array`, so avoid large blobs).
 - Raw request access: add a `gpui_manos_webview::ipc::Request` parameter to read method/uri/headers/body.
 - Channels: accept `gpui_manos_webview::ipc::Channel<T>` and call `send(T)` to stream messages to the frontend (Tauri `Channel`-compatible message format).
   - Large channel payloads use the built-in `plugin:__TAURI_CHANNEL__|fetch` fast-path to avoid pushing big blobs via `eval`.
+  - The internal fetch queue is capped and pruned (TTL + capacity) to avoid unbounded memory growth if the frontend never fetches.
   - To stream bytes, use `Channel<gpui_manos_webview::ipc::Response>` and send `ipc::Response::binary(...)`.
 - Return types supported:
   - `T: serde::Serialize`

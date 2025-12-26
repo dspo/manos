@@ -35,8 +35,8 @@ JS 侧（注入脚本）
 
 当前关键限制
 - async runtime 仅为 `pollster::block_on`（不是完整 Tokio runtime）；且 postMessage fallback 仍在 IPC handler 线程内执行命令。
-- `ipc::Response::binary(...)` 可在 custom-protocol 路径返回 `ArrayBuffer`；但 postMessage fallback 目前仍会回传 `number[]`（与 Tauri 行为不完全一致）。
-- `ipc::Channel<T>` 已实现基础 parity（JSON + binary + 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path + drop 时发送 end）；但 postMessage fallback 的二进制仍会变成 `number[]`，且暂未做队列 TTL/清理策略。
+- `ipc::Response::binary(...)` 可返回 `ArrayBuffer`（custom-protocol 与 postMessage fallback 均可；fallback 会通过 `eval` 构造 `Uint8Array`，大 payload 可能较慢）。
+- `ipc::Channel<T>` 已实现基础 parity（JSON + binary + 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path + drop 时发送 end），并为 channel data queue 增加 TTL/容量限制以避免内存增长。
 - 命令函数仍无法注入 `WebviewWindow` / `AppHandle` / `State<T>` 等完整上下文（Tauri 文档支持）。
 - 事件系统（Rust 侧 listen/emit）基本未实现，仅有 JS 分发函数骨架（`crates/webview/src/lib.rs`）。
 
@@ -49,10 +49,10 @@ JS 侧（注入脚本）
 | 基础示例 | `#[command]` + `invoke()` | ✅ | 基本可用 | M0/M1 |
 | 传递参数 | `Deserialize` + camelCase 映射 | ⚠️ | 支持 camelCase/`rename_all`；不支持借用参数（如 `&str`）等高级签名 | M1 |
 | 返回数据 | `Serialize` -> Promise resolve | ✅ | 返回 JSON ok | M1 |
-| 返回 ArrayBuffer | `tauri::ipc::Response` | ⚠️ | `ipc::Response::binary` 在 custom-protocol 路径可返回 `ArrayBuffer`；fallback 仍会变成 `number[]` | M3 |
+| 返回 ArrayBuffer | `tauri::ipc::Response` | ✅ | `ipc::Response::binary` 在 custom-protocol 与 postMessage fallback 都可得到 `ArrayBuffer` | M3 |
 | 错误处理 | `Result<T, E: Serialize>`（结构化） | ⚠️ | 默认 `E: ToString` 会 reject 为 JSON string；支持 `#[command(error = "json")]` 返回结构化 JSON | M1/M3 |
 | 异步命令 | `async fn` / `#[command(async)]` | ⚠️ | 已支持 `async fn`（`pollster::block_on`）；仍缺少完整 runtime 与更一致的线程模型 | M2（困难） |
-| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ⚠️ | 已支持 `ipc::Channel<T>`：JSON/binary（通过 `Channel<ipc::Response>`）+ 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path；仍缺少更完善的清理与 fallback parity | M4（困难） |
+| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ⚠️ | 已支持 `ipc::Channel<T>`：JSON/binary（通过 `Channel<ipc::Response>`）+ 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path；queue 有 TTL/容量限制；仍缺少更完整的生命周期与错误处理 | M4（困难） |
 | 访问 WebviewWindow | 参数注入 `WebviewWindow` | ❌ | 命令里拿不到发起方上下文（label/webview id 等） | M5（困难） |
 | 访问 AppHandle | 参数注入 `AppHandle` | ❌ | 无法在命令内访问全局应用服务（事件/状态/窗口管理等） | M5（困难） |
 | 访问托管状态 | `Builder::manage` + `State<T>` | ❌ | 无统一状态容器 & 注入机制 | M5（困难） |
@@ -143,7 +143,7 @@ JS 侧（注入脚本）
 - `upload(request: Request)` 能读取 `Authorization` header 与 raw body bytes。
 
 难点/风险
-- postMessage fallback 目前仍会把二进制结果回传为 `number[]`（`Vec<u8>` 的 JSON 序列化），与 custom-protocol 的 `ArrayBuffer` 不完全一致。
+- postMessage fallback 虽可回传 `ArrayBuffer`，但需要通过 `eval` 注入 `Uint8Array([...]).buffer`，大 payload 可能受性能/字符串大小限制影响。
 
 ### M4：Channel（流式传输）（高价值，但复杂）（1–2 周）
 
@@ -154,6 +154,7 @@ JS 侧（注入脚本）
 - [x] 最小实现：支持命令参数注入 `ipc::Channel<T>`，可多次 `send(T)`，并在 drop 时发送 `{ end: true }`。
 - [x] 多 webview 兼容：通过 `Invoke.webview_label` + `ipc::IpcContextGuard` 贯通上下文，确保 Channel 发送到正确 webview。
 - [x] 大 payload / 二进制优化：内置 `plugin:__TAURI_CHANNEL__|fetch`（Tauri 的 fast-path），Channel 在超过阈值时改为先缓存数据再让前端 invoke 拉取，避免通过 `eval` 直接塞入超大 JSON/bytes。
+- [x] channel data queue 清理：为 `plugin:__TAURI_CHANNEL__|fetch` 的内存队列增加 TTL/容量上限，避免长时间运行下无界增长。
 
 难点/风险（为什么“困难”）
 - 这不仅是“返回一个响应”，而是要维护跨多次消息的状态与回调映射。
