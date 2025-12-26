@@ -6,7 +6,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_plate_core::{
-    ChildConstraint, Document, Editor, ElementNode, Marks, Node, NodeRole, PlateValue,
+    Attrs, ChildConstraint, Document, Editor, ElementNode, Marks, Node, NodeRole, PlateValue,
     PluginRegistry, Point as CorePoint, Selection, TextNode,
 };
 
@@ -936,6 +936,7 @@ impl RichTextState {
         }
 
         let is_list_item = el.kind == "list_item";
+        let is_todo_item = el.kind == "todo_item";
         let block_attrs = el.attrs.clone();
 
         let old_children = el.children.clone();
@@ -982,6 +983,14 @@ impl RichTextState {
                 Node::Element(ElementNode {
                     kind: "list_item".to_string(),
                     attrs: block_attrs.clone(),
+                    children,
+                })
+            } else if is_todo_item {
+                let mut attrs = Attrs::default();
+                attrs.insert("checked".to_string(), serde_json::Value::Bool(false));
+                Node::Element(ElementNode {
+                    kind: "todo_item".to_string(),
+                    attrs,
                     children,
                 })
             } else {
@@ -1673,9 +1682,15 @@ impl RichTextState {
             .unwrap_or(0)
             .min(text_len);
 
-        if block_kind == "list_item" && text_len == 0 && cursor == 0 {
-            _ = self.run_command_and_refresh("list.unwrap", None, cx);
-            return;
+        if text_len == 0 && cursor == 0 {
+            if block_kind == "list_item" {
+                _ = self.run_command_and_refresh("list.unwrap", None, cx);
+                return;
+            }
+            if block_kind == "todo_item" {
+                _ = self.run_command_and_refresh("todo.toggle", None, cx);
+                return;
+            }
         }
 
         let marks = self.active_marks();
@@ -2032,6 +2047,10 @@ impl RichTextState {
         }
     }
 
+    pub fn command_toggle_todo(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("todo.toggle", None, cx);
+    }
+
     pub fn command_toggle_bold(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
     }
@@ -2215,6 +2234,18 @@ impl RichTextState {
     pub fn is_blockquote_active(&self) -> bool {
         self.editor
             .run_query::<bool>("blockquote.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn is_todo_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("todo.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn is_todo_checked(&self) -> bool {
+        self.editor
+            .run_query::<bool>("todo.is_checked", None)
             .unwrap_or(false)
     }
 
@@ -3084,6 +3115,55 @@ impl Element for RichTextInputHandlerElement {
                     return;
                 }
 
+                // Clicking the todo checkbox toggles the checked state without entering
+                // "drag selecting" mode.
+                if event.click_count == 1 && !event.modifiers.shift && !event.modifiers.secondary()
+                {
+                    let toggle_path: Option<Vec<usize>> = (|| {
+                        let this = state.read(cx);
+                        let block_path = this.text_block_path_for_point(event.position)?;
+                        let el = element_at_path(this.editor.doc(), &block_path)?;
+                        if el.kind != "todo_item" {
+                            return None;
+                        }
+                        let cache = this.layout_cache.get(&block_path)?;
+
+                        let y_ok = event.position.y >= cache.bounds.top()
+                            && event.position.y <= cache.bounds.bottom();
+                        if !y_ok {
+                            return None;
+                        }
+
+                        let checkbox_left = cache.bounds.left() - px(26.);
+                        let checkbox_right = cache.bounds.left() - px(2.);
+                        let x_ok =
+                            event.position.x >= checkbox_left && event.position.x <= checkbox_right;
+                        x_ok.then_some(block_path)
+                    })();
+
+                    if let Some(block_path) = toggle_path {
+                        let focus_handle = { state.read(cx).focus_handle.clone() };
+                        window.focus(&focus_handle);
+
+                        state.update(cx, |this, cx| {
+                            let focus =
+                                this.point_for_block_offset(&block_path, 0)
+                                    .unwrap_or_else(|| {
+                                        let mut path = block_path.clone();
+                                        path.push(0);
+                                        CorePoint::new(path, 0)
+                                    });
+                            this.set_selection_points(focus.clone(), focus, cx);
+                            this.selecting = false;
+                            this.selection_anchor = None;
+
+                            let args = serde_json::json!({ "path": block_path });
+                            _ = this.run_command_and_refresh("todo.toggle_checked", Some(args), cx);
+                        });
+                        return;
+                    }
+                }
+
                 // Cmd/Ctrl-click opens a link instead of moving the caret.
                 if event.modifiers.secondary() && !event.modifiers.shift {
                     let url = {
@@ -3308,6 +3388,57 @@ impl Render for RichTextState {
                 .into_any_element()
         }
 
+        fn render_todo_item(
+            el: &ElementNode,
+            path: Vec<usize>,
+            window: &mut Window,
+            theme: &gpui_component::Theme,
+            state: &Entity<RichTextState>,
+        ) -> AnyElement {
+            let checked = el
+                .attrs
+                .get("checked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let checkbox = div()
+                .w(px(18.))
+                .h(px(18.))
+                .mt(px(2.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(if checked { theme.blue } else { theme.border })
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(if checked {
+                    theme.blue
+                } else {
+                    theme.muted_foreground
+                })
+                .child(if checked { "✓" } else { "" });
+
+            let mut line = RichTextLineElement::new(state.clone(), path);
+            if checked {
+                let mut style = window.text_style();
+                style.color = theme.muted_foreground;
+                style.strikethrough = Some(StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(theme.muted_foreground),
+                });
+                line = line.with_base_text_style(style);
+            }
+
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.))
+                .child(checkbox)
+                .child(div().flex_1().min_w(px(0.)).child(line))
+                .into_any_element()
+        }
+
         fn render_block(
             node: &Node,
             path: Vec<usize>,
@@ -3317,6 +3448,9 @@ impl Render for RichTextState {
             registry: &PluginRegistry,
         ) -> AnyElement {
             match node {
+                Node::Element(el) if el.kind == "todo_item" => {
+                    render_todo_item(el, path, window, theme, state)
+                }
                 Node::Element(el) if el.kind == "list_item" => {
                     render_list_item(el, path, theme, state)
                 }

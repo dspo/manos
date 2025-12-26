@@ -304,8 +304,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
-- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
-- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`blockquote.is_active`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
+- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`todo.toggle`、`todo.toggle_checked`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
+- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`blockquote.is_active`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
 - 代码位置：`crates/plate-core/src/plugin.rs`
 
 ### 当前进度（阶段性）
@@ -319,6 +319,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Iteration 8（Marks Pro）已实现：Italic/Underline/Strike/Code/Colors（命令/查询/渲染/工具栏）闭环。
 - Iteration 9（Schema-driven TextBlock + Heading）已实现：text block 判定由 `node_specs` 驱动；新增 Heading 插件与 toolbar dropdown（H1/H2/H3/Paragraph）。
 - Iteration 10（容器型 Block + Blockquote）已实现：BlockquotePlugin（schema + normalize + commands + query）+ view 递归渲染（包含 table cell 内嵌容器）+ toolbar Quote。
+- Iteration 11（Todo/Task）已实现：TodoPlugin（schema + normalize + commands + query）+ checkbox 前缀可点击（command → tx → undo）+ toolbar Todo。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -693,10 +694,31 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `story`：
   - toolbar 增加 Todo 按钮。
 
+**怎么实现（关键做法）**
+- core：
+  - `todo_item` 是标准 text block（`InlineOnly`），用 `attrs.checked: bool` 表达勾选状态；normalize 负责补齐/纠正 `checked` 字段（默认 `false`）。
+  - `todo.toggle`：
+    - selection 的起止 block 在同一 parent 容器内时，对范围内的 `paragraph`/`todo_item` 批量切换（保持 selection path 不变）。
+    - selection 跨 parent 时，降级为仅切换 focus block（避免跨容器重排导致 selection remap 复杂化）。
+  - `todo.toggle_checked`：
+    - 默认切换 selection 所在 `todo_item` 的 `checked`。
+    - 支持可选参数 `{ "path": [...] }`，供 view 的 checkbox 命中测试直接定位并切换指定 block。
+- view：
+  - 渲染 `todo_item`：checkbox 前缀 + `RichTextLineElement`；checked 时给整行注入 muted+strikethrough base style。
+  - 点击 checkbox：用 `layout_cache` 的 text bounds 反推 checkbox 区域（`bounds.left() - 常量宽度`），命中则触发 `todo.toggle_checked({path})` 并阻止进入拖拽选区模式。
+  - Enter/粘贴换行：在 `todo_item` 内拆分/插入新行时，新增的 block 继续使用 `todo_item` 且默认 `checked=false`；空 todo_item 上回车退出为 paragraph。
+- story：
+  - Todo 按钮只读 `todo.is_active`（query）并触发 `todo.toggle`（command）。
+
 **要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
 - **插入/切换**：点击 Todo 将 paragraph 变为 todo_item，再点还原。
 - **勾选**：点击 checkbox 勾选/取消；Undo/Redo 可回滚。
-- **跨 blocks**：跨多行选区 toggle todo，不会破坏 selection（可选择按“只作用于 focus block”定义，但需写清楚并在示例中保持一致）。
+- **跨 blocks**：跨多行选区 toggle todo：
+  - 若 selection 在同一 parent 容器内（root/blockquote/table cell 等），范围内 paragraph/todo_item 会批量切换，selection 不乱跳。
+  - 若 selection 跨 parent，则只切换 focus block（行为可预测，不做隐式跨容器重排）。
+- **Enter 行为**：在 todo_item 内回车会生成新的 todo_item；空 todo_item 上回车退出为 paragraph。
 - **JSON round-trip**：Save As → Open 后 `checked` 状态与渲染一致。
 
 ## 9. 风险与对策

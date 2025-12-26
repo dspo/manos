@@ -193,7 +193,17 @@ impl RichTextExample {
 impl Render for RichTextExample {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let (can_undo, can_redo, marks, bulleted, ordered, table_active, heading_level, quote) = {
+        let (
+            can_undo,
+            can_redo,
+            marks,
+            bulleted,
+            ordered,
+            table_active,
+            heading_level,
+            quote,
+            todo,
+        ) = {
             let editor = self.editor.read(cx);
             (
                 editor.can_undo(),
@@ -204,6 +214,7 @@ impl Render for RichTextExample {
                 editor.is_table_active(),
                 editor.heading_level(),
                 editor.is_blockquote_active(),
+                editor.is_todo_active(),
             )
         };
         let bold = marks.bold;
@@ -579,6 +590,16 @@ impl Render for RichTextExample {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.editor
                                     .update(cx, |ed, cx| ed.command_toggle_ordered_list(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("todo", PlateIconName::ListTodo)
+                            .selected(todo)
+                            .tooltip("Todo")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor.update(cx, |ed, cx| ed.command_toggle_todo(cx));
                                 let handle = this.editor.read(cx).focus_handle();
                                 window.focus(&handle);
                             })),

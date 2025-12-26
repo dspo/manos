@@ -143,6 +143,7 @@ impl PluginRegistry {
             Box::new(MarksCommandsPlugin),
             Box::new(HeadingPlugin),
             Box::new(BlockquotePlugin),
+            Box::new(TodoPlugin),
             Box::new(ListPlugin),
             Box::new(TablePlugin),
             Box::new(MentionPlugin),
@@ -1116,6 +1117,143 @@ impl NormalizePass for NormalizeBlockquoteChildren {
     }
 }
 
+struct TodoPlugin;
+
+impl PlatePlugin for TodoPlugin {
+    fn id(&self) -> &'static str {
+        "todo"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "todo_item".to_string(),
+            role: NodeRole::Block,
+            is_void: false,
+            children: ChildConstraint::InlineOnly,
+        }]
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeTodoCheckedAttr)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec {
+                id: "todo.toggle".to_string(),
+                label: "Toggle todo item".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    toggle_todo(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle todo: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "todo.toggle_checked".to_string(),
+                label: "Toggle todo checked".to_string(),
+                handler: std::sync::Arc::new(|editor, args| {
+                    toggle_todo_checked(editor, args.as_ref())
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle todo checked: {e:?}"))
+                            })
+                        })
+                }),
+            },
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![
+            QuerySpec {
+                id: "todo.is_active".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| Ok(Value::Bool(is_in_todo(editor)))),
+            },
+            QuerySpec {
+                id: "todo.is_checked".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    Ok(Value::Bool(active_todo_checked(editor)))
+                }),
+            },
+        ]
+    }
+}
+
+struct NormalizeTodoCheckedAttr;
+
+impl NormalizePass for NormalizeTodoCheckedAttr {
+    fn id(&self) -> &'static str {
+        "todo.normalize_checked_attr"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_container(
+            children: &[Node],
+            parent_path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                if el.kind == "todo_item" {
+                    let checked = el.attrs.get("checked").and_then(|v| v.as_bool());
+                    if checked.is_none() {
+                        let mut set = Attrs::default();
+                        set.insert("checked".to_string(), Value::Bool(false));
+                        let mut path = parent_path.clone();
+                        path.push(ix);
+                        ops.push(Op::SetNodeAttrs {
+                            path,
+                            patch: crate::core::AttrPatch {
+                                set,
+                                remove: Vec::new(),
+                            },
+                        });
+                    }
+                }
+            }
+
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                let spec_children = registry
+                    .node_specs
+                    .get(&el.kind)
+                    .map(|s| s.children.clone())
+                    .unwrap_or(ChildConstraint::Any);
+                if spec_children == ChildConstraint::InlineOnly || el.children.is_empty() {
+                    continue;
+                }
+
+                parent_path.push(ix);
+                normalize_container(&el.children, parent_path, registry, ops);
+                parent_path.pop();
+            }
+        }
+
+        normalize_container(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
 struct ListPlugin;
 
 impl PlatePlugin for ListPlugin {
@@ -1862,6 +2000,181 @@ fn unwrap_nearest_blockquote(editor: &mut crate::core::Editor) -> Result<Transac
     Ok(Transaction::new(ops)
         .selection_after(selection_after)
         .source("command:blockquote.unwrap"))
+}
+
+fn is_in_todo(editor: &crate::core::Editor) -> bool {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return false;
+    };
+    match node_at_path(editor.doc(), block_path) {
+        Some(Node::Element(el)) if el.kind == "todo_item" => true,
+        _ => false,
+    }
+}
+
+fn active_todo_checked(editor: &crate::core::Editor) -> bool {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return false;
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return false;
+    };
+    if el.kind != "todo_item" {
+        return false;
+    }
+    el.attrs
+        .get("checked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn toggle_todo_in_block_path(block_node: Node, checked: bool) -> Result<Node, String> {
+    let Node::Element(el) = block_node else {
+        return Err("Active block is not a block element".into());
+    };
+
+    match el.kind.as_str() {
+        "paragraph" => {
+            let mut attrs = Attrs::default();
+            attrs.insert("checked".to_string(), Value::Bool(checked));
+            Ok(Node::Element(ElementNode {
+                kind: "todo_item".to_string(),
+                attrs,
+                children: el.children,
+            }))
+        }
+        "todo_item" => Ok(Node::Element(ElementNode {
+            kind: "paragraph".to_string(),
+            attrs: Attrs::default(),
+            children: el.children,
+        })),
+        _ => Ok(Node::Element(el)),
+    }
+}
+
+fn toggle_todo(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let selection_after = editor.selection().clone();
+    let sel = editor.selection().clone();
+    let (start, end) = ordered_selection_points(&sel);
+    let Some(start_block_path) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection start is not in a text block".into());
+    };
+    let Some(end_block_path) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection end is not in a text block".into());
+    };
+
+    let Some((focus_ix, focus_parent)) = selection_after
+        .focus
+        .path
+        .split_last()
+        .and_then(|(_, p)| p.split_last())
+        .map(|(ix, parent)| (*ix, parent.to_vec()))
+    else {
+        return Err("No active block".into());
+    };
+
+    let (start_ix, start_parent) = start_block_path
+        .split_last()
+        .ok_or_else(|| "Selection start is not a block node".to_string())?;
+    let (end_ix, end_parent) = end_block_path
+        .split_last()
+        .ok_or_else(|| "Selection end is not a block node".to_string())?;
+
+    let (parent_path, a, b) = if start_parent == end_parent {
+        let (a, b) = if start_ix <= end_ix {
+            (*start_ix, *end_ix)
+        } else {
+            (*end_ix, *start_ix)
+        };
+        (start_parent.to_vec(), a, b)
+    } else {
+        (focus_parent, focus_ix, focus_ix)
+    };
+
+    let Some(parent_children) = children_at_path(editor.doc(), &parent_path) else {
+        return Err("Selection parent is not a container".into());
+    };
+    if a >= parent_children.len() || b >= parent_children.len() {
+        return Err("Selection block range is out of bounds".into());
+    }
+
+    let mut ops: Vec<Op> = Vec::new();
+    for ix in a..=b {
+        let Some(node) = parent_children.get(ix).cloned() else {
+            continue;
+        };
+        let Node::Element(el) = &node else {
+            continue;
+        };
+        if el.kind != "paragraph" && el.kind != "todo_item" {
+            continue;
+        }
+
+        let next = toggle_todo_in_block_path(node, false)?;
+        let mut path = parent_path.clone();
+        path.push(ix);
+        ops.push(Op::RemoveNode { path: path.clone() });
+        ops.push(Op::InsertNode { path, node: next });
+    }
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:todo.toggle"))
+}
+
+fn parse_path_arg(args: Option<&Value>) -> Option<Vec<usize>> {
+    let path = args.as_ref()?.get("path")?.as_array()?;
+    let mut out = Vec::with_capacity(path.len());
+    for v in path {
+        out.push(v.as_u64()? as usize);
+    }
+    Some(out)
+}
+
+fn toggle_todo_checked(
+    editor: &mut crate::core::Editor,
+    args: Option<&Value>,
+) -> Result<Transaction, String> {
+    let selection_after = editor.selection().clone();
+
+    let block_path = parse_path_arg(args).or_else(|| {
+        selection_after
+            .focus
+            .path
+            .split_last()
+            .map(|(_, p)| p.to_vec())
+    });
+    let Some(block_path) = block_path else {
+        return Err("No active block".into());
+    };
+
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), &block_path) else {
+        return Ok(Transaction::new(Vec::new()).source("command:todo.toggle_checked"));
+    };
+    if el.kind != "todo_item" {
+        return Ok(Transaction::new(Vec::new()).source("command:todo.toggle_checked"));
+    }
+
+    let checked = el
+        .attrs
+        .get("checked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let next = Value::Bool(!checked);
+    let mut set = Attrs::default();
+    set.insert("checked".to_string(), next);
+
+    Ok(Transaction::new(vec![Op::SetNodeAttrs {
+        path: block_path,
+        patch: crate::core::AttrPatch {
+            set,
+            remove: Vec::new(),
+        },
+    }])
+    .selection_after(selection_after)
+    .source("command:todo.toggle_checked"))
 }
 
 fn toggle_list(editor: &mut crate::core::Editor, list_type: &str) -> Result<(), String> {
