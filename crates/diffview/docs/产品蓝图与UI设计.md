@@ -13,10 +13,12 @@
 - 二方 diff：Split/Inline；Split 支持“对齐(单滚动)”与“分栏(真双/多 pane + 同步滚动)”两种布局；支持折叠上下文、展开全部、忽略空白、上一/下一 hunk。
 - 右侧标尺：diff hunk / 冲突块分布标记 + 点击跳转（基础版）。
 - 对比目标：支持 `HEAD↔工作区 / 暂存↔工作区 / HEAD↔暂存` 切换（为部分暂存/回滚语义服务）。
+- 任意 refs/历史对比：Diff 页“对比”Popover 内支持输入 `HEAD~1/a1b2c3/INDEX/:/WORKTREE` 等 refs；并提供“从历史选择 commit…”弹窗（`git log -- <path>`），可在 `parent→commit`（查看该提交引入的变更）与 `commit→工作区` 间切换。
 - Git 操作：文件级 stage/unstage；**当前 hunk** 级 stage/unstage/revert（基于 patch 生成 + `git apply`/`git apply --cached`）。
 - 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；底部“合并结果”编辑器（编辑后点击“应用”刷新冲突检测）；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
 - 小窗口适配：Diff/Conflict 工具条将“对比目标/视图&Git/保存操作”收纳到 Popover（`对比` / `更多`）；其它区域用 `flex-wrap` 兜底，避免按钮被挤出不可点。
 - 键盘快捷键（基础）：Esc 返回；Alt+N/P 导航；Alt+W 忽略空白；Alt+V 切换 Split/Inline；Alt+L 切换对齐/分栏；Cmd/Ctrl+S 保存冲突结果（冲突清零后）。
+- CommandPalette：`Cmd/Ctrl+K` 或 `Cmd/Ctrl+Shift+P` 打开命令面板，支持搜索并执行常用命令（导航、切换视图/布局/空白、展开折叠、打开历史对比、冲突保存等）。
 - 性能与体验（基础版）：git/IO/diff 计算移到 `background_executor`；忽略空白/上下文改动采用 120ms 防抖 + 后台重算；虚拟列表 `item_sizes` 缓存减少大向量分配；提供 Large Diff Demo（`GIT_VIEWER_LARGE_DEMO_LINES`）用于 1-5 万行验收。
 
 ## 信息架构与流程
@@ -239,7 +241,7 @@
 - 如何实现：按需逐项引入（历史对比、评论、AI、多仓库、外部修改检测、CommandPalette）。
 - 验收：每项能力提供独立 demo/story 或在 `git-viewer` 中提供可切换开关，并附带最小场景说明。
 - 本步 TODO：
-  - [ ] 历史/任意 commit 对比
+  - [x] 历史/任意 commit 对比
   - [ ] 评论/备注（可选）
   - [ ] 多仓库与外部修改检测
-  - [ ] 键盘命令/CommandPalette
+  - [x] 键盘命令/CommandPalette

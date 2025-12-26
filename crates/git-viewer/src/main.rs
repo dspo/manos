@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
+use gpui::StatefulInteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui::{KeyBinding, actions};
@@ -23,6 +24,7 @@ const CONTEXT: &str = "GitViewer";
 actions!(
     git_viewer,
     [
+        OpenCommandPalette,
         Back,
         Next,
         Prev,
@@ -38,6 +40,14 @@ actions!(
 
 fn init_keybindings(cx: &mut App) {
     cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-k", OpenCommandPalette, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-k", OpenCommandPalette, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-p", OpenCommandPalette, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-p", OpenCommandPalette, Some(CONTEXT)),
         KeyBinding::new("escape", Back, Some(CONTEXT)),
         KeyBinding::new("alt-n", Next, Some(CONTEXT)),
         KeyBinding::new("alt-p", Prev, Some(CONTEXT)),
@@ -72,7 +82,7 @@ enum StatusFilter {
     Untracked,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AppScreen {
     StatusList,
     DiffView,
@@ -100,12 +110,123 @@ enum DiffViewMode {
     Inline,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum CompareTarget {
     HeadToWorktree,
     IndexToWorktree,
     HeadToIndex,
+    Refs { left: String, right: String },
 }
+
+#[derive(Clone, Debug)]
+struct CommitEntry {
+    hash: String,
+    short_hash: String,
+    subject: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryCompareMode {
+    ParentToCommit,
+    CommitToWorktree,
+}
+
+#[derive(Clone)]
+struct FileHistoryOverlayState {
+    path: String,
+    status: Option<String>,
+    commits: Vec<CommitEntry>,
+    loading: bool,
+    selected: usize,
+    mode: HistoryCompareMode,
+    filter_input: Entity<InputState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandPaletteCommand {
+    Back,
+    Next,
+    Prev,
+    ToggleViewMode,
+    ToggleSplitLayout,
+    ToggleWhitespace,
+    ExpandAll,
+    OpenFileHistory,
+    ApplyEditor,
+    SaveConflict,
+    SaveConflictAndAdd,
+}
+
+#[derive(Clone)]
+struct CommandPaletteOverlayState {
+    input: Entity<InputState>,
+    selected: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CommandPaletteItem {
+    command: CommandPaletteCommand,
+    title: &'static str,
+    keywords: &'static str,
+}
+
+const COMMAND_PALETTE_ITEMS: &[CommandPaletteItem] = &[
+    CommandPaletteItem {
+        command: CommandPaletteCommand::Back,
+        title: "返回",
+        keywords: "back esc 返回 close",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::Next,
+        title: "下一处（hunk/冲突）",
+        keywords: "next 下一个 hunk 冲突 navigate",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::Prev,
+        title: "上一处（hunk/冲突）",
+        keywords: "prev 上一个 hunk 冲突 navigate",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::ToggleViewMode,
+        title: "切换视图 Split/Inline",
+        keywords: "toggle view mode split inline 视图",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::ToggleSplitLayout,
+        title: "切换布局 对齐/分栏",
+        keywords: "toggle layout aligned two-pane 对齐 分栏",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::ToggleWhitespace,
+        title: "切换忽略空白",
+        keywords: "toggle whitespace ignore 空白 忽略",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::ExpandAll,
+        title: "展开全部折叠",
+        keywords: "expand all folds 展开 折叠",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::OpenFileHistory,
+        title: "打开文件历史对比",
+        keywords: "history log commit 历史 对比",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::ApplyEditor,
+        title: "应用合并结果编辑",
+        keywords: "apply editor 应用 合并 结果",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::SaveConflict,
+        title: "保存冲突结果到文件",
+        keywords: "save conflict 保存 写入",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::SaveConflictAndAdd,
+        title: "保存并 git add",
+        keywords: "save add stage resolved 解决",
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 enum ConflictResolution {
@@ -232,6 +353,10 @@ struct GitViewerApp {
     diff_view: Option<DiffViewState>,
     conflict_view: Option<ConflictViewState>,
     diff_options: DiffViewOptions,
+    compare_left_input: Entity<InputState>,
+    compare_right_input: Entity<InputState>,
+    file_history_overlay: Option<FileHistoryOverlayState>,
+    command_palette_overlay: Option<CommandPaletteOverlayState>,
     diff_content_revision: u64,
     diff_rebuild_seq: u64,
     split_layout: SplitLayout,
@@ -280,6 +405,17 @@ impl GitViewerApp {
             );
         }
 
+        let compare_left_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("左侧 ref（例如 HEAD~1 / a1b2c3）")
+                .default_value("HEAD")
+        });
+        let compare_right_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("右侧 ref（留空=工作区，或 INDEX / :）")
+                .default_value("")
+        });
+
         Self {
             repo_root,
             files: Vec::new(),
@@ -293,6 +429,10 @@ impl GitViewerApp {
                 ignore_whitespace: false,
                 context_lines: 3,
             },
+            compare_left_input,
+            compare_right_input,
+            file_history_overlay: None,
+            command_palette_overlay: None,
             diff_content_revision: 0,
             diff_rebuild_seq: 0,
             split_layout: SplitLayout::TwoPane,
@@ -473,7 +613,7 @@ impl GitViewerApp {
         window.push_notification(
             Notification::new().message(format!(
                 "正在加载 diff：{status} {path}（{}）",
-                compare_target_label(target)
+                compare_target_label(&target)
             )),
             cx,
         );
@@ -481,10 +621,11 @@ impl GitViewerApp {
         cx.spawn_in(window, async move |_, window| {
             let path_for_task_bg = path_for_task.clone();
             let status_for_task_bg = status_for_task.clone();
+            let target_for_io = target.clone();
             let (old_text, old_err, new_text, new_err) = window
                 .background_executor()
                 .spawn(async move {
-                    let (old_text, old_err) = match target {
+                    let (old_text, old_err) = match target_for_io.clone() {
                         CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
                             match read_head_file(&repo_root, &path_for_task_bg, &status_for_task_bg)
                             {
@@ -502,9 +643,15 @@ impl GitViewerApp {
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
                         }
+                        CompareTarget::Refs { left, .. } => {
+                            match read_specified_file(&repo_root, &path_for_task_bg, &left) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
                     };
 
-                    let (new_text, new_err) = match target {
+                    let (new_text, new_err) = match target_for_io {
                         CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
                             match read_working_file(&repo_root, &path_for_task_bg) {
                                 Ok(text) => (text, None),
@@ -517,6 +664,12 @@ impl GitViewerApp {
                                 &path_for_task_bg,
                                 &status_for_task_bg,
                             ) {
+                                Ok(text) => (text, None),
+                                Err(err) => (String::new(), Some(err.to_string())),
+                            }
+                        }
+                        CompareTarget::Refs { right, .. } => {
+                            match read_specified_file(&repo_root, &path_for_task_bg, &right) {
                                 Ok(text) => (text, None),
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
@@ -557,7 +710,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(target, Side::Old)
+                                compare_target_side_label(&target, Side::Old)
                             )),
                             cx,
                         );
@@ -566,7 +719,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(target, Side::New)
+                                compare_target_side_label(&target, Side::New)
                             )),
                             cx,
                         );
@@ -595,6 +748,586 @@ impl GitViewerApp {
             Some(())
         })
         .detach();
+    }
+
+    fn open_file_diff_with_refs(
+        &mut self,
+        path: String,
+        status: Option<String>,
+        left_ref: String,
+        right_ref: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法进行历史/任意版本对比"),
+                cx,
+            );
+            return;
+        }
+
+        let left_ref = left_ref.trim().to_string();
+        let right_ref = right_ref.trim().to_string();
+        if left_ref.is_empty() {
+            window.push_notification(
+                Notification::new().message("左侧 ref 不能为空（例如 HEAD / HEAD~1 / a1b2c3）"),
+                cx,
+            );
+            return;
+        }
+
+        let compare_target = CompareTarget::Refs {
+            left: left_ref.clone(),
+            right: right_ref.clone(),
+        };
+
+        let title: SharedString = match &status {
+            Some(status) if !status.trim().is_empty() => format!("{status} {path}").into(),
+            _ => path.clone().into(),
+        };
+
+        window.push_notification(
+            Notification::new().message(format!(
+                "正在加载 diff：{path}（{}）",
+                compare_target_label(&compare_target)
+            )),
+            cx,
+        );
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path_for_task = path.clone();
+        let status_for_task = status.clone();
+
+        cx.spawn_in(window, async move |_, window| {
+            let path_for_task_bg = path_for_task.clone();
+            let left_ref_for_io = left_ref.clone();
+            let right_ref_for_io = right_ref.clone();
+            let (old_text, old_err, new_text, new_err) = window
+                .background_executor()
+                .spawn(async move {
+                    let (old_text, old_err) = match read_specified_file(
+                        &repo_root,
+                        &path_for_task_bg,
+                        &left_ref_for_io,
+                    ) {
+                        Ok(text) => (text, None),
+                        Err(err) => (String::new(), Some(err.to_string())),
+                    };
+
+                    let (new_text, new_err) =
+                        match read_specified_file(&repo_root, &path_for_task_bg, &right_ref_for_io)
+                        {
+                            Ok(text) => (text, None),
+                            Err(err) => (String::new(), Some(err.to_string())),
+                        };
+
+                    (old_text, old_err, new_text, new_err)
+                })
+                .await;
+
+            let diff_options =
+                window
+                    .update(|_, cx| this.read(cx).diff_options)
+                    .unwrap_or(DiffViewOptions {
+                        ignore_whitespace: false,
+                        context_lines: 3,
+                    });
+            let view_mode = window
+                .update(|_, cx| this.read(cx).view_mode)
+                .unwrap_or(DiffViewMode::Split);
+
+            let (old_text, new_text, model, old_lines, new_lines) = window
+                .background_executor()
+                .spawn(async move {
+                    let (model, old_lines, new_lines) = build_diff_model(
+                        &old_text,
+                        &new_text,
+                        diff_options.ignore_whitespace,
+                        diff_options.context_lines,
+                    );
+                    (old_text, new_text, model, old_lines, new_lines)
+                })
+                .await;
+
+            window
+                .update(|window, cx| {
+                    if let Some(err) = old_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(&compare_target, Side::Old)
+                            )),
+                            cx,
+                        );
+                    }
+                    if let Some(err) = new_err {
+                        window.push_notification(
+                            Notification::new().message(format!(
+                                "读取 {} 版本失败，按空内容处理：{err}",
+                                compare_target_side_label(&compare_target, Side::New)
+                            )),
+                            cx,
+                        );
+                    }
+
+                    this.update(cx, |this, _cx| {
+                        this.diff_content_revision = this.diff_content_revision.wrapping_add(1);
+                        this.conflict_view = None;
+                        this.diff_view = Some(DiffViewState::from_precomputed(
+                            title,
+                            Some(path_for_task.clone()),
+                            status_for_task.clone(),
+                            compare_target.clone(),
+                            old_text,
+                            new_text,
+                            view_mode,
+                            model,
+                            old_lines,
+                            new_lines,
+                        ));
+                        this.screen = AppScreen::DiffView;
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn apply_compare_refs_from_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(diff_view) = self.diff_view.as_ref() else {
+            return;
+        };
+        let Some(path) = diff_view.path.clone() else {
+            window.push_notification(
+                Notification::new().message("当前 diff 为 demo，暂不支持任意版本对比"),
+                cx,
+            );
+            return;
+        };
+
+        let left_ref = self.compare_left_input.read(cx).value().to_string();
+        let right_ref = self.compare_right_input.read(cx).value().to_string();
+        let status = diff_view.status.clone();
+        self.open_file_diff_with_refs(path, status, left_ref, right_ref, window, cx);
+    }
+
+    fn swap_compare_refs_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let left_ref = self.compare_left_input.read(cx).value().to_string();
+        let right_ref = self.compare_right_input.read(cx).value().to_string();
+
+        self.compare_left_input.update(cx, |state, cx| {
+            state.set_value(right_ref.clone(), window, cx);
+        });
+        self.compare_right_input.update(cx, |state, cx| {
+            state.set_value(left_ref.clone(), window, cx);
+        });
+        cx.notify();
+    }
+
+    fn open_file_history_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法打开历史对比"),
+                cx,
+            );
+            return;
+        }
+
+        self.command_palette_overlay = None;
+
+        let Some(diff_view) = self.diff_view.as_ref() else {
+            return;
+        };
+        let Some(path) = diff_view.path.clone() else {
+            window.push_notification(
+                Notification::new().message("当前 diff 为 demo，暂不支持历史对比"),
+                cx,
+            );
+            return;
+        };
+
+        let status = diff_view.status.clone();
+        let filter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("搜索 commit（hash / message）")
+                .default_value("")
+        });
+
+        self.file_history_overlay = Some(FileHistoryOverlayState {
+            path: path.clone(),
+            status,
+            commits: Vec::new(),
+            loading: true,
+            selected: 0,
+            mode: HistoryCompareMode::ParentToCommit,
+            filter_input: filter_input.clone(),
+        });
+
+        filter_input.update(cx, |state, cx| state.focus(window, cx));
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path_for_task = path.clone();
+        cx.spawn_in(window, async move |_, window| {
+            let path_for_task_bg = path_for_task.clone();
+            let path_for_update = path_for_task.clone();
+            let repo_root_bg = repo_root.clone();
+            let commits = window
+                .background_executor()
+                .spawn(async move { fetch_file_history(&repo_root_bg, &path_for_task_bg, 200) })
+                .await;
+
+            window
+                .update(|window, cx| match commits {
+                    Ok(commits) => this.update(cx, |this, cx| {
+                        if let Some(overlay) = this.file_history_overlay.as_mut() {
+                            if overlay.path == path_for_update {
+                                overlay.loading = false;
+                                overlay.commits = commits;
+                                overlay.selected = 0;
+                                cx.notify();
+                            }
+                        }
+                    }),
+                    Err(err) => {
+                        window.push_notification(
+                            Notification::new().message(format!("获取历史失败：{err:#}")),
+                            cx,
+                        );
+                        this.update(cx, |this, cx| {
+                            if let Some(overlay) = this.file_history_overlay.as_mut() {
+                                if overlay.path == path_for_update {
+                                    overlay.loading = false;
+                                    cx.notify();
+                                }
+                            }
+                        });
+                    }
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn close_file_history_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_history_overlay.take().is_some() {
+            window.focus(&self.focus_handle);
+            cx.notify();
+        }
+    }
+
+    fn apply_selected_file_history_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(overlay) = self.file_history_overlay.as_ref() else {
+            return;
+        };
+        if overlay.loading || overlay.commits.is_empty() {
+            return;
+        }
+
+        let query = overlay.filter_input.read(cx).value().to_string();
+        let filtered = filter_commits(&overlay.commits, &query);
+        let Some(entry) = filtered.get(overlay.selected.min(filtered.len().saturating_sub(1)))
+        else {
+            return;
+        };
+
+        let (left_ref, right_ref) = match overlay.mode {
+            HistoryCompareMode::ParentToCommit => (format!("{}^", entry.hash), entry.hash.clone()),
+            HistoryCompareMode::CommitToWorktree => (entry.hash.clone(), String::new()),
+        };
+
+        let path = overlay.path.clone();
+        let status = overlay.status.clone();
+        self.file_history_overlay = None;
+        self.open_file_diff_with_refs(path, status, left_ref, right_ref, window, cx);
+    }
+
+    fn handle_file_history_overlay_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(overlay) = self.file_history_overlay.as_mut() else {
+            return false;
+        };
+
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.close_file_history_overlay(window, cx);
+                true
+            }
+            "enter" => {
+                self.apply_selected_file_history_commit(window, cx);
+                true
+            }
+            "up" | "down" | "pageup" | "pagedown" => {
+                let query = overlay.filter_input.read(cx).value().to_string();
+                let filtered_len = filter_commits(&overlay.commits, &query).len();
+                if filtered_len == 0 {
+                    return true;
+                }
+
+                let step = match event.keystroke.key.as_str() {
+                    "pageup" | "pagedown" => 10usize,
+                    _ => 1usize,
+                };
+
+                let mut selected = overlay.selected.min(filtered_len.saturating_sub(1));
+                match event.keystroke.key.as_str() {
+                    "up" => selected = selected.saturating_sub(step),
+                    "pageup" => selected = selected.saturating_sub(step),
+                    "down" => selected = (selected + step).min(filtered_len.saturating_sub(1)),
+                    "pagedown" => selected = (selected + step).min(filtered_len.saturating_sub(1)),
+                    _ => {}
+                }
+                overlay.selected = selected;
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_history_overlay = None;
+
+        if let Some(overlay) = self.command_palette_overlay.as_ref() {
+            overlay
+                .input
+                .update(cx, |state, cx| state.focus(window, cx));
+            return;
+        }
+
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("输入命令…（↑↓ 选择，Enter 执行，Esc 关闭）")
+                .default_value("")
+        });
+
+        input.update(cx, |state, cx| {
+            state.set_value(String::new(), window, cx);
+            state.focus(window, cx);
+        });
+
+        self.command_palette_overlay = Some(CommandPaletteOverlayState { input, selected: 0 });
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette_overlay.take().is_some() {
+            window.focus(&self.focus_handle);
+            cx.notify();
+        }
+    }
+
+    fn command_palette_command_enabled(&self, command: CommandPaletteCommand) -> bool {
+        match command {
+            CommandPaletteCommand::Back => true,
+            CommandPaletteCommand::Next | CommandPaletteCommand::Prev => match self.screen {
+                AppScreen::DiffView => self
+                    .diff_view
+                    .as_ref()
+                    .is_some_and(|view| !view.hunk_rows.is_empty()),
+                AppScreen::ConflictView => self
+                    .conflict_view
+                    .as_ref()
+                    .is_some_and(|view| !view.conflict_rows.is_empty()),
+                AppScreen::StatusList => false,
+            },
+            CommandPaletteCommand::ToggleViewMode => matches!(self.screen, AppScreen::DiffView),
+            CommandPaletteCommand::ToggleSplitLayout => {
+                matches!(self.screen, AppScreen::DiffView) && self.view_mode == DiffViewMode::Split
+            }
+            CommandPaletteCommand::ToggleWhitespace => matches!(self.screen, AppScreen::DiffView),
+            CommandPaletteCommand::ExpandAll => {
+                self.screen == AppScreen::DiffView
+                    && self.diff_view.as_ref().is_some_and(|view| {
+                        view.rows
+                            .iter()
+                            .any(|row| matches!(row, DisplayRow::Fold { .. }))
+                    })
+            }
+            CommandPaletteCommand::OpenFileHistory => {
+                self.git_available
+                    && self.screen == AppScreen::DiffView
+                    && self
+                        .diff_view
+                        .as_ref()
+                        .is_some_and(|view| view.path.is_some())
+            }
+            CommandPaletteCommand::ApplyEditor => matches!(self.screen, AppScreen::ConflictView),
+            CommandPaletteCommand::SaveConflict | CommandPaletteCommand::SaveConflictAndAdd => {
+                let Some(view) = self.conflict_view.as_ref() else {
+                    return false;
+                };
+                let can_save = view.path.is_some() && view.conflicts.is_empty();
+                match command {
+                    CommandPaletteCommand::SaveConflict => can_save,
+                    CommandPaletteCommand::SaveConflictAndAdd => can_save && self.git_available,
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    fn run_command_palette_command(
+        &mut self,
+        command: CommandPaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            CommandPaletteCommand::Back => {
+                if self.command_palette_overlay.is_some() {
+                    self.close_command_palette(window, cx);
+                    return;
+                }
+                if self.file_history_overlay.is_some() {
+                    self.close_file_history_overlay(window, cx);
+                    return;
+                }
+
+                match self.screen {
+                    AppScreen::DiffView => self.close_diff_view(),
+                    AppScreen::ConflictView => self.close_conflict_view(),
+                    AppScreen::StatusList => {}
+                }
+                window.focus(&self.focus_handle);
+            }
+            CommandPaletteCommand::Next => match self.screen {
+                AppScreen::DiffView => self.jump_hunk(1),
+                AppScreen::ConflictView => self.jump_conflict(1),
+                AppScreen::StatusList => {}
+            },
+            CommandPaletteCommand::Prev => match self.screen {
+                AppScreen::DiffView => self.jump_hunk(-1),
+                AppScreen::ConflictView => self.jump_conflict(-1),
+                AppScreen::StatusList => {}
+            },
+            CommandPaletteCommand::ToggleViewMode => {
+                if matches!(self.screen, AppScreen::DiffView) {
+                    let next = match self.view_mode {
+                        DiffViewMode::Split => DiffViewMode::Inline,
+                        DiffViewMode::Inline => DiffViewMode::Split,
+                    };
+                    self.set_view_mode(next);
+                }
+            }
+            CommandPaletteCommand::ToggleSplitLayout => {
+                if self.screen == AppScreen::DiffView && self.view_mode == DiffViewMode::Split {
+                    self.split_layout = match self.split_layout {
+                        SplitLayout::Aligned => SplitLayout::TwoPane,
+                        SplitLayout::TwoPane => SplitLayout::Aligned,
+                    };
+                }
+            }
+            CommandPaletteCommand::ToggleWhitespace => {
+                if matches!(self.screen, AppScreen::DiffView) {
+                    let next = !self.diff_options.ignore_whitespace;
+                    self.set_ignore_whitespace(next, window, cx);
+                }
+            }
+            CommandPaletteCommand::ExpandAll => {
+                if matches!(self.screen, AppScreen::DiffView) {
+                    self.expand_all_folds();
+                }
+            }
+            CommandPaletteCommand::OpenFileHistory => {
+                if matches!(self.screen, AppScreen::DiffView) {
+                    self.open_file_history_overlay(window, cx);
+                }
+            }
+            CommandPaletteCommand::ApplyEditor => {
+                if matches!(self.screen, AppScreen::ConflictView) {
+                    self.apply_conflict_editor(window, cx);
+                }
+            }
+            CommandPaletteCommand::SaveConflict => {
+                if matches!(self.screen, AppScreen::ConflictView) {
+                    self.save_conflict_to_working_tree(false, window, cx);
+                }
+            }
+            CommandPaletteCommand::SaveConflictAndAdd => {
+                if matches!(self.screen, AppScreen::ConflictView) {
+                    self.save_conflict_to_working_tree(true, window, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_selected_command_palette_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(overlay) = self.command_palette_overlay.as_ref() else {
+            return;
+        };
+
+        let query = overlay.input.read(cx).value().to_string();
+        let filtered = filter_command_palette_items(&query);
+        let Some(item) = filtered.get(overlay.selected.min(filtered.len().saturating_sub(1)))
+        else {
+            return;
+        };
+        if !self.command_palette_command_enabled(item.command) {
+            return;
+        }
+
+        let command = item.command;
+        self.run_command_palette_command(command, window, cx);
+        self.close_command_palette(window, cx);
+    }
+
+    fn handle_command_palette_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(overlay) = self.command_palette_overlay.as_mut() else {
+            return false;
+        };
+
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.close_command_palette(window, cx);
+                true
+            }
+            "enter" => {
+                self.apply_selected_command_palette_item(window, cx);
+                true
+            }
+            "up" | "down" | "pageup" | "pagedown" => {
+                let query = overlay.input.read(cx).value().to_string();
+                let filtered_len = filter_command_palette_items(&query).len();
+                if filtered_len == 0 {
+                    return true;
+                }
+
+                let step = match event.keystroke.key.as_str() {
+                    "pageup" | "pagedown" => 10usize,
+                    _ => 1usize,
+                };
+
+                let mut selected = overlay.selected.min(filtered_len.saturating_sub(1));
+                match event.keystroke.key.as_str() {
+                    "up" => selected = selected.saturating_sub(step),
+                    "pageup" => selected = selected.saturating_sub(step),
+                    "down" => selected = (selected + step).min(filtered_len.saturating_sub(1)),
+                    "pagedown" => selected = (selected + step).min(filtered_len.saturating_sub(1)),
+                    _ => {}
+                }
+                overlay.selected = selected;
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn set_compare_target(
@@ -727,7 +1460,7 @@ impl GitViewerApp {
         self.diff_rebuild_seq = self.diff_rebuild_seq.wrapping_add(1);
         let rebuild_seq = self.diff_rebuild_seq;
         let content_revision = self.diff_content_revision;
-        let compare_target = diff_view.compare_target;
+        let compare_target = diff_view.compare_target.clone();
         let this = cx.entity();
 
         cx.spawn_in(window, async move |_, window| {
@@ -1165,7 +1898,15 @@ impl GitViewerApp {
             return;
         };
 
-        let compare_target = diff_view.compare_target;
+        let compare_target = diff_view.compare_target.clone();
+        if matches!(compare_target, CompareTarget::Refs { .. }) {
+            window.push_notification(
+                Notification::new()
+                    .message("自定义对比模式下不支持 Stage 文件，请先切换到内置对比目标"),
+                cx,
+            );
+            return;
+        }
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
         let current_hunk = diff_view.current_hunk;
@@ -1189,6 +1930,7 @@ impl GitViewerApp {
                 .unwrap_or(DiffViewMode::Split);
 
             let path_for_task_bg = path_for_task.clone();
+            let compare_target_for_io = compare_target.clone();
             let (
                 add_ok,
                 add_err,
@@ -1220,7 +1962,7 @@ impl GitViewerApp {
                         Err(err) => (None, Some(err.to_string()), String::new()),
                     };
 
-                    let (old_text, old_err) = match compare_target {
+                    let (old_text, old_err) = match compare_target_for_io.clone() {
                         CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
                             match read_head_file(&repo_root, &path_for_task_bg, &updated_status) {
                                 Ok(text) => (text, None),
@@ -1233,9 +1975,12 @@ impl GitViewerApp {
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
                         }
+                        CompareTarget::Refs { .. } => {
+                            (String::new(), Some("不支持的对比目标".to_string()))
+                        }
                     };
 
-                    let (new_text, new_err) = match compare_target {
+                    let (new_text, new_err) = match compare_target_for_io {
                         CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
                             match read_working_file(&repo_root, &path_for_task_bg) {
                                 Ok(text) => (text, None),
@@ -1247,6 +1992,9 @@ impl GitViewerApp {
                                 Ok(text) => (text, None),
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
+                        }
+                        CompareTarget::Refs { .. } => {
+                            (String::new(), Some("不支持的对比目标".to_string()))
                         }
                     };
 
@@ -1296,7 +2044,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(compare_target, Side::Old)
+                                compare_target_side_label(&compare_target, Side::Old)
                             )),
                             cx,
                         );
@@ -1305,7 +2053,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(compare_target, Side::New)
+                                compare_target_side_label(&compare_target, Side::New)
                             )),
                             cx,
                         );
@@ -1367,7 +2115,15 @@ impl GitViewerApp {
             return;
         };
 
-        let compare_target = diff_view.compare_target;
+        let compare_target = diff_view.compare_target.clone();
+        if matches!(compare_target, CompareTarget::Refs { .. }) {
+            window.push_notification(
+                Notification::new()
+                    .message("自定义对比模式下不支持 Unstage 文件，请先切换到内置对比目标"),
+                cx,
+            );
+            return;
+        }
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
         let current_hunk = diff_view.current_hunk;
@@ -1394,6 +2150,7 @@ impl GitViewerApp {
                 .unwrap_or(DiffViewMode::Split);
 
             let path_for_task_bg = path_for_task.clone();
+            let compare_target_for_io = compare_target.clone();
             let (
                 reset_ok,
                 reset_err,
@@ -1428,7 +2185,7 @@ impl GitViewerApp {
                         Err(err) => (None, Some(err.to_string()), String::new()),
                     };
 
-                    let (old_text, old_err) = match compare_target {
+                    let (old_text, old_err) = match compare_target_for_io.clone() {
                         CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
                             match read_head_file(&repo_root, &path_for_task_bg, &updated_status) {
                                 Ok(text) => (text, None),
@@ -1441,9 +2198,12 @@ impl GitViewerApp {
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
                         }
+                        CompareTarget::Refs { .. } => {
+                            (String::new(), Some("不支持的对比目标".to_string()))
+                        }
                     };
 
-                    let (new_text, new_err) = match compare_target {
+                    let (new_text, new_err) = match compare_target_for_io {
                         CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
                             match read_working_file(&repo_root, &path_for_task_bg) {
                                 Ok(text) => (text, None),
@@ -1455,6 +2215,9 @@ impl GitViewerApp {
                                 Ok(text) => (text, None),
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
+                        }
+                        CompareTarget::Refs { .. } => {
+                            (String::new(), Some("不支持的对比目标".to_string()))
                         }
                     };
 
@@ -1504,7 +2267,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(compare_target, Side::Old)
+                                compare_target_side_label(&compare_target, Side::Old)
                             )),
                             cx,
                         );
@@ -1513,7 +2276,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(compare_target, Side::New)
+                                compare_target_side_label(&compare_target, Side::New)
                             )),
                             cx,
                         );
@@ -1594,8 +2357,8 @@ impl GitViewerApp {
             window.push_notification(
                 Notification::new().message(format!(
                     "当前对比为 {}，请切换到 {} 再执行 {}",
-                    compare_target_label(diff_view.compare_target),
-                    compare_target_label(required_target),
+                    compare_target_label(&diff_view.compare_target),
+                    compare_target_label(&required_target),
                     action.label()
                 )),
                 cx,
@@ -1614,7 +2377,7 @@ impl GitViewerApp {
         let hunk_index = diff_view.current_hunk.min(hunk_count.saturating_sub(1));
         let patch = unified_patch_for_hunk(&path, &diff_view.diff_model.hunks[hunk_index]);
 
-        let compare_target = diff_view.compare_target;
+        let compare_target = diff_view.compare_target.clone();
         let scroll_handle = diff_view.scroll_handle.clone();
         let scroll_state = diff_view.scroll_state.clone();
         let current_hunk = diff_view.current_hunk;
@@ -1646,6 +2409,7 @@ impl GitViewerApp {
                 .unwrap_or(DiffViewMode::Split);
 
             let path_for_task_bg = path_for_task.clone();
+            let compare_target_for_io = compare_target.clone();
             let (
                 apply_result,
                 entries,
@@ -1675,7 +2439,7 @@ impl GitViewerApp {
                         Err(err) => (None, Some(err.to_string()), String::new()),
                     };
 
-                    let (old_text, old_err) = match compare_target {
+                    let (old_text, old_err) = match compare_target_for_io.clone() {
                         CompareTarget::HeadToWorktree | CompareTarget::HeadToIndex => {
                             match read_head_file(&repo_root, &path_for_task_bg, &updated_status) {
                                 Ok(text) => (text, None),
@@ -1688,9 +2452,12 @@ impl GitViewerApp {
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
                         }
+                        CompareTarget::Refs { .. } => {
+                            (String::new(), Some("不支持的对比目标".to_string()))
+                        }
                     };
 
-                    let (new_text, new_err) = match compare_target {
+                    let (new_text, new_err) = match compare_target_for_io {
                         CompareTarget::HeadToWorktree | CompareTarget::IndexToWorktree => {
                             match read_working_file(&repo_root, &path_for_task_bg) {
                                 Ok(text) => (text, None),
@@ -1702,6 +2469,9 @@ impl GitViewerApp {
                                 Ok(text) => (text, None),
                                 Err(err) => (String::new(), Some(err.to_string())),
                             }
+                        }
+                        CompareTarget::Refs { .. } => {
+                            (String::new(), Some("不支持的对比目标".to_string()))
                         }
                     };
 
@@ -1754,7 +2524,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(compare_target, Side::Old)
+                                compare_target_side_label(&compare_target, Side::Old)
                             )),
                             cx,
                         );
@@ -1763,7 +2533,7 @@ impl GitViewerApp {
                         window.push_notification(
                             Notification::new().message(format!(
                                 "读取 {} 版本失败，按空内容处理：{err}",
-                                compare_target_side_label(compare_target, Side::New)
+                                compare_target_side_label(&compare_target, Side::New)
                             )),
                             cx,
                         );
@@ -1961,7 +2731,7 @@ impl GitViewerApp {
         let inline_mode = view_mode == DiffViewMode::Inline;
         let two_pane = matches!(self.split_layout, SplitLayout::TwoPane);
         let title = diff_view.title.clone();
-        let compare_target = diff_view.compare_target;
+        let compare_target = diff_view.compare_target.clone();
         let ignore_whitespace = self.diff_options.ignore_whitespace;
         let context_lines = self.diff_options.context_lines;
         let hunk_count = diff_view.hunk_rows.len();
@@ -1995,11 +2765,13 @@ impl GitViewerApp {
         let item_sizes = diff_view.item_sizes(row_height);
 
         let app = cx.entity();
+        let compare_left_input = self.compare_left_input.clone();
+        let compare_right_input = self.compare_right_input.clone();
         let compare_label: SharedString =
-            format!("对比: {}", compare_target_label(compare_target)).into();
+            format!("对比: {}", compare_target_label(&compare_target)).into();
         let compare_control: AnyElement = if git_available && has_file_path {
             let app_for_menu = app.clone();
-            let active_target = compare_target;
+            let active_target = compare_target.clone();
             Popover::new("diff-compare-menu")
                 .appearance(false)
                 .trigger(
@@ -2015,7 +2787,10 @@ impl GitViewerApp {
 
                     let app_for_items = app_for_menu.clone();
                     let popover_for_items = popover.clone();
-                    let make_item = move |id: &'static str, label: SharedString, target| {
+                    let active_target = active_target.clone();
+                    let make_item = |id: &'static str,
+                                     label: SharedString,
+                                     target: CompareTarget| {
                         let app = app_for_items.clone();
                         let popover = popover_for_items.clone();
                         let is_active = active_target == target;
@@ -2046,6 +2821,7 @@ impl GitViewerApp {
                                     })
                                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                         window.prevent_default();
+                                        let target = target.clone();
                                         app.update(cx, |this, cx| {
                                             this.set_compare_target(target, window, cx);
                                             cx.notify();
@@ -2058,6 +2834,7 @@ impl GitViewerApp {
 
                     div()
                         .p(px(6.))
+                        .w(px(360.))
                         .bg(theme.popover)
                         .border_1()
                         .border_color(theme.border)
@@ -2089,6 +2866,83 @@ impl GitViewerApp {
                             "HEAD ↔ 暂存".into(),
                             CompareTarget::HeadToIndex,
                         ))
+                        .child(div().h(px(1.)).bg(theme.border.alpha(0.4)).my(px(4.)))
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .py(px(4.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("任意版本对比"),
+                        )
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(Input::new(&compare_left_input).w_full())
+                                .child(Input::new(&compare_right_input).w_full())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .justify_end()
+                                        .gap(px(6.))
+                                        .child(
+                                            Button::new("diff-compare-swap")
+                                                .label("交换")
+                                                .ghost()
+                                                .on_click({
+                                                    let app = app_for_menu.clone();
+                                                    move |_, window, cx| {
+                                                        app.update(cx, |this, cx| {
+                                                            this.swap_compare_refs_inputs(
+                                                                window, cx,
+                                                            );
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("diff-compare-apply")
+                                                .label("应用")
+                                                .primary()
+                                                .on_click({
+                                                    let app = app_for_menu.clone();
+                                                    let popover = popover.clone();
+                                                    move |_, window, cx| {
+                                                        app.update(cx, |this, cx| {
+                                                            this.apply_compare_refs_from_inputs(
+                                                                window, cx,
+                                                            );
+                                                            cx.notify();
+                                                        });
+                                                        popover.update(cx, |state, cx| {
+                                                            state.dismiss(window, cx)
+                                                        });
+                                                    }
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .child(div().h(px(1.)).bg(theme.border.alpha(0.4)).my(px(4.)))
+                        .child(
+                            Button::new("diff-history-open")
+                                .label("从历史选择 commit…")
+                                .ghost()
+                                .w_full()
+                                .on_click({
+                                    let app = app_for_menu.clone();
+                                    let popover = popover.clone();
+                                    move |_, window, cx| {
+                                        app.update(cx, |this, cx| {
+                                            this.open_file_history_overlay(window, cx);
+                                        });
+                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                    }
+                                }),
+                        )
                 })
                 .into_any_element()
         } else {
@@ -2586,7 +3440,7 @@ impl GitViewerApp {
                         .bg(theme.muted.alpha(0.2))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(compare_target_side_label(compare_target, Side::Old));
+                        .child(compare_target_side_label(&compare_target, Side::Old));
                     let new_header = div()
                         .h(pane_header_height)
                         .px(px(12.))
@@ -2595,7 +3449,7 @@ impl GitViewerApp {
                         .bg(theme.muted.alpha(0.2))
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(compare_target_side_label(compare_target, Side::New));
+                        .child(compare_target_side_label(&compare_target, Side::New));
 
                     div()
                         .flex()
@@ -2640,7 +3494,7 @@ impl GitViewerApp {
                 .child("视图: Split")
                 .child(format!("布局: {}", if two_pane { "分栏" } else { "对齐" }))
                 .child(div().truncate().child(format!("文件: {}", diff_view.title)))
-                .child(format!("对比: {}", compare_target_label(compare_target)))
+                .child(format!("对比: {}", compare_target_label(&compare_target)))
                 .child(format!("上下文: {context_lines}"))
                 .child(format!(
                     "忽略空白: {}",
@@ -2653,7 +3507,7 @@ impl GitViewerApp {
                 .gap(px(12.))
                 .child("视图: Inline")
                 .child(div().truncate().child(format!("文件: {}", diff_view.title)))
-                .child(format!("对比: {}", compare_target_label(compare_target)))
+                .child(format!("对比: {}", compare_target_label(&compare_target)))
                 .child(format!("上下文: {context_lines}"))
                 .child(format!(
                     "忽略空白: {}",
@@ -3414,6 +4268,471 @@ impl GitViewerApp {
         }
 
         root.child(status_bar)
+    }
+
+    fn render_file_history_overlay(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let overlay = self.file_history_overlay.as_mut()?;
+        let theme = cx.theme();
+        let app = cx.entity();
+
+        let loading = overlay.loading;
+        let mode = overlay.mode;
+        let filter_input = overlay.filter_input.clone();
+        let title = overlay.path.clone();
+
+        let query = overlay.filter_input.read(cx).value().to_string();
+        let filtered = filter_commits(&overlay.commits, &query);
+
+        let selected = overlay.selected.min(filtered.len().saturating_sub(1));
+
+        let can_apply = !loading && !filtered.is_empty();
+
+        let list: Vec<AnyElement> = if loading {
+            vec![
+                div()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("加载历史中…")
+                    .into_any_element(),
+            ]
+        } else if filtered.is_empty() {
+            vec![
+                div()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("没有匹配的 commit")
+                    .into_any_element(),
+            ]
+        } else {
+            filtered
+                .iter()
+                .take(120)
+                .enumerate()
+                .map(|(index, entry)| {
+                    let is_selected = index == selected;
+                    let label = format!("{}  {}", entry.short_hash, entry.subject);
+                    let app = app.clone();
+                    div()
+                        .id(("history-commit", index))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .h(px(32.))
+                        .px(px(10.))
+                        .rounded(px(6.))
+                        .text_sm()
+                        .when(is_selected, |this| {
+                            this.bg(theme.accent)
+                                .text_color(theme.accent_foreground)
+                                .cursor_default()
+                        })
+                        .when(!is_selected, |this| {
+                            this.bg(theme.transparent)
+                                .text_color(theme.popover_foreground)
+                                .cursor_pointer()
+                                .hover(|this| {
+                                    this.bg(theme.accent.alpha(0.4))
+                                        .text_color(theme.accent_foreground)
+                                })
+                                .active(|this| {
+                                    this.bg(theme.accent).text_color(theme.accent_foreground)
+                                })
+                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                    window.prevent_default();
+                                    app.update(cx, |this, cx| {
+                                        if let Some(overlay) = this.file_history_overlay.as_mut() {
+                                            overlay.selected = index;
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                        })
+                        .child(div().truncate().child(label))
+                        .into_any_element()
+                })
+                .collect()
+        };
+
+        let mode_parent_active = mode == HistoryCompareMode::ParentToCommit;
+        let mode_worktree_active = mode == HistoryCompareMode::CommitToWorktree;
+
+        let overlay_container = div()
+            .id("file-history-overlay")
+            .w(px(720.))
+            .max_w(relative(0.92))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .p(px(12.))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_key_down({
+                let app = app.clone();
+                move |event, window, cx| {
+                    let handled = app.update(cx, |this, cx| {
+                        this.handle_file_history_overlay_key(event, window, cx)
+                    });
+                    if handled {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        div().flex().flex_col().gap(px(2.)).child("历史对比").child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(title),
+                        ),
+                    )
+                    .child(
+                        Button::new("history-overlay-close")
+                            .label("关闭 (Esc)")
+                            .ghost()
+                            .on_click({
+                                let app = app.clone();
+                                move |_, window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.close_file_history_overlay(window, cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(Input::new(&filter_input).w_full())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("history-mode-parent")
+                                    .label("变更（parent→commit）")
+                                    .when(mode_parent_active, |this| this.primary())
+                                    .when(!mode_parent_active, |this| this.ghost())
+                                    .on_click({
+                                        let app = app.clone();
+                                        move |_, _window, cx| {
+                                            app.update(cx, |this, cx| {
+                                                if let Some(overlay) =
+                                                    this.file_history_overlay.as_mut()
+                                                {
+                                                    overlay.mode =
+                                                        HistoryCompareMode::ParentToCommit;
+                                                }
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new("history-mode-worktree")
+                                    .label("对比工作区")
+                                    .when(mode_worktree_active, |this| this.primary())
+                                    .when(!mode_worktree_active, |this| this.ghost())
+                                    .on_click({
+                                        let app = app.clone();
+                                        move |_, _window, cx| {
+                                            app.update(cx, |this, cx| {
+                                                if let Some(overlay) =
+                                                    this.file_history_overlay.as_mut()
+                                                {
+                                                    overlay.mode =
+                                                        HistoryCompareMode::CommitToWorktree;
+                                                }
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("file-history-overlay-list")
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .min_h(px(0.))
+                    .max_h(px(360.))
+                    .overflow_y_scroll()
+                    .border_1()
+                    .border_color(theme.border.alpha(0.5))
+                    .rounded(theme.radius)
+                    .p(px(6.))
+                    .children(list),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("↑↓ 选择 · Enter 打开 · Esc 关闭"),
+                    )
+                    .child(
+                        Button::new("history-overlay-apply")
+                            .label("打开对比")
+                            .primary()
+                            .disabled(!can_apply)
+                            .on_click({
+                                let app = app.clone();
+                                move |_, window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.apply_selected_file_history_commit(window, cx);
+                                    });
+                                }
+                            }),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("file-history-overlay-backdrop")
+                .absolute()
+                .top(px(0.))
+                .bottom(px(0.))
+                .left(px(0.))
+                .right(px(0.))
+                .bg(theme.background.alpha(0.75))
+                .flex()
+                .flex_row()
+                .justify_center()
+                .pt(px(72.))
+                .on_mouse_down(MouseButton::Left, {
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        window.prevent_default();
+                        app.update(cx, |this, cx| {
+                            this.close_file_history_overlay(window, cx);
+                        });
+                    }
+                })
+                .child(overlay_container)
+                .into_any_element(),
+        )
+    }
+
+    fn render_command_palette_overlay(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let overlay = self.command_palette_overlay.as_ref()?;
+        let theme = cx.theme();
+        let app = cx.entity();
+
+        let query = overlay.input.read(cx).value().to_string();
+        let filtered = filter_command_palette_items(&query);
+        let selected = overlay.selected.min(filtered.len().saturating_sub(1));
+
+        let mut list: Vec<AnyElement> = Vec::new();
+        if filtered.is_empty() {
+            list.push(
+                div()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("没有匹配命令")
+                    .into_any_element(),
+            );
+        } else {
+            for (index, item) in filtered.iter().take(80).enumerate() {
+                let is_selected = index == selected;
+                let enabled = self.command_palette_command_enabled(item.command);
+                let app_for_click = app.clone();
+                let command = item.command;
+
+                let mut row = div()
+                    .id(("command-palette-item", index))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(32.))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .text_sm()
+                    .child(div().truncate().child(item.title));
+
+                if enabled {
+                    row = row
+                        .when(is_selected, |this| {
+                            this.bg(theme.accent)
+                                .text_color(theme.accent_foreground)
+                                .cursor_default()
+                        })
+                        .when(!is_selected, |this| {
+                            this.bg(theme.transparent)
+                                .text_color(theme.popover_foreground)
+                                .cursor_pointer()
+                                .hover(|this| {
+                                    this.bg(theme.accent.alpha(0.4))
+                                        .text_color(theme.accent_foreground)
+                                })
+                                .active(|this| {
+                                    this.bg(theme.accent).text_color(theme.accent_foreground)
+                                })
+                                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                    window.prevent_default();
+                                    app_for_click.update(cx, |this, cx| {
+                                        if let Some(overlay) = this.command_palette_overlay.as_mut()
+                                        {
+                                            overlay.selected = index;
+                                        }
+                                        this.run_command_palette_command(command, window, cx);
+                                        this.close_command_palette(window, cx);
+                                    });
+                                })
+                        });
+                } else {
+                    row = row
+                        .bg(theme.transparent)
+                        .text_color(theme.muted_foreground)
+                        .cursor_default();
+                }
+
+                list.push(row.into_any_element());
+            }
+        }
+
+        let overlay_container = div()
+            .id("command-palette-overlay")
+            .w(px(640.))
+            .max_w(relative(0.92))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .rounded(theme.radius)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .p(px(12.))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_key_down({
+                let app = app.clone();
+                move |event, window, cx| {
+                    let handled = app.update(cx, |this, cx| {
+                        this.handle_command_palette_key(event, window, cx)
+                    });
+                    if handled {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(div().flex().flex_col().gap(px(2.)).child("命令"))
+                    .child(
+                        Button::new("command-palette-close")
+                            .label("关闭 (Esc)")
+                            .ghost()
+                            .on_click({
+                                let app = app.clone();
+                                move |_, window, cx| {
+                                    app.update(cx, |this, cx| {
+                                        this.close_command_palette(window, cx);
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .child(Input::new(&overlay.input).w_full())
+            .child(
+                div()
+                    .id("command-palette-list")
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .min_h(px(0.))
+                    .max_h(px(360.))
+                    .overflow_y_scroll()
+                    .border_1()
+                    .border_color(theme.border.alpha(0.5))
+                    .rounded(theme.radius)
+                    .p(px(6.))
+                    .children(list),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("↑↓ 选择 · Enter 执行 · Esc 关闭"),
+            );
+
+        Some(
+            div()
+                .id("command-palette-overlay-backdrop")
+                .absolute()
+                .top(px(0.))
+                .bottom(px(0.))
+                .left(px(0.))
+                .right(px(0.))
+                .bg(theme.background.alpha(0.75))
+                .flex()
+                .flex_row()
+                .justify_center()
+                .pt(px(72.))
+                .on_mouse_down(MouseButton::Left, {
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        window.prevent_default();
+                        app.update(cx, |this, cx| {
+                            this.close_command_palette(window, cx);
+                        });
+                    }
+                })
+                .child(overlay_container)
+                .into_any_element(),
+        )
     }
 
     fn render_conflict_row(
@@ -4198,14 +5517,33 @@ impl Render for GitViewerApp {
             AppScreen::ConflictView => self.render_conflict_view(window, cx).into_any_element(),
         };
 
-        div()
+        let file_history_overlay = self.render_file_history_overlay(window, cx);
+        let command_palette_overlay = self.render_command_palette_overlay(window, cx);
+
+        let mut root = div()
             .id("git-viewer-root")
             .size_full()
+            .relative()
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .tab_index(0)
             .when(!window.is_inspector_picking(cx), |this| {
-                this.on_action(cx.listener(|this, _: &Back, window, cx| {
+                this.on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
+                    if this.command_palette_overlay.is_some() {
+                        this.close_command_palette(window, cx);
+                    } else {
+                        this.open_command_palette(window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &Back, window, cx| {
+                    if this.command_palette_overlay.is_some() {
+                        this.close_command_palette(window, cx);
+                        return;
+                    }
+                    if this.file_history_overlay.is_some() {
+                        this.close_file_history_overlay(window, cx);
+                        return;
+                    }
                     match this.screen {
                         AppScreen::DiffView => this.close_diff_view(),
                         AppScreen::ConflictView => this.close_conflict_view(),
@@ -4290,7 +5628,17 @@ impl Render for GitViewerApp {
                     },
                 ))
             })
-            .child(content)
+            .child(content);
+
+        if let Some(overlay) = file_history_overlay {
+            root = root.child(overlay);
+        }
+
+        if let Some(overlay) = command_palette_overlay {
+            root = root.child(overlay);
+        }
+
+        root
     }
 }
 
@@ -4976,6 +6324,46 @@ fn read_index_file(repo_root: &Path, path: &str, status: &str) -> Result<String>
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn git_show(repo_root: &Path, spec: &str) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["show", spec])
+        .output()
+        .with_context(|| format!("执行 git show 失败：{spec}"))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git show 返回非零（{}）：{}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn read_specified_file(repo_root: &Path, path: &str, spec: &str) -> Result<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return read_working_file(repo_root, path);
+    }
+
+    if spec.eq_ignore_ascii_case("WORKTREE") {
+        return read_working_file(repo_root, path);
+    }
+
+    if spec.eq_ignore_ascii_case("INDEX") || spec == ":" {
+        return git_show(repo_root, &format!(":{path}"));
+    }
+
+    if spec.contains(':') {
+        return git_show(repo_root, spec);
+    }
+
+    git_show(repo_root, &format!("{spec}:{path}"))
+}
+
 fn run_git<I, S>(repo_root: &Path, args: I) -> Result<()>
 where
     I: IntoIterator<Item = S>,
@@ -5033,6 +6421,59 @@ where
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stderr).trim()
     ))
+}
+
+fn fetch_file_history(repo_root: &Path, path: &str, limit: usize) -> Result<Vec<CommitEntry>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "log",
+            "-n",
+            &limit.to_string(),
+            "--format=%H%x1f%h%x1f%s%x1e",
+            "--",
+            path,
+        ])
+        .output()
+        .context("执行 git log 失败")?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git log 返回非零（{}）：{}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut commits = Vec::new();
+    for record in output.stdout.split(|b| *b == 0x1e) {
+        if record.is_empty() {
+            continue;
+        }
+
+        let mut fields = record.split(|b| *b == 0x1f);
+        let Some(hash) = fields.next() else { continue };
+        let Some(short_hash) = fields.next() else {
+            continue;
+        };
+        let Some(subject) = fields.next() else {
+            continue;
+        };
+
+        let hash = String::from_utf8_lossy(hash).trim().to_string();
+        if hash.is_empty() {
+            continue;
+        }
+
+        commits.push(CommitEntry {
+            hash,
+            short_hash: String::from_utf8_lossy(short_hash).trim().to_string(),
+            subject: String::from_utf8_lossy(subject).trim().to_string(),
+        });
+    }
+
+    Ok(commits)
 }
 
 fn fetch_git_status(repo_root: &Path) -> Result<Vec<FileEntry>> {
@@ -5243,22 +6684,88 @@ fn default_compare_target(status: &str) -> CompareTarget {
     CompareTarget::HeadToWorktree
 }
 
-fn compare_target_label(target: CompareTarget) -> &'static str {
+fn filter_commits<'a>(commits: &'a [CommitEntry], query: &str) -> Vec<&'a CommitEntry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return commits.iter().collect();
+    }
+
+    let tokens: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return commits.iter().collect();
+    }
+
+    commits
+        .iter()
+        .filter(|entry| {
+            let hash = entry.hash.to_lowercase();
+            let short_hash = entry.short_hash.to_lowercase();
+            let subject = entry.subject.to_lowercase();
+            tokens.iter().all(|token| {
+                hash.contains(token) || short_hash.contains(token) || subject.contains(token)
+            })
+        })
+        .collect()
+}
+
+fn filter_command_palette_items(query: &str) -> Vec<&'static CommandPaletteItem> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return COMMAND_PALETTE_ITEMS.iter().collect();
+    }
+
+    let tokens: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return COMMAND_PALETTE_ITEMS.iter().collect();
+    }
+
+    COMMAND_PALETTE_ITEMS
+        .iter()
+        .filter(|item| {
+            let title = item.title.to_lowercase();
+            let keywords = item.keywords.to_lowercase();
+            tokens
+                .iter()
+                .all(|token| title.contains(token) || keywords.contains(token))
+        })
+        .collect()
+}
+
+fn display_ref_label(label: &str) -> SharedString {
+    let label = label.trim();
+    if label.is_empty() || label.eq_ignore_ascii_case("WORKTREE") {
+        return "工作区".into();
+    }
+    if label == ":" || label.eq_ignore_ascii_case("INDEX") {
+        return "暂存".into();
+    }
+    if label.eq_ignore_ascii_case("HEAD") {
+        return "HEAD".into();
+    }
+    label.to_string().into()
+}
+
+fn compare_target_label(target: &CompareTarget) -> SharedString {
     match target {
-        CompareTarget::HeadToWorktree => "HEAD ↔ 工作区",
-        CompareTarget::IndexToWorktree => "暂存 ↔ 工作区",
-        CompareTarget::HeadToIndex => "HEAD ↔ 暂存",
+        CompareTarget::HeadToWorktree => "HEAD ↔ 工作区".into(),
+        CompareTarget::IndexToWorktree => "暂存 ↔ 工作区".into(),
+        CompareTarget::HeadToIndex => "HEAD ↔ 暂存".into(),
+        CompareTarget::Refs { left, right } => {
+            format!("{} ↔ {}", display_ref_label(left), display_ref_label(right)).into()
+        }
     }
 }
 
-fn compare_target_side_label(target: CompareTarget, side: Side) -> &'static str {
+fn compare_target_side_label(target: &CompareTarget, side: Side) -> SharedString {
     match (target, side) {
-        (CompareTarget::HeadToWorktree, Side::Old) => "HEAD",
-        (CompareTarget::HeadToWorktree, Side::New) => "工作区",
-        (CompareTarget::IndexToWorktree, Side::Old) => "暂存",
-        (CompareTarget::IndexToWorktree, Side::New) => "工作区",
-        (CompareTarget::HeadToIndex, Side::Old) => "HEAD",
-        (CompareTarget::HeadToIndex, Side::New) => "暂存",
+        (CompareTarget::HeadToWorktree, Side::Old) => "HEAD".into(),
+        (CompareTarget::HeadToWorktree, Side::New) => "工作区".into(),
+        (CompareTarget::IndexToWorktree, Side::Old) => "暂存".into(),
+        (CompareTarget::IndexToWorktree, Side::New) => "工作区".into(),
+        (CompareTarget::HeadToIndex, Side::Old) => "HEAD".into(),
+        (CompareTarget::HeadToIndex, Side::New) => "暂存".into(),
+        (CompareTarget::Refs { left, .. }, Side::Old) => display_ref_label(left),
+        (CompareTarget::Refs { left: _, right }, Side::New) => display_ref_label(right),
     }
 }
 
