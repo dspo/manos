@@ -83,6 +83,7 @@ JS 侧（注入脚本）
 - [x] IPC 请求校验：custom-protocol 路径校验 `Tauri-Invoke-Key`/`Origin`/`Tauri-Callback`/`Tauri-Error`，并对 `application/json` body 做基本校验（参考 Tauri `ipc/protocol.rs`）。
 - [x] postMessage fallback：当 custom protocol fetch 失败时，提供可用的 `window.ipc.postMessage` 路径（当前缺失）。
 - [x] 协议对齐：当前 `convertFileSrc()` 默认 `asset://`，但静态资源注册的是 `wry://`；需要统一（至少避免前端调用走到不存在的 scheme）。
+- [x] 静态资源 fallback chain：对齐 Tauri `get_asset` 的 `path.html` / `path/index.html` / `index.html` 回退逻辑（用于 SPA route 等场景）。
 
 验收点（建议）
 - `window.__TAURI_INTERNALS__.invoke("cmd")` 在 custom-protocol 可用与不可用两种情况下都能返回。

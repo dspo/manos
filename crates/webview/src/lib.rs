@@ -122,6 +122,10 @@ impl<'a> Builder<'a> {
             ipc::FETCH_CHANNEL_DATA_COMMAND.to_string(),
             Arc::new(|request| ipc::fetch_channel_data(request)),
         );
+        handlers.insert(
+            "plugin:webview|set_webview_zoom".to_string(),
+            Arc::new(|request| ipc::set_webview_zoom(request)),
+        );
 
         Builder {
             builder: WebViewBuilder::new(),
@@ -261,6 +265,8 @@ impl<'a> Builder<'a> {
                     eprintln!("[webview] rejected IPC postMessage with invalid invoke key");
                     return;
                 }
+
+                let _guard = ipc::IpcContextGuard::new(message.webview_label.as_deref());
 
                 let payload_bytes = match serde_json::to_vec(&message.payload) {
                     Ok(bytes) => bytes,
@@ -437,6 +443,7 @@ impl<'a> Builder<'a> {
                     let api_handler = handlers.get(&command).cloned();
 
                     std::thread::spawn(move || {
+                        let _guard = ipc::IpcContextGuard::new(webview_label.as_deref());
                         let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || {
                                 if let Some(handler) = invoke_handler {
@@ -791,6 +798,66 @@ pub mod ipc {
         }
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WebviewZoomPayload {
+        #[serde(default)]
+        label: Option<String>,
+        value: f64,
+    }
+
+    fn dispatch_zoom_on_main_thread(
+        webview_label: Option<String>,
+        zoom_factor: f64,
+    ) -> std::result::Result<(), String> {
+        let dispatcher = PLATFORM_DISPATCHER.get().cloned().ok_or_else(|| {
+            "gpui platform dispatcher is not initialized (create a gpui_manos_webview::webview::WebView first)"
+                .to_string()
+        })?;
+
+        let (runnable, task) = async_task::spawn(
+            async move {
+                let Some(webview) = super::ipc_webview_for_label(webview_label.as_deref()) else {
+                    eprintln!(
+                        "[webview] IPC requested zoom but target webview is missing (label={webview_label:?})"
+                    );
+                    return;
+                };
+
+                if let Err(err) = webview.zoom(zoom_factor) {
+                    eprintln!("[webview] zoom failed: {err}");
+                }
+            },
+            move |runnable| dispatcher.dispatch_on_main_thread(runnable),
+        );
+
+        runnable.schedule();
+        task.detach();
+        Ok(())
+    }
+
+    pub(crate) fn set_webview_zoom(request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+        let payload = match serde_json::from_slice::<WebviewZoomPayload>(request.body()) {
+            Ok(payload) => payload,
+            Err(err) => {
+                return bad_request(format!(
+                    "invalid JSON body for plugin:webview|set_webview_zoom: {err}"
+                ));
+            }
+        };
+
+        if !payload.value.is_finite() || payload.value <= 0.0 {
+            return bad_request("zoom value must be a positive, finite number");
+        }
+
+        let target = payload.label.or_else(current_webview_label);
+        if let Err(err) = dispatch_zoom_on_main_thread(target, payload.value) {
+            return internal_error(err);
+        }
+
+        ok_json(&())
+    }
+
     #[derive(Debug)]
     pub struct Request {
         parts: http::request::Parts,
@@ -1106,7 +1173,7 @@ fn serve_static<S: ToString>(
         }
         Err(StaticAssetError::IsDirectory(requested)) => {
             println!("requested path is a directory: {}", requested.display());
-            Ok(response_forbidden(requested.display()))
+            Ok(response_not_found(requested.display()))
         }
         Err(StaticAssetError::Io(err)) => {
             println!("failed to read static asset: {err}");
@@ -1148,32 +1215,61 @@ fn resolve_static_asset(
     root: &Path,
     uri_path: &str,
 ) -> std::result::Result<StaticAsset, StaticAssetError> {
-    let relative = sanitize_path(uri_path)?;
-    let candidate = root.join(&relative);
+    fn resolve_candidate(
+        root: &Path,
+        relative: &Path,
+    ) -> std::result::Result<StaticAsset, StaticAssetError> {
+        let candidate = root.join(relative);
 
-    let resolved = match fs::canonicalize(&candidate) {
-        Ok(path) => path,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(StaticAssetError::NotFound(relative));
+        let resolved = match fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(StaticAssetError::NotFound(relative.to_path_buf()));
+            }
+            Err(err) => return Err(StaticAssetError::Io(err)),
+        };
+
+        if !resolved.starts_with(root) {
+            return Err(StaticAssetError::OutsideRoot(relative.to_path_buf()));
         }
-        Err(err) => return Err(StaticAssetError::Io(err)),
-    };
 
-    if !resolved.starts_with(root) {
-        return Err(StaticAssetError::OutsideRoot(relative));
+        if resolved.is_dir() {
+            return Err(StaticAssetError::IsDirectory(relative.to_path_buf()));
+        }
+
+        let bytes = fs::read(&resolved).map_err(StaticAssetError::Io)?;
+        let mime = mime_guess::from_path(&resolved)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
+
+        Ok(StaticAsset { bytes, mime })
     }
 
-    if resolved.is_dir() {
-        return Err(StaticAssetError::IsDirectory(relative));
+    let relative = sanitize_path(uri_path)?;
+
+    let mut candidates = Vec::with_capacity(4);
+    candidates.push(relative.clone());
+
+    let mut html_fallback = relative.clone().into_os_string();
+    html_fallback.push(".html");
+    candidates.push(PathBuf::from(html_fallback));
+
+    let mut index_fallback = relative.clone();
+    index_fallback.push("index.html");
+    candidates.push(index_fallback);
+
+    candidates.push(PathBuf::from("index.html"));
+
+    for candidate in candidates {
+        match resolve_candidate(root, &candidate) {
+            Ok(asset) => return Ok(asset),
+            Err(StaticAssetError::NotFound(_)) | Err(StaticAssetError::IsDirectory(_)) => {}
+            Err(other) => return Err(other),
+        }
     }
 
-    let bytes = fs::read(&resolved).map_err(StaticAssetError::Io)?;
-    let mime = mime_guess::from_path(&resolved)
-        .first_or_octet_stream()
-        .essence_str()
-        .to_string();
-
-    Ok(StaticAsset { bytes, mime })
+    Err(StaticAssetError::NotFound(relative))
 }
 
 fn sanitize_path(path: &str) -> std::result::Result<PathBuf, StaticAssetError> {
@@ -1225,6 +1321,9 @@ fn prepare_scripts(
     current_window_label: String,
     current_webview_label: String,
 ) -> std::result::Result<Vec<InitializationScript>, Box<dyn std::error::Error>> {
+    let current_window_label = serde_json::to_string(&current_window_label)?;
+    let current_webview_label = serde_json::to_string(&current_webview_label)?;
+
     let ipc_init = IpcJavascript {
         isolation_origin: "",
     }

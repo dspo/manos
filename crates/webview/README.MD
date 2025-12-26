@@ -91,7 +91,7 @@ Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
 
 ### P1 — Behavior Parity
 
-- [ ] Static asset fallback chain: support `path.html` / `path/index.html` / `index.html` fallbacks (ref: Tauri `crates/tauri/src/manager/mod.rs` `get_asset`).
+- [x] Static asset fallback chain: implement `path.html` / `path/index.html` / `index.html` fallbacks (ref: Tauri `crates/tauri/src/manager/mod.rs` `get_asset`).
 - [ ] CSP + security headers: add configurable headers and per-origin `Access-Control-Allow-Origin` (avoid unconditional `*`).
 - [ ] Dev server/proxy mode: proxy the app protocol to a dev server (and optional caching) in development (ref: Tauri `crates/tauri/src/protocol/tauri.rs`).
 - [x] Channel base: `ipc::Channel<T>` streams JSON messages and signals end on drop.
@@ -100,7 +100,8 @@ Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
 
 ### P2 — Scripts Without Backend Support
 
-- [ ] Implement `plugin:webview|set_webview_zoom`, `plugin:webview|internal_toggle_devtools`, `plugin:webview|print` so injected scripts don’t 404.
+- [x] Implement `plugin:webview|set_webview_zoom` (used by injected zoom hotkeys).
+- [ ] Implement remaining `plugin:webview|...` APIs used by the bundled Tauri client (`print`, `create_webview`, etc).
 - [ ] Replace mocked window/webview labels in injected metadata.
 - [ ] Event system parity: add Rust-side listener management to match injected JS event dispatcher.
 - [ ] Isolation pattern: implement isolation mode (iframe + crypto) and related protocol(s).
