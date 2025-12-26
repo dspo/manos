@@ -63,9 +63,18 @@ Notes:
 
 - Argument keys default to `camelCase` (same as Tauri). For example `fn foo(user_name: String)` expects `{ userName: "..." }`.
 - You can opt out with `#[gpui_manos_webview::command(rename_all = "snake_case")]`.
-- Commands are currently synchronous. Return types supported:
+- `generate_handler![...]` detects duplicate command names at compile time.
+- Commands can be synchronous or `async fn` (async is executed via a simple `block_on`, not a full Tokio runtime).
+- `ipc://` custom-protocol invokes run command execution off-thread; postMessage fallback executes on the IPC handler thread.
+- Binary responses: return `gpui_manos_webview::ipc::Response::binary(...)` to resolve `ArrayBuffer` on the frontend (custom-protocol and postMessage fallback; fallback uses `eval` + `Uint8Array`, so avoid large blobs).
+- Raw request access: add a `gpui_manos_webview::ipc::Request` parameter to read method/uri/headers/body.
+- Channels: accept `gpui_manos_webview::ipc::Channel<T>` and call `send(T)` to stream messages to the frontend (Tauri `Channel`-compatible message format).
+  - Large channel payloads use the built-in `plugin:__TAURI_CHANNEL__|fetch` fast-path to avoid pushing big blobs via `eval`.
+  - The internal fetch queue is capped and pruned (TTL + capacity) to avoid unbounded memory growth if the frontend never fetches.
+  - To stream bytes, use `Channel<gpui_manos_webview::ipc::Response>` and send `ipc::Response::binary(...)`.
+- Return types supported:
   - `T: serde::Serialize`
-  - `Result<T, E>` where `T: serde::Serialize` and `E: ToString`
+  - `Result<T, E>`: default `E: ToString` (rejects with a JSON string); opt-in `#[gpui_manos_webview::command(error = "json")]` for `E: serde::Serialize` (rejects with structured JSON)
 
 ## Issues (Gap vs Tauri)
 
@@ -75,22 +84,24 @@ Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
 
 ### P0 — Compatibility / Security
 
-- [ ] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
-- [ ] IPC request validation: enforce/parse `Tauri-Invoke-Key`, `Origin`, `Tauri-Callback`, `Tauri-Error`, and decode body based on `Content-Type` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
-- [ ] IPC preflight & method handling: support `OPTIONS` and restrict to `POST/OPTIONS` like Tauri (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
-- [ ] postMessage fallback: implement the `window.ipc.postMessage` bridge when custom-protocol IPC fails (Tauri JS falls back; Rust handler is missing here).
+- [x] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
+- [x] IPC request validation: enforce `Tauri-Invoke-Key`, `Origin`, `Tauri-Callback`, `Tauri-Error`, and validate JSON bodies for `application/json` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [x] IPC preflight & method handling: support `OPTIONS` and restrict to `POST/OPTIONS` like Tauri (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [x] postMessage fallback: implement the `window.ipc.postMessage` bridge when custom-protocol IPC fails (Tauri JS falls back; Rust handler is missing here).
 
 ### P1 — Behavior Parity
 
-- [ ] Static asset fallback chain: support `path.html` / `path/index.html` / `index.html` fallbacks (ref: Tauri `crates/tauri/src/manager/mod.rs` `get_asset`).
+- [x] Static asset fallback chain: implement `path.html` / `path/index.html` / `index.html` fallbacks (ref: Tauri `crates/tauri/src/manager/mod.rs` `get_asset`).
 - [ ] CSP + security headers: add configurable headers and per-origin `Access-Control-Allow-Origin` (avoid unconditional `*`).
 - [ ] Dev server/proxy mode: proxy the app protocol to a dev server (and optional caching) in development (ref: Tauri `crates/tauri/src/protocol/tauri.rs`).
-- [ ] Binary payload + channel optimization: support `application/octet-stream` invokes and a channel-based fast response path (`__TAURI_CHANNEL__`).
-- [ ] Compose `invoke_handler` with low-level APIs: allow plugin-style `plugin:xxx|yyy` handlers even when `invoke_handler` is set.
+- [x] Channel base: `ipc::Channel<T>` streams JSON messages and signals end on drop.
+- [x] Channel optimization: implement built-in `plugin:__TAURI_CHANNEL__|fetch` fast-path + large/binary payload strategy (custom-protocol path).
+- [x] Compose `invoke_handler` with low-level APIs: fallback to registered low-level handlers when `invoke_handler` returns `None`.
 
 ### P2 — Scripts Without Backend Support
 
-- [ ] Implement `plugin:webview|set_webview_zoom`, `plugin:webview|internal_toggle_devtools`, `plugin:webview|print` so injected scripts don’t 404.
+- [x] Implement `plugin:webview|set_webview_zoom` (used by injected zoom hotkeys).
+- [ ] Implement remaining `plugin:webview|...` APIs used by the bundled Tauri client (`print`, `create_webview`, etc).
 - [ ] Replace mocked window/webview labels in injected metadata.
 - [ ] Event system parity: add Rust-side listener management to match injected JS event dispatcher.
 - [ ] Isolation pattern: implement isolation mode (iframe + crypto) and related protocol(s).

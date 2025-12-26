@@ -99,7 +99,13 @@
           customProtocolIpcBlocked: customProtocolIpcFailed
         },
         payload,
-        __TAURI_INVOKE_KEY__
+        __TAURI_INVOKE_KEY__,
+        webviewLabel:
+          (window.__TAURI_INTERNALS__
+            && window.__TAURI_INTERNALS__.metadata
+            && window.__TAURI_INTERNALS__.metadata.currentWebview
+            && window.__TAURI_INTERNALS__.metadata.currentWebview.label)
+          || null
       })
       window.ipc.postMessage(data)
     }

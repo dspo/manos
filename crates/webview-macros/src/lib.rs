@@ -1,5 +1,7 @@
 //! gpui-manos-webview macros
 
+use std::collections::HashMap;
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
@@ -11,18 +13,11 @@ use syn::{
 pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attributes as AttributeArgs);
     let function = parse_macro_input!(item as ItemFn);
-
-    if function.sig.asyncness.is_some() {
-        return syn::Error::new_spanned(
-            function.sig.fn_token,
-            "async commands are not supported yet",
-        )
-        .to_compile_error()
-        .into();
-    }
+    let is_async = function.sig.asyncness.is_some();
 
     let mut root: Path = syn::parse_str("::gpui_manos_webview").expect("valid default root path");
     let mut rename_all = "camelCase".to_string();
+    let mut error_format = "string".to_string();
 
     for arg in args {
         let NestedMeta::Meta(meta) = arg else {
@@ -74,10 +69,30 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
                     Err(err) => return err.to_compile_error().into(),
                 };
             }
+            Meta::NameValue(nv) if nv.path.is_ident("error") => {
+                let Lit::Str(value) = &nv.lit else {
+                    return syn::Error::new_spanned(
+                        &nv.lit,
+                        "expected a string literal (\"string\" or \"json\")",
+                    )
+                    .to_compile_error()
+                    .into();
+                };
+
+                let value = value.value();
+                match value.as_str() {
+                    "string" | "json" => error_format = value,
+                    _ => {
+                        return syn::Error::new_spanned(&nv.lit, "expected \"string\" or \"json\"")
+                            .to_compile_error()
+                            .into();
+                    }
+                }
+            }
             other => {
                 return syn::Error::new_spanned(
                     other,
-                    "unsupported attribute argument (supported: root = \"...\", rename_all = \"...\")",
+                    "unsupported attribute argument (supported: root = \"...\", rename_all = \"...\", error = \"string\"|\"json\")",
                 )
                 .to_compile_error()
                 .into();
@@ -92,6 +107,8 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut arg_idents = Vec::new();
     let mut arg_types = Vec::new();
+    let mut call_arg_idents = Vec::new();
+    let mut request_ident: Option<Ident> = None;
     for input in &function.sig.inputs {
         match input {
             FnArg::Receiver(receiver) => {
@@ -101,8 +118,23 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
             }
             FnArg::Typed(pat_type) => match &*pat_type.pat {
                 Pat::Ident(pat_ident) => {
-                    arg_idents.push(pat_ident.ident.clone());
-                    arg_types.push((*pat_type.ty).clone());
+                    let ident = pat_ident.ident.clone();
+                    let ty = (*pat_type.ty).clone();
+                    call_arg_idents.push(ident.clone());
+                    if is_ipc_request_type(&ty) {
+                        if request_ident.is_some() {
+                            return syn::Error::new_spanned(
+                                &pat_type.ty,
+                                "only one gpui_manos_webview::ipc::Request argument is supported",
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                        request_ident = Some(ident);
+                    } else {
+                        arg_idents.push(ident);
+                        arg_types.push(ty);
+                    }
                 }
                 other => {
                     return syn::Error::new_spanned(
@@ -117,6 +149,7 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let serde_rename_all = rename_all;
+    let serialize_error = error_format == "json";
 
     let parse_args = if arg_idents.is_empty() {
         quote!()
@@ -131,30 +164,115 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
             let __gpui_args: #args_struct = match #root::serde_json::from_slice(&__gpui_body) {
                 Ok(args) => args,
-                Err(err) => return #root::ipc::bad_request(err),
+                Err(err) => return #root::ipc::bad_request_json(&format!(
+                    "invalid args for command `{}`: {err}",
+                    stringify!(#command_fn)
+                )),
             };
 
             let #args_struct { #( #arg_idents, )* } = __gpui_args;
         }
     };
 
-    let call = if arg_idents.is_empty() {
+    let content_type_check = if arg_idents.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            match __gpui_content_type {
+                "" | "application/json" => {}
+                "application/octet-stream" => {
+                    return #root::ipc::bad_request_json(&format!(
+                        "command `{}` does not support binary payloads; add an `ipc::Request` parameter to access raw bytes",
+                        stringify!(#command_fn)
+                    ));
+                }
+                other => {
+                    return #root::ipc::bad_request_json(&format!(
+                        "command `{}` expects application/json payload (got `{other}`)",
+                        stringify!(#command_fn)
+                    ));
+                }
+            }
+        }
+    };
+
+    let define_request = if let Some(request_ident) = &request_ident {
+        quote! {
+            let #request_ident = #root::ipc::Request::new(__gpui_parts, __gpui_body);
+        }
+    } else {
+        quote!()
+    };
+
+    let base_call = if call_arg_idents.is_empty() {
         quote!(#command_fn())
     } else {
-        quote!(#command_fn(#(#arg_idents),*))
+        quote!(#command_fn(#(#call_arg_idents),*))
+    };
+    let call = if is_async {
+        quote!(#root::async_runtime::block_on(#base_call))
+    } else {
+        base_call
     };
 
     let respond = match &function.sig.output {
-        ReturnType::Type(_, ty) if is_result_type(ty) => quote! {
-            match #call {
-                Ok(output) => #root::ipc::ok_json(&output),
-                Err(err) => #root::ipc::internal_error(err.to_string()),
+        ReturnType::Type(_, ty) if is_result_type(ty) => {
+            if serialize_error {
+                quote! {
+                    match #call {
+                        Ok(output) => #root::ipc::respond(output),
+                        Err(err) => #root::ipc::internal_error_json(&err),
+                    }
+                }
+            } else {
+                quote! {
+                    match #call {
+                        Ok(output) => #root::ipc::respond(output),
+                        Err(err) => #root::ipc::internal_error_json(&format!(
+                            "command `{}` failed: {}",
+                            stringify!(#command_fn),
+                            err.to_string()
+                        )),
+                    }
+                }
             }
-        },
+        }
         _ => quote! {
             let output = #call;
-            #root::ipc::ok_json(&output)
+            #root::ipc::respond(output)
         },
+    };
+
+    let needs_body = !arg_idents.is_empty() || request_ident.is_some();
+    let needs_content_type = !arg_idents.is_empty();
+
+    let wrapper_body = if !needs_body {
+        quote! {
+            let _ = request;
+            #respond
+        }
+    } else if needs_content_type {
+        quote! {
+            let (__gpui_parts, __gpui_body) = request.into_parts();
+            let __gpui_content_type = __gpui_parts
+                .headers
+                .get(#root::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            let __gpui_content_type = __gpui_content_type.split(',').next().unwrap_or("");
+            let __gpui_content_type = __gpui_content_type.split(';').next().unwrap_or("").trim();
+            #content_type_check
+            #parse_args
+            #define_request
+            #respond
+        }
+    } else {
+        quote! {
+            let (__gpui_parts, __gpui_body) = request.into_parts();
+            #parse_args
+            #define_request
+            #respond
+        }
     };
 
     let wrapper = quote! {
@@ -162,9 +280,7 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_snake_case)]
         #vis fn #wrapper_fn(request: #root::http::Request<Vec<u8>>) -> #root::http::Response<Vec<u8>> {
             use ::std::string::ToString as _;
-            let __gpui_body = request.into_body();
-            #parse_args
-            #respond
+            #wrapper_body
         }
     };
 
@@ -177,11 +293,13 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn generate_handler(input: TokenStream) -> TokenStream {
+    let input_for_error: proc_macro2::TokenStream = input.clone().into();
     let command_paths: syn::punctuated::Punctuated<Path, Token![,]> =
         parse_macro_input!(input with syn::punctuated::Punctuated::parse_terminated);
 
     let mut command_idents = Vec::new();
     let mut wrapper_paths = Vec::new();
+    let mut commands_by_name: HashMap<String, Vec<Path>> = HashMap::new();
 
     for command_path in command_paths {
         let mut wrapper_path = command_path.clone();
@@ -193,8 +311,33 @@ pub fn generate_handler(input: TokenStream) -> TokenStream {
         let command_ident = last.ident.clone();
         last.ident = format_ident!("__cmd__{}", command_ident);
 
+        commands_by_name
+            .entry(command_ident.to_string())
+            .or_default()
+            .push(command_path);
         command_idents.push(command_ident);
         wrapper_paths.push(wrapper_path);
+    }
+
+    let duplicates: Vec<_> = commands_by_name
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .collect();
+    if !duplicates.is_empty() {
+        let mut message = String::from(
+            "duplicate command names in generate_handler! (command names are derived from function identifiers):\n",
+        );
+        for (name, paths) in duplicates {
+            message.push_str(&format!("  `{name}`:\n"));
+            for path in paths {
+                message.push_str(&format!("    - `{}`\n", quote!(#path)));
+            }
+        }
+        message.push_str("Rename one of the functions to make the command name unique.");
+
+        return syn::Error::new_spanned(input_for_error, message)
+            .to_compile_error()
+            .into();
     }
 
     let arms =
@@ -207,8 +350,12 @@ pub fn generate_handler(input: TokenStream) -> TokenStream {
 
     quote! {
         move |invoke| {
-            let command = invoke.command;
-            let request = invoke.request;
+            let ::gpui_manos_webview::Invoke {
+                command,
+                request,
+                webview_label,
+            } = invoke;
+            let _guard = ::gpui_manos_webview::ipc::IpcContextGuard::new(webview_label.as_deref());
             match command.as_str() {
                 #(#arms)*
                 _ => None,
@@ -227,6 +374,22 @@ fn is_result_type(ty: &Type) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "Result")
+}
+
+fn is_ipc_request_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+
+    let segments = &type_path.path.segments;
+    if segments.len() < 2 {
+        return false;
+    }
+
+    let last = segments.last().expect("segments is not empty");
+    let second_last = segments.iter().nth_back(1).expect("segments has >= 2");
+
+    second_last.ident == "ipc" && last.ident == "Request"
 }
 
 /// Wraps a function with signature `Fn(http::Request<Vec<u8>> -> http::Response<Vec<u8>>)` into a tuple `(func_name, func)`.
