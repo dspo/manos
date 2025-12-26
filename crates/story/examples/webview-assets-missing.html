@@ -176,6 +176,24 @@
                     <button id="btn">Invoke greet</button>
                 </div>
                 <pre id="out">Ready.</pre>
+                <hr
+                    style="
+                        margin: 16px 0;
+                        border: none;
+                        border-top: 1px solid rgba(127, 127, 127, 0.25);
+                    "
+                />
+                <div><strong>Channel sanity check</strong>:</div>
+                <div class="row">
+                    <input
+                        id="count"
+                        placeholder="Count to…"
+                        value="8"
+                        inputmode="numeric"
+                    />
+                    <button id="count_btn">Invoke count_to (Channel)</button>
+                </div>
+                <pre id="count_out">Ready.</pre>
                 <script>
                     const $ = (id) => document.getElementById(id);
                     async function invokeGreet() {
@@ -202,6 +220,48 @@
                         }
                     }
                     $("btn").addEventListener("click", invokeGreet);
+
+                    async function invokeCountTo() {
+                        const out = $("count_out");
+                        out.textContent = "Invoking…";
+
+                        const n = Number.parseInt($("count").value, 10);
+                        if (!Number.isFinite(n) || n < 0) {
+                            out.textContent = "Invalid number.";
+                            return;
+                        }
+
+                        let channelId = 0;
+                        channelId =
+                            window.__TAURI_INTERNALS__.transformCallback(
+                                (event) => {
+                                    if (event && event.end) {
+                                        window.__TAURI_INTERNALS__.unregisterCallback(
+                                            channelId,
+                                        );
+                                        out.textContent += "\n(end)";
+                                        return;
+                                    }
+                                    out.textContent +=
+                                        "\n" + JSON.stringify(event, null, 2);
+                                },
+                                false,
+                            );
+
+                        try {
+                            await window.__TAURI_INTERNALS__.invoke(
+                                "count_to",
+                                {
+                                    n,
+                                    onEvent: `__CHANNEL__:${channelId}`,
+                                },
+                            );
+                        } catch (e) {
+                            out.textContent += "\nError: " + e;
+                        }
+                    }
+
+                    $("count_btn").addEventListener("click", invokeCountTo);
                 </script>
             </div>
         </div>

@@ -36,6 +36,7 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
                 greet,
                 greet_async,
                 greet_slow,
+                count_to,
                 get_bytes,
                 echo_bytes,
                 inspect_request
@@ -80,6 +81,22 @@ async fn greet_async(name: String) -> Result<String, String> {
 fn greet_slow(name: String) -> Result<String, String> {
     std::thread::sleep(std::time::Duration::from_millis(750));
     Ok(format!("Hello, {}! (from GPUI slow)", name))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CountEvent {
+    value: u32,
+}
+
+#[gpui_manos_webview::command]
+fn count_to(n: u32, on_event: gpui_manos_webview::ipc::Channel<CountEvent>) -> Result<(), String> {
+    for value in 0..=n {
+        on_event.send(CountEvent { value })?;
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
+    Ok(())
 }
 
 #[gpui_manos_webview::command]

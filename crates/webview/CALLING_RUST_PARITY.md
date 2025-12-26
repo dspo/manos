@@ -23,10 +23,10 @@
 ## 当前实现快照（我们现在有什么）
 
 Rust 侧（核心入口）
-- `#[gpui_manos_webview::command]`：同步命令宏（`crates/webview-macros/src/lib.rs`）。
+- `#[gpui_manos_webview::command]`：同步/异步命令宏（async 通过 `pollster::block_on` 执行，`crates/webview-macros/src/lib.rs`）。
 - `gpui_manos_webview::generate_handler![...]`：多命令路由（`crates/webview-macros/src/lib.rs`）。
 - `Builder::invoke_handler(...)`：注册 invoke handler（`crates/webview/src/lib.rs`）。
-- `ipc` 模块：构造带 `Tauri-Response` 的 HTTP 响应（`crates/webview/src/lib.rs`）。
+- `ipc` 模块：`Request`/`Response`/`Channel` 与带 `Tauri-Response` 的 HTTP 响应构造（`crates/webview/src/lib.rs`）。
 
 JS 侧（注入脚本）
 - `window.__TAURI_INTERNALS__.invoke`：核心 invoke（`crates/webview/src/scripts/tauri/core.js`）。
@@ -34,10 +34,10 @@ JS 侧（注入脚本）
 - custom-protocol fetch：通过 `ipc://` 发起请求（`crates/webview/src/scripts/tauri/ipc-protocol.js`）。
 
 当前关键限制
-- 只支持同步命令：`async fn` 会被宏拒绝（`crates/webview-macros/src/lib.rs`）。
-- 只支持 JSON 参数 / JSON 返回（`ipc::ok_json`），没有“二进制响应”优化通道。
-- 没有 Channel（流式数据传输）实现（`crates/webview/src/lib.rs` 有 TODO）。
-- 命令函数无法注入 `WebviewWindow` / `AppHandle` / `State<T>` / 原始 `Request` 等上下文（Tauri 文档支持）。
+- async runtime 仅为 `pollster::block_on`（不是完整 Tokio runtime）；且 postMessage fallback 仍在 IPC handler 线程内执行命令。
+- `ipc::Response::binary(...)` 可在 custom-protocol 路径返回 `ArrayBuffer`；但 postMessage fallback 目前仍会回传 `number[]`（与 Tauri 行为不完全一致）。
+- `ipc::Channel<T>` 已提供最小可用实现（JSON 消息 + drop 时发送 end）；但缺少 `__TAURI_CHANNEL__|fetch` 大 payload 快路径与二进制/分片优化。
+- 命令函数仍无法注入 `WebviewWindow` / `AppHandle` / `State<T>` 等完整上下文（Tauri 文档支持）。
 - 事件系统（Rust 侧 listen/emit）基本未实现，仅有 JS 分发函数骨架（`crates/webview/src/lib.rs`）。
 
 ## 能力差距对照（按文档结构）
@@ -49,14 +49,14 @@ JS 侧（注入脚本）
 | 基础示例 | `#[command]` + `invoke()` | ✅ | 基本可用 | M0/M1 |
 | 传递参数 | `Deserialize` + camelCase 映射 | ⚠️ | 支持 camelCase/`rename_all`；不支持借用参数（如 `&str`）等高级签名 | M1 |
 | 返回数据 | `Serialize` -> Promise resolve | ✅ | 返回 JSON ok | M1 |
-| 返回 ArrayBuffer | `tauri::ipc::Response` | ❌ | 大数据会被 JSON 化/低效，且前端无法拿到真正的 `ArrayBuffer` | M3 |
-| 错误处理 | `Result<T, E: Serialize>`（结构化） | ⚠️ | 仅 `E: ToString` 且返回 `text/plain`；前端很难做结构化错误处理 | M1/M3 |
-| 异步命令 | `async fn` / `#[command(async)]` | ❌ | 无法执行耗时任务而不阻塞；UI 易卡顿 | M2（困难） |
-| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ❌ | 无法做可靠流式/进度回传 | M4（困难） |
+| 返回 ArrayBuffer | `tauri::ipc::Response` | ⚠️ | `ipc::Response::binary` 在 custom-protocol 路径可返回 `ArrayBuffer`；fallback 仍会变成 `number[]` | M3 |
+| 错误处理 | `Result<T, E: Serialize>`（结构化） | ⚠️ | 默认 `E: ToString` 会 reject 为 JSON string；支持 `#[command(error = "json")]` 返回结构化 JSON | M1/M3 |
+| 异步命令 | `async fn` / `#[command(async)]` | ⚠️ | 已支持 `async fn`（`pollster::block_on`）；仍缺少完整 runtime 与更一致的线程模型 | M2（困难） |
+| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ⚠️ | 已支持 `ipc::Channel<T>` 发送 JSON 消息；缺少大 payload/binary 优化与 `__TAURI_CHANNEL__` fast-path | M4（困难） |
 | 访问 WebviewWindow | 参数注入 `WebviewWindow` | ❌ | 命令里拿不到发起方上下文（label/webview id 等） | M5（困难） |
 | 访问 AppHandle | 参数注入 `AppHandle` | ❌ | 无法在命令内访问全局应用服务（事件/状态/窗口管理等） | M5（困难） |
 | 访问托管状态 | `Builder::manage` + `State<T>` | ❌ | 无统一状态容器 & 注入机制 | M5（困难） |
-| 访问原始请求 | `tauri::ipc::Request`（headers + body） | ⚠️ | 自定义 `invoke_handler` 可拿到 `http::Request<Vec<u8>>`；但命令函数签名拿不到 | M3/M5 |
+| 访问原始请求 | `tauri::ipc::Request`（headers + body） | ✅ | 支持命令参数注入 `gpui_manos_webview::ipc::Request`（method/uri/headers/body） | M3 |
 | 创建多个命令 | `generate_handler![a,b]` | ✅ | 已支持 | M0 |
 
 ### 事件系统（Events）
@@ -150,9 +150,9 @@ JS 侧（注入脚本）
 - 对齐文档的 `tauri::ipc::Channel<T>`：Rust 可多次发送消息，前端持续接收（用于下载/大文件/进度）。
 
 建议任务
-- [ ] 设计 Channel 协议：创建 channel id、注册回调、发送分片、关闭信号。
-- [ ] Rust 侧实现 channel 存储与发送（线程安全、生命周期管理、webview 关闭清理）。
-- [ ] JS 侧注入与 `@tauri-apps/api` 兼容策略（至少兼容核心行为）。
+- [x] 最小实现：支持命令参数注入 `ipc::Channel<T>`，可多次 `send(T)`，并在 drop 时发送 `{ end: true }`。
+- [x] 多 webview 兼容：通过 `Invoke.webview_label` + `ipc::IpcContextGuard` 贯通上下文，确保 Channel 发送到正确 webview。
+- [ ] 大 payload / 二进制优化：实现 `plugin:__TAURI_CHANNEL__|fetch`（Tauri 的 fast-path），避免通过 `eval` 直接塞入超大 JSON/bytes。
 
 难点/风险（为什么“困难”）
 - 这不仅是“返回一个响应”，而是要维护跨多次消息的状态与回调映射。

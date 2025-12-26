@@ -29,6 +29,8 @@ impl Drop for WebView {
 
 impl WebView {
     pub fn new(webview: wry::WebView, _window: &mut Window, cx: &mut App) -> Self {
+        crate::ipc::init_platform_dispatcher(cx.background_executor().dispatcher.clone());
+
         let _ = webview.set_bounds(Rect::default());
 
         let webview = Rc::new(webview);

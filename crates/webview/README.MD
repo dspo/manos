@@ -68,6 +68,7 @@ Notes:
 - `ipc://` custom-protocol invokes run command execution off-thread; postMessage fallback executes on the IPC handler thread.
 - Binary responses: return `gpui_manos_webview::ipc::Response::binary(...)` to resolve `ArrayBuffer` on the frontend (custom-protocol path).
 - Raw request access: add a `gpui_manos_webview::ipc::Request` parameter to read method/uri/headers/body.
+- Channels: accept `gpui_manos_webview::ipc::Channel<T>` and call `send(T)` to stream messages to the frontend (Tauri `Channel`-compatible message format).
 - Return types supported:
   - `T: serde::Serialize`
   - `Result<T, E>`: default `E: ToString` (rejects with a JSON string); opt-in `#[gpui_manos_webview::command(error = "json")]` for `E: serde::Serialize` (rejects with structured JSON)
@@ -90,7 +91,8 @@ Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
 - [ ] Static asset fallback chain: support `path.html` / `path/index.html` / `index.html` fallbacks (ref: Tauri `crates/tauri/src/manager/mod.rs` `get_asset`).
 - [ ] CSP + security headers: add configurable headers and per-origin `Access-Control-Allow-Origin` (avoid unconditional `*`).
 - [ ] Dev server/proxy mode: proxy the app protocol to a dev server (and optional caching) in development (ref: Tauri `crates/tauri/src/protocol/tauri.rs`).
-- [ ] Binary payload + channel optimization: `ipc::Request/Response` covers basic `application/octet-stream` invokes/responses; `__TAURI_CHANNEL__` fast-path is still TODO.
+- [x] Channel base: `ipc::Channel<T>` streams JSON messages and signals end on drop.
+- [ ] Channel optimization: implement `plugin:__TAURI_CHANNEL__|fetch` fast-path + large/binary payload strategy.
 - [ ] Compose `invoke_handler` with low-level APIs: allow plugin-style `plugin:xxx|yyy` handlers even when `invoke_handler` is set.
 
 ### P2 — Scripts Without Backend Support

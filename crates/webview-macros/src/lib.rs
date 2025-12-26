@@ -350,8 +350,12 @@ pub fn generate_handler(input: TokenStream) -> TokenStream {
 
     quote! {
         move |invoke| {
-            let command = invoke.command;
-            let request = invoke.request;
+            let ::gpui_manos_webview::Invoke {
+                command,
+                request,
+                webview_label,
+            } = invoke;
+            let _guard = ::gpui_manos_webview::ipc::IpcContextGuard::new(webview_label.as_deref());
             match command.as_str() {
                 #(#arms)*
                 _ => None,

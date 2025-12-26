@@ -2682,6 +2682,7 @@ dependencies = [
 name = "gpui-manos-webview"
 version = "0.1.0"
 dependencies = [
+ "async-task",
  "gpui",
  "gpui-manos-webview-macros",
  "http",

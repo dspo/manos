@@ -95,6 +95,7 @@ struct PostMessageRequest {
 pub struct Invoke {
     pub command: String,
     pub request: http::Request<Vec<u8>>,
+    pub webview_label: Option<String>,
 }
 
 pub type InvokeHandler =
@@ -290,6 +291,7 @@ impl<'a> Builder<'a> {
                     handler(Invoke {
                         command: cmd.clone(),
                         request,
+                        webview_label: message.webview_label.clone(),
                     })
                     .unwrap_or_else(|| ipc::not_found(cmd.clone()))
                 } else if let Some(handler) = handlers_for_post_message.get(&cmd) {
@@ -406,6 +408,7 @@ impl<'a> Builder<'a> {
                     let command = decode_uri_component(
                         raw_path.strip_prefix('/').unwrap_or(raw_path.as_str()),
                     );
+                    let webview_label = Some(webview_id.to_string());
 
                     let invoke_handler = invoke_handler.clone();
                     let api_handler = handlers.get(&command).cloned();
@@ -414,7 +417,11 @@ impl<'a> Builder<'a> {
                         let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                             || {
                                 if let Some(handler) = invoke_handler {
-                                    handler(Invoke { command, request })
+                                    handler(Invoke {
+                                        command,
+                                        request,
+                                        webview_label,
+                                    })
                                         .unwrap_or_else(|| ipc::not_found(raw_path))
                                 } else if let Some(handler) = api_handler {
                                     handler(request)
@@ -466,6 +473,81 @@ fn from_hex(byte: u8) -> Option<u8> {
 pub mod ipc {
     use super::*;
     use http::HeaderValue;
+    use std::sync::Arc;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub const IPC_CHANNEL_PREFIX: &str = "__CHANNEL__:";
+
+    static PLATFORM_DISPATCHER: OnceLock<Arc<dyn gpui::PlatformDispatcher>> = OnceLock::new();
+
+    pub(crate) fn init_platform_dispatcher(dispatcher: Arc<dyn gpui::PlatformDispatcher>) {
+        let _ = PLATFORM_DISPATCHER.set(dispatcher);
+    }
+
+    thread_local! {
+        static CURRENT_WEBVIEW_LABEL: std::cell::RefCell<Option<String>> =
+            std::cell::RefCell::new(None);
+    }
+
+    #[doc(hidden)]
+    pub struct IpcContextGuard {
+        previous_webview_label: Option<String>,
+    }
+
+    impl IpcContextGuard {
+        pub fn new(webview_label: Option<&str>) -> Self {
+            let previous_webview_label = CURRENT_WEBVIEW_LABEL
+                .with(|label| label.replace(webview_label.map(|label| label.to_string())));
+
+            Self {
+                previous_webview_label,
+            }
+        }
+    }
+
+    impl Drop for IpcContextGuard {
+        fn drop(&mut self) {
+            let previous_webview_label = self.previous_webview_label.take();
+            CURRENT_WEBVIEW_LABEL.with(|label| {
+                label.replace(previous_webview_label);
+            });
+        }
+    }
+
+    fn current_webview_label() -> Option<String> {
+        CURRENT_WEBVIEW_LABEL.with(|label| label.borrow().clone())
+    }
+
+    fn dispatch_eval_on_main_thread(
+        webview_label: Option<String>,
+        js: String,
+    ) -> std::result::Result<(), String> {
+        let dispatcher = PLATFORM_DISPATCHER.get().cloned().ok_or_else(|| {
+            "gpui platform dispatcher is not initialized (create a gpui_manos_webview::webview::WebView first)"
+                .to_string()
+        })?;
+
+        let (runnable, task) = async_task::spawn(
+            async move {
+                let Some(webview) = super::ipc_webview_for_label(webview_label.as_deref()) else {
+                    eprintln!(
+                        "[webview] IPC requested JS eval but target webview is missing (label={webview_label:?})"
+                    );
+                    return;
+                };
+
+                if let Err(err) = webview.evaluate_script(&js) {
+                    eprintln!("[webview] evaluate_script failed: {err}");
+                }
+            },
+            move |runnable| dispatcher.dispatch_on_main_thread(runnable),
+        );
+
+        runnable.schedule();
+        task.detach();
+        Ok(())
+    }
 
     #[derive(Debug)]
     pub struct Request {
@@ -546,6 +628,89 @@ pub mod ipc {
 
     pub fn respond<T: IntoInvokeResponse>(value: T) -> http::Response<Vec<u8>> {
         value.into_invoke_response()
+    }
+
+    #[derive(Debug)]
+    struct ChannelInner {
+        id: u32,
+        webview_label: Option<String>,
+        next_message_index: AtomicUsize,
+    }
+
+    impl Drop for ChannelInner {
+        fn drop(&mut self) {
+            let end_index = self.next_message_index.load(Ordering::Relaxed);
+            let js = format!(
+                "window.__TAURI_INTERNALS__.runCallback({}, {{ end: true, index: {} }});",
+                self.id, end_index
+            );
+            let _ = dispatch_eval_on_main_thread(self.webview_label.clone(), js);
+        }
+    }
+
+    pub struct Channel<TSend = serde_json::Value> {
+        inner: Arc<ChannelInner>,
+        phantom: std::marker::PhantomData<TSend>,
+    }
+
+    impl<TSend> Clone for Channel<TSend> {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                phantom: self.phantom,
+            }
+        }
+    }
+
+    impl<TSend> Channel<TSend> {
+        pub fn id(&self) -> u32 {
+            self.inner.id
+        }
+    }
+
+    impl<TSend> Channel<TSend>
+    where
+        TSend: serde::Serialize,
+    {
+        pub fn send(&self, message: TSend) -> std::result::Result<(), String> {
+            let message = serde_json::to_string(&message).map_err(|err| err.to_string())?;
+            let current_index = self
+                .inner
+                .next_message_index
+                .fetch_add(1, Ordering::Relaxed);
+            let js = format!(
+                "window.__TAURI_INTERNALS__.runCallback({}, {{ message: {message}, index: {current_index} }});",
+                self.inner.id
+            );
+
+            dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+        }
+    }
+
+    impl<'de, TSend> serde::Deserialize<'de> for Channel<TSend> {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value: String = serde::Deserialize::deserialize(deserializer)?;
+            let id = value
+                .strip_prefix(IPC_CHANNEL_PREFIX)
+                .and_then(|id| id.parse::<u32>().ok())
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        "invalid channel value `{value}`, expected a string in the `{IPC_CHANNEL_PREFIX}ID` format"
+                    ))
+                })?;
+
+            Ok(Self {
+                inner: Arc::new(ChannelInner {
+                    id,
+                    webview_label: current_webview_label(),
+                    next_message_index: AtomicUsize::new(0),
+                }),
+                phantom: Default::default(),
+            })
+        }
     }
 
     fn response_builder(
