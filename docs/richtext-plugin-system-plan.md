@@ -304,8 +304,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
-- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`todo.toggle`、`todo.toggle_checked`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
-- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`blockquote.is_active`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
+- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
+- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`block.indent_level`、`blockquote.is_active`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
 - 代码位置：`crates/plate-core/src/plugin.rs`
 
 ### 当前进度（阶段性）
@@ -320,6 +320,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Iteration 9（Schema-driven TextBlock + Heading）已实现：text block 判定由 `node_specs` 驱动；新增 Heading 插件与 toolbar dropdown（H1/H2/H3/Paragraph）。
 - Iteration 10（容器型 Block + Blockquote）已实现：BlockquotePlugin（schema + normalize + commands + query）+ view 递归渲染（包含 table cell 内嵌容器）+ toolbar Quote。
 - Iteration 11（Todo/Task）已实现：TodoPlugin（schema + normalize + commands + query）+ checkbox 前缀可点击（command → tx → undo）+ toolbar Todo。
+- Iteration 12（Indent）已实现：IndentPlugin（block.indent_* + normalize + query）+ list_level/outdent 支持 + toolbar Indent。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -720,6 +721,41 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 若 selection 跨 parent，则只切换 focus block（行为可预测，不做隐式跨容器重排）。
 - **Enter 行为**：在 todo_item 内回车会生成新的 todo_item；空 todo_item 上回车退出为 paragraph。
 - **JSON round-trip**：Save As → Open 后 `checked` 状态与渲染一致。
+
+### Iteration 12：Block-level Indent（通用缩进 + List level）
+
+> 目标：提供通用的 block 缩进语义（对齐 Plate 常见的 Indent 插件能力），并与 list 的层级缩进打通：list_item 使用 `list_level`，其他 text block 使用 `indent`。
+
+**要实现什么**
+- `gpui-plate-core`：
+  - `IndentPlugin`：
+    - commands：`block.indent_increase`、`block.indent_decrease`
+    - query：`block.indent_level`（对 list_item 返回 `list_level`，对其他 text block 返回 `indent`）
+    - normalize：`indent/list_level` 只允许 `1..=MAX`，0/非法值移除，超限 clamp。
+  - list 与 indent 的语义对齐：
+    - `list.unwrap`：若 `list_level > 0` 则先 outdent（`list_level -= 1`），否则退出为 paragraph。
+    - `list.toggle_*`：paragraph↔list_item 时在 `indent` 与 `list_level` 之间做映射，避免缩进丢失。
+- `gpui-manos-plate`（view）：
+  - paragraph/heading/todo_item 根据 `attrs.indent` 做左侧 padding（16px * level）。
+  - list_item 继续使用 `attrs.list_level`（现有渲染已支持）。
+- `story`：
+  - toolbar 增加 IndentIncrease/IndentDecrease 按钮。
+
+**怎么实现（关键做法）**
+- core：
+  - 通过 `text_blocks_in_order` 找到 selection 覆盖的 text blocks，批量生成 `Op::SetNodeAttrs`（不会移动节点，selection path 不变）。
+  - list_item 特判：只改 `list_level`；其他 text block 只改 `indent`。
+- view：
+  - 缩进只影响布局（padding），不进入 undo/serialize 之外的状态；命中测试仍以 `layout_cache`（text bounds）为准。
+
+**要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
+- 手动验收清单（Iteration 12 通过标准）：
+  - **Indent 按钮**：Indent/Outdent 可对 paragraph/heading/todo_item 生效；多段选区时整段一起缩进/反缩进。
+  - **List level**：对 list_item 点击 Indent 会增加层级缩进（marker 跟随右移）；Outdent 会减少层级；空 list_item 回车/Backspace 触发 `list.unwrap` 时若有层级会先 outdent。
+  - **Todo + indent**：todo 行缩进会同时移动 checkbox 与文本；回车拆分出的新 todo 行继承 indent 但默认 unchecked。
+  - **JSON round-trip**：Save As → Open 后 `indent/list_level` 仍然生效（渲染一致）。
 
 ## 9. 风险与对策
 

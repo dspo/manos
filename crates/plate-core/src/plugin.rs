@@ -144,6 +144,7 @@ impl PluginRegistry {
             Box::new(HeadingPlugin),
             Box::new(BlockquotePlugin),
             Box::new(TodoPlugin),
+            Box::new(IndentPlugin),
             Box::new(ListPlugin),
             Box::new(TablePlugin),
             Box::new(MentionPlugin),
@@ -1254,6 +1255,152 @@ impl NormalizePass for NormalizeTodoCheckedAttr {
     }
 }
 
+const MAX_INDENT_LEVEL: u64 = 8;
+
+struct IndentPlugin;
+
+impl PlatePlugin for IndentPlugin {
+    fn id(&self) -> &'static str {
+        "indent"
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeIndentAttrs)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec {
+                id: "block.indent_increase".to_string(),
+                label: "Increase indent".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    adjust_indent(editor, IndentDirection::Increase)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to increase indent: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "block.indent_decrease".to_string(),
+                label: "Decrease indent".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    adjust_indent(editor, IndentDirection::Decrease)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to decrease indent: {e:?}"))
+                            })
+                        })
+                }),
+            },
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "block.indent_level".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| Ok(active_indent_level(editor))),
+        }]
+    }
+}
+
+struct NormalizeIndentAttrs;
+
+impl NormalizePass for NormalizeIndentAttrs {
+    fn id(&self) -> &'static str {
+        "block.normalize_indent_attrs"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_level_attr(
+            el: &ElementNode,
+            path: &[usize],
+            key: &str,
+            max: u64,
+            ops: &mut Vec<Op>,
+        ) {
+            let Some(value) = el.attrs.get(key) else {
+                return;
+            };
+
+            let Some(level) = value.as_u64() else {
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec![key.to_string()],
+                    },
+                });
+                return;
+            };
+
+            let clamped = level.min(max);
+            if clamped == 0 {
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec![key.to_string()],
+                    },
+                });
+                return;
+            }
+
+            if clamped != level {
+                let mut set = Attrs::default();
+                set.insert(key.to_string(), Value::Number(clamped.into()));
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set,
+                        remove: Vec::new(),
+                    },
+                });
+            }
+        }
+
+        fn walk(
+            nodes: &[Node],
+            path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in nodes.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                path.push(ix);
+
+                if element_is_text_block(el, registry) {
+                    normalize_level_attr(el, path, "indent", MAX_INDENT_LEVEL, ops);
+                    if el.kind == "list_item" {
+                        normalize_level_attr(el, path, "list_level", MAX_INDENT_LEVEL, ops);
+                    }
+                } else {
+                    walk(&el.children, path, registry, ops);
+                }
+
+                path.pop();
+            }
+        }
+
+        walk(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
 struct ListPlugin;
 
 impl PlatePlugin for ListPlugin {
@@ -1731,6 +1878,28 @@ fn active_heading_level(editor: &crate::core::Editor) -> Value {
     Value::Number(serde_json::Number::from(level))
 }
 
+fn active_indent_level(editor: &crate::core::Editor) -> Value {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return Value::Number(serde_json::Number::from(0u64));
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return Value::Number(serde_json::Number::from(0u64));
+    };
+
+    let level = if el.kind == "list_item" {
+        el.attrs
+            .get("list_level")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    } else {
+        el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0)
+    }
+    .min(MAX_INDENT_LEVEL);
+
+    Value::Number(serde_json::Number::from(level))
+}
+
 fn set_heading(editor: &mut crate::core::Editor, level: u64) -> Result<Transaction, String> {
     let level = level.clamp(1, 6);
     let focus = editor.selection().focus.clone();
@@ -1765,7 +1934,7 @@ fn set_heading(editor: &mut crate::core::Editor, level: u64) -> Result<Transacti
         return Ok(Transaction::new(Vec::new()).source("command:block.set_heading"));
     }
 
-    let mut attrs = Attrs::default();
+    let mut attrs = el.attrs.clone();
     attrs.insert(
         "level".to_string(),
         Value::Number(serde_json::Number::from(level)),
@@ -1809,7 +1978,11 @@ fn unset_heading(editor: &mut crate::core::Editor) -> Result<Transaction, String
 
     let next = Node::Element(ElementNode {
         kind: "paragraph".to_string(),
-        attrs: Attrs::default(),
+        attrs: {
+            let mut attrs = el.attrs.clone();
+            attrs.remove("level");
+            attrs
+        },
         children: el.children,
     });
 
@@ -2037,7 +2210,7 @@ fn toggle_todo_in_block_path(block_node: Node, checked: bool) -> Result<Node, St
 
     match el.kind.as_str() {
         "paragraph" => {
-            let mut attrs = Attrs::default();
+            let mut attrs = el.attrs.clone();
             attrs.insert("checked".to_string(), Value::Bool(checked));
             Ok(Node::Element(ElementNode {
                 kind: "todo_item".to_string(),
@@ -2047,7 +2220,11 @@ fn toggle_todo_in_block_path(block_node: Node, checked: bool) -> Result<Node, St
         }
         "todo_item" => Ok(Node::Element(ElementNode {
             kind: "paragraph".to_string(),
-            attrs: Attrs::default(),
+            attrs: {
+                let mut attrs = el.attrs.clone();
+                attrs.remove("checked");
+                attrs
+            },
             children: el.children,
         })),
         _ => Ok(Node::Element(el)),
@@ -2177,6 +2354,104 @@ fn toggle_todo_checked(
     .source("command:todo.toggle_checked"))
 }
 
+#[derive(Clone, Copy)]
+enum IndentDirection {
+    Increase,
+    Decrease,
+}
+
+fn adjust_indent(
+    editor: &mut crate::core::Editor,
+    direction: IndentDirection,
+) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let selection_after = sel.clone();
+    let (start, end) = ordered_selection_points(&sel);
+    let Some(start_block_path) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection start is not in a text block".into());
+    };
+    let Some(end_block_path) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection end is not in a text block".into());
+    };
+
+    let blocks = text_blocks_in_order(editor.doc(), editor.registry());
+    let start_index = blocks
+        .iter()
+        .position(|b| b.path == start_block_path)
+        .ok_or_else(|| "Selection start is not in a text block".to_string())?;
+    let end_index = blocks
+        .iter()
+        .position(|b| b.path == end_block_path)
+        .ok_or_else(|| "Selection end is not in a text block".to_string())?;
+
+    let (a, b) = if start_index <= end_index {
+        (start_index, end_index)
+    } else {
+        (end_index, start_index)
+    };
+
+    let mut ops: Vec<Op> = Vec::new();
+    for block in blocks.iter().take(b + 1).skip(a) {
+        let el = block.el;
+
+        let (key, current) = if el.kind == "list_item" {
+            (
+                "list_level",
+                el.attrs
+                    .get("list_level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            )
+        } else {
+            (
+                "indent",
+                el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0),
+            )
+        };
+
+        let next = match direction {
+            IndentDirection::Increase => current.saturating_add(1).min(MAX_INDENT_LEVEL),
+            IndentDirection::Decrease => current.saturating_sub(1),
+        };
+        if next == current {
+            continue;
+        }
+
+        if next == 0 {
+            ops.push(Op::SetNodeAttrs {
+                path: block.path.clone(),
+                patch: crate::core::AttrPatch {
+                    set: Attrs::default(),
+                    remove: vec![key.to_string()],
+                },
+            });
+            continue;
+        }
+
+        let mut set = Attrs::default();
+        set.insert(
+            key.to_string(),
+            Value::Number(serde_json::Number::from(next)),
+        );
+        ops.push(Op::SetNodeAttrs {
+            path: block.path.clone(),
+            patch: crate::core::AttrPatch {
+                set,
+                remove: Vec::new(),
+            },
+        });
+    }
+
+    let source = match direction {
+        IndentDirection::Increase => "command:block.indent_increase",
+        IndentDirection::Decrease => "command:block.indent_decrease",
+    };
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source(source))
+}
+
 fn toggle_list(editor: &mut crate::core::Editor, list_type: &str) -> Result<(), String> {
     let focus = editor.selection().focus.clone();
     let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
@@ -2187,11 +2462,19 @@ fn toggle_list(editor: &mut crate::core::Editor, list_type: &str) -> Result<(), 
 
     let next = match node {
         Node::Element(el) if el.kind == "paragraph" => {
-            let mut attrs = Attrs::default();
+            let indent = el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0);
+            let mut attrs = el.attrs.clone();
+            attrs.remove("indent");
             attrs.insert(
                 "list_type".to_string(),
                 Value::String(list_type.to_string()),
             );
+            if indent > 0 {
+                attrs.insert(
+                    "list_level".to_string(),
+                    Value::Number(serde_json::Number::from(indent.min(MAX_INDENT_LEVEL))),
+                );
+            }
             Node::Element(ElementNode {
                 kind: "list_item".to_string(),
                 attrs,
@@ -2205,9 +2488,24 @@ fn toggle_list(editor: &mut crate::core::Editor, list_type: &str) -> Result<(), 
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if current == list_type {
+                let level = el
+                    .attrs
+                    .get("list_level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let mut attrs = el.attrs.clone();
+                attrs.remove("list_type");
+                attrs.remove("list_index");
+                attrs.remove("list_level");
+                if level > 0 {
+                    attrs.insert(
+                        "indent".to_string(),
+                        Value::Number(serde_json::Number::from(level.min(MAX_INDENT_LEVEL))),
+                    );
+                }
                 Node::Element(ElementNode {
                     kind: "paragraph".to_string(),
-                    attrs: Attrs::default(),
+                    attrs,
                     children: el.children,
                 })
             } else {
@@ -2259,9 +2557,50 @@ fn unwrap_list_item(editor: &mut crate::core::Editor) -> Result<(), String> {
         return Ok(());
     }
 
+    let level = el
+        .attrs
+        .get("list_level")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if level > 0 {
+        let next_level = level.saturating_sub(1);
+        let patch = if next_level == 0 {
+            crate::core::AttrPatch {
+                set: Attrs::default(),
+                remove: vec!["list_level".to_string()],
+            }
+        } else {
+            let mut set = Attrs::default();
+            set.insert(
+                "list_level".to_string(),
+                Value::Number(serde_json::Number::from(next_level)),
+            );
+            crate::core::AttrPatch {
+                set,
+                remove: Vec::new(),
+            }
+        };
+
+        let tx = Transaction::new(vec![Op::SetNodeAttrs {
+            path: block_path.to_vec(),
+            patch,
+        }])
+        .selection_after(selection_after)
+        .source("command:list.unwrap:outdent");
+
+        return editor
+            .apply(tx)
+            .map_err(|e| format!("Failed to outdent list: {e:?}"));
+    }
+
+    let mut attrs = el.attrs.clone();
+    attrs.remove("list_type");
+    attrs.remove("list_index");
+    attrs.remove("list_level");
+
     let next = Node::Element(ElementNode {
         kind: "paragraph".to_string(),
-        attrs: Attrs::default(),
+        attrs,
         children: el.children,
     });
 

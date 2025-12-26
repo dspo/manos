@@ -203,6 +203,7 @@ impl Render for RichTextExample {
             heading_level,
             quote,
             todo,
+            indent_level,
         ) = {
             let editor = self.editor.read(cx);
             (
@@ -215,6 +216,7 @@ impl Render for RichTextExample {
                 editor.heading_level(),
                 editor.is_blockquote_active(),
                 editor.is_todo_active(),
+                editor.indent_level(),
             )
         };
         let bold = marks.bold;
@@ -593,6 +595,34 @@ impl Render for RichTextExample {
                                 let handle = this.editor.read(cx).focus_handle();
                                 window.focus(&handle);
                             })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new(
+                            "indent-decrease",
+                            PlateIconName::IndentDecrease,
+                        )
+                        .disabled(indent_level == 0)
+                        .tooltip("Outdent")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.editor
+                                .update(cx, |ed, cx| ed.command_indent_decrease(cx));
+                            let handle = this.editor.read(cx).focus_handle();
+                            window.focus(&handle);
+                        })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new(
+                            "indent-increase",
+                            PlateIconName::IndentIncrease,
+                        )
+                        .disabled(indent_level >= 8)
+                        .tooltip("Indent")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.editor
+                                .update(cx, |ed, cx| ed.command_indent_increase(cx));
+                            let handle = this.editor.read(cx).focus_handle();
+                            window.focus(&handle);
+                        })),
                     )
                     .child(
                         PlateToolbarIconButton::new("todo", PlateIconName::ListTodo)

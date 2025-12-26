@@ -987,6 +987,9 @@ impl RichTextState {
                 })
             } else if is_todo_item {
                 let mut attrs = Attrs::default();
+                if let Some(indent) = block_attrs.get("indent").cloned() {
+                    attrs.insert("indent".to_string(), indent);
+                }
                 attrs.insert("checked".to_string(), serde_json::Value::Bool(false));
                 Node::Element(ElementNode {
                     kind: "todo_item".to_string(),
@@ -994,9 +997,13 @@ impl RichTextState {
                     children,
                 })
             } else {
+                let mut attrs = Attrs::default();
+                if let Some(indent) = block_attrs.get("indent").cloned() {
+                    attrs.insert("indent".to_string(), indent);
+                }
                 Node::Element(ElementNode {
                     kind: "paragraph".to_string(),
-                    attrs: Default::default(),
+                    attrs,
                     children,
                 })
             };
@@ -2051,6 +2058,14 @@ impl RichTextState {
         _ = self.run_command_and_refresh("todo.toggle", None, cx);
     }
 
+    pub fn command_indent_increase(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("block.indent_increase", None, cx);
+    }
+
+    pub fn command_indent_decrease(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("block.indent_decrease", None, cx);
+    }
+
     pub fn command_toggle_bold(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("marks.toggle_bold", None, cx);
     }
@@ -2229,6 +2244,12 @@ impl RichTextState {
             .run_query::<Option<u64>>("block.heading_level", None)
             .ok()
             .flatten()
+    }
+
+    pub fn indent_level(&self) -> u64 {
+        self.editor
+            .run_query::<u64>("block.indent_level", None)
+            .unwrap_or(0)
     }
 
     pub fn is_blockquote_active(&self) -> bool {
@@ -3335,7 +3356,16 @@ impl Render for RichTextState {
                 style.font_weight = FontWeight::SEMIBOLD;
                 line = line.with_base_text_style(style);
             }
-            line.into_any_element()
+
+            let indent_level = el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0);
+            if indent_level == 0 {
+                return line.into_any_element();
+            }
+
+            div()
+                .pl(px(16. * indent_level as f32))
+                .child(line)
+                .into_any_element()
         }
 
         fn render_list_item(
@@ -3400,6 +3430,7 @@ impl Render for RichTextState {
                 .get("checked")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let indent_level = el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0);
 
             let checkbox = div()
                 .w(px(18.))
@@ -3434,6 +3465,9 @@ impl Render for RichTextState {
                 .flex_row()
                 .items_start()
                 .gap(px(8.))
+                .when(indent_level > 0, |this| {
+                    this.pl(px(16. * indent_level as f32))
+                })
                 .child(checkbox)
                 .child(div().flex_1().min_w(px(0.)).child(line))
                 .into_any_element()
