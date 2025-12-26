@@ -78,16 +78,16 @@ JS 侧（注入脚本）
 - 明确并统一协议/URL 方案（至少对齐 `ipc://` 与静态资源 scheme 的可用性）。
 
 建议任务
-- [ ] IPC custom protocol：支持 `OPTIONS` 预检，并限制只允许 `POST/OPTIONS`（对齐 Tauri 行为）。
-- [ ] `Tauri-Response`/`Access-Control-Expose-Headers` 等 header 行为对齐（目前部分已实现，但需要补全一致性）。
-- [ ] postMessage fallback：当 custom protocol fetch 失败时，提供可用的 `window.ipc.postMessage` 路径（当前缺失）。
-- [ ] 协议对齐：当前 `convertFileSrc()` 默认 `asset://`，但静态资源注册的是 `wry://`；需要统一（至少避免前端调用走到不存在的 scheme）。
+- [x] IPC custom protocol：支持 `OPTIONS` 预检，并限制只允许 `POST/OPTIONS`（对齐 Tauri 行为）。
+- [x] `Tauri-Response`/`Access-Control-Expose-Headers` 等 header 行为对齐（目前部分已实现，但需要补全一致性）。
+- [x] postMessage fallback：当 custom protocol fetch 失败时，提供可用的 `window.ipc.postMessage` 路径（当前缺失）。
+- [x] 协议对齐：当前 `convertFileSrc()` 默认 `asset://`，但静态资源注册的是 `wry://`；需要统一（至少避免前端调用走到不存在的 scheme）。
 
 验收点（建议）
 - `window.__TAURI_INTERNALS__.invoke("cmd")` 在 custom-protocol 可用与不可用两种情况下都能返回。
 
 风险/说明
-- postMessage fallback 在 wry 中是否可用，取决于是否启用 `with_ipc_handler` 等机制；需要先验证 wry 的能力边界。
+- postMessage fallback 依赖 wry 的 `with_ipc_handler`；当前已启用并实现最小可用链路（解析消息 -> 调用 handler -> `eval` 回调）。
 
 ### M1：同步命令能力补齐与“可维护性”提升（3–7 天）
 
@@ -95,9 +95,9 @@ JS 侧（注入脚本）
 - 同步命令在参数/返回/错误上更接近 Tauri 文档的“开发感受”。
 
 建议任务
-- [ ] 命令名唯一性与冲突提示（文档强调唯一性；我们可在 `generate_handler!` 生成期做静态检查，或在运行期做更明确的日志/错误）。
-- [ ] 参数解析增强：对非 JSON payload 给出明确错误；对字段缺失/类型不匹配提供更一致的错误格式。
-- [ ] 错误返回结构化（可选）：引入一个统一的错误 envelope（例如 `{ kind, message }`），并让 `Result<T, E>` 的 `E: Serialize` 时返回 `application/json`。
+- [x] 命令名唯一性与冲突提示：`generate_handler!` 在编译期检测重复命令名并报错。
+- [x] 参数解析增强：检查 `Content-Type`（非 JSON / 二进制 payload 给出明确错误），并在反序列化失败时带上命令名。
+- [x] 错误返回结构化（可选）：`#[command(error = "json")]` 时，`Result<T, E>` 的 `E: Serialize` 将以 `application/json` 返回；默认仍返回 JSON string（来自 `ToString`）。
 
 验收点（建议）
 - JS 侧 `.catch(e => ...)` 能拿到稳定结构的错误对象（或至少稳定字符串）。
@@ -217,4 +217,3 @@ JS 侧（注入脚本）
 - 是否引入 `tokio`（或其它 executor）来支持异步命令与 Channel？（影响依赖、二进制大小、线程模型）
 - 最终静态资源 scheme 选型：统一成 `asset://` / `wry://` / `tauri://` 之一？（影响前端工具链与 `convertFileSrc` 行为）
 - 对错误返回是否引入结构化 envelope？是否默认开启还是 opt-in？
-

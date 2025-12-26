@@ -22,6 +22,7 @@ pub struct WebView {
 
 impl Drop for WebView {
     fn drop(&mut self) {
+        crate::unregister_webview_for_ipc(&self.webview.id().to_string());
         self.hide();
     }
 }
@@ -30,11 +31,14 @@ impl WebView {
     pub fn new(webview: wry::WebView, _window: &mut Window, cx: &mut App) -> Self {
         let _ = webview.set_bounds(Rect::default());
 
+        let webview = Rc::new(webview);
+        crate::register_webview_for_ipc(&webview);
+
         Self {
             focus_handle: cx.focus_handle(),
             visible: true,
             bounds: Bounds::default(),
-            webview: Rc::new(webview),
+            webview,
             more_style: None,
         }
     }

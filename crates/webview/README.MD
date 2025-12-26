@@ -63,9 +63,10 @@ Notes:
 
 - Argument keys default to `camelCase` (same as Tauri). For example `fn foo(user_name: String)` expects `{ userName: "..." }`.
 - You can opt out with `#[gpui_manos_webview::command(rename_all = "snake_case")]`.
+- `generate_handler![...]` detects duplicate command names at compile time.
 - Commands are currently synchronous. Return types supported:
   - `T: serde::Serialize`
-  - `Result<T, E>` where `T: serde::Serialize` and `E: ToString`
+  - `Result<T, E>`: default `E: ToString` (rejects with a JSON string); opt-in `#[gpui_manos_webview::command(error = "json")]` for `E: serde::Serialize` (rejects with structured JSON)
 
 ## Issues (Gap vs Tauri)
 
@@ -75,10 +76,10 @@ Roadmap (calling Rust from the frontend): see `CALLING_RUST_PARITY.md`.
 
 ### P0 — Compatibility / Security
 
-- [ ] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
-- [ ] IPC request validation: enforce/parse `Tauri-Invoke-Key`, `Origin`, `Tauri-Callback`, `Tauri-Error`, and decode body based on `Content-Type` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
-- [ ] IPC preflight & method handling: support `OPTIONS` and restrict to `POST/OPTIONS` like Tauri (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
-- [ ] postMessage fallback: implement the `window.ipc.postMessage` bridge when custom-protocol IPC fails (Tauri JS falls back; Rust handler is missing here).
+- [x] Protocol alignment: `convertFileSrc()` uses `asset://` by default but `serve_static()` registers `wry://` only; align schemes or register `asset://` too (JS: `src/scripts/tauri/core.js`, Rust: `src/lib.rs`).
+- [ ] IPC request validation: (partial) enforce `Tauri-Invoke-Key`; still missing `Origin`, `Tauri-Callback`, `Tauri-Error`, and request body decoding based on `Content-Type` (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [x] IPC preflight & method handling: support `OPTIONS` and restrict to `POST/OPTIONS` like Tauri (ref: Tauri `crates/tauri/src/ipc/protocol.rs`).
+- [x] postMessage fallback: implement the `window.ipc.postMessage` bridge when custom-protocol IPC fails (Tauri JS falls back; Rust handler is missing here).
 
 ### P1 — Behavior Parity
 

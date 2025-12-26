@@ -1,5 +1,7 @@
 //! gpui-manos-webview macros
 
+use std::collections::HashMap;
+
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
@@ -23,6 +25,7 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut root: Path = syn::parse_str("::gpui_manos_webview").expect("valid default root path");
     let mut rename_all = "camelCase".to_string();
+    let mut error_format = "string".to_string();
 
     for arg in args {
         let NestedMeta::Meta(meta) = arg else {
@@ -74,10 +77,30 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
                     Err(err) => return err.to_compile_error().into(),
                 };
             }
+            Meta::NameValue(nv) if nv.path.is_ident("error") => {
+                let Lit::Str(value) = &nv.lit else {
+                    return syn::Error::new_spanned(
+                        &nv.lit,
+                        "expected a string literal (\"string\" or \"json\")",
+                    )
+                    .to_compile_error()
+                    .into();
+                };
+
+                let value = value.value();
+                match value.as_str() {
+                    "string" | "json" => error_format = value,
+                    _ => {
+                        return syn::Error::new_spanned(&nv.lit, "expected \"string\" or \"json\"")
+                            .to_compile_error()
+                            .into();
+                    }
+                }
+            }
             other => {
                 return syn::Error::new_spanned(
                     other,
-                    "unsupported attribute argument (supported: root = \"...\", rename_all = \"...\")",
+                    "unsupported attribute argument (supported: root = \"...\", rename_all = \"...\", error = \"string\"|\"json\")",
                 )
                 .to_compile_error()
                 .into();
@@ -117,6 +140,7 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let serde_rename_all = rename_all;
+    let serialize_error = error_format == "json";
 
     let parse_args = if arg_idents.is_empty() {
         quote!()
@@ -131,10 +155,35 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
             let __gpui_args: #args_struct = match #root::serde_json::from_slice(&__gpui_body) {
                 Ok(args) => args,
-                Err(err) => return #root::ipc::bad_request(err),
+                Err(err) => return #root::ipc::bad_request_json(&format!(
+                    "invalid args for command `{}`: {err}",
+                    stringify!(#command_fn)
+                )),
             };
 
             let #args_struct { #( #arg_idents, )* } = __gpui_args;
+        }
+    };
+
+    let content_type_check = if arg_idents.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            match __gpui_content_type {
+                "" | "application/json" => {}
+                "application/octet-stream" => {
+                    return #root::ipc::bad_request_json(&format!(
+                        "command `{}` does not support binary payloads yet",
+                        stringify!(#command_fn)
+                    ));
+                }
+                other => {
+                    return #root::ipc::bad_request_json(&format!(
+                        "command `{}` expects application/json payload (got `{other}`)",
+                        stringify!(#command_fn)
+                    ));
+                }
+            }
         }
     };
 
@@ -145,12 +194,27 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let respond = match &function.sig.output {
-        ReturnType::Type(_, ty) if is_result_type(ty) => quote! {
-            match #call {
-                Ok(output) => #root::ipc::ok_json(&output),
-                Err(err) => #root::ipc::internal_error(err.to_string()),
+        ReturnType::Type(_, ty) if is_result_type(ty) => {
+            if serialize_error {
+                quote! {
+                    match #call {
+                        Ok(output) => #root::ipc::ok_json(&output),
+                        Err(err) => #root::ipc::internal_error_json(&err),
+                    }
+                }
+            } else {
+                quote! {
+                    match #call {
+                        Ok(output) => #root::ipc::ok_json(&output),
+                        Err(err) => #root::ipc::internal_error_json(&format!(
+                            "command `{}` failed: {}",
+                            stringify!(#command_fn),
+                            err.to_string()
+                        )),
+                    }
+                }
             }
-        },
+        }
         _ => quote! {
             let output = #call;
             #root::ipc::ok_json(&output)
@@ -162,7 +226,15 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_snake_case)]
         #vis fn #wrapper_fn(request: #root::http::Request<Vec<u8>>) -> #root::http::Response<Vec<u8>> {
             use ::std::string::ToString as _;
-            let __gpui_body = request.into_body();
+            let (parts, __gpui_body) = request.into_parts();
+            let __gpui_content_type = parts
+                .headers
+                .get(#root::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            let __gpui_content_type = __gpui_content_type.split(',').next().unwrap_or("");
+            let __gpui_content_type = __gpui_content_type.split(';').next().unwrap_or("").trim();
+            #content_type_check
             #parse_args
             #respond
         }
@@ -177,11 +249,13 @@ pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn generate_handler(input: TokenStream) -> TokenStream {
+    let input_for_error: proc_macro2::TokenStream = input.clone().into();
     let command_paths: syn::punctuated::Punctuated<Path, Token![,]> =
         parse_macro_input!(input with syn::punctuated::Punctuated::parse_terminated);
 
     let mut command_idents = Vec::new();
     let mut wrapper_paths = Vec::new();
+    let mut commands_by_name: HashMap<String, Vec<Path>> = HashMap::new();
 
     for command_path in command_paths {
         let mut wrapper_path = command_path.clone();
@@ -193,8 +267,33 @@ pub fn generate_handler(input: TokenStream) -> TokenStream {
         let command_ident = last.ident.clone();
         last.ident = format_ident!("__cmd__{}", command_ident);
 
+        commands_by_name
+            .entry(command_ident.to_string())
+            .or_default()
+            .push(command_path);
         command_idents.push(command_ident);
         wrapper_paths.push(wrapper_path);
+    }
+
+    let duplicates: Vec<_> = commands_by_name
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .collect();
+    if !duplicates.is_empty() {
+        let mut message = String::from(
+            "duplicate command names in generate_handler! (command names are derived from function identifiers):\n",
+        );
+        for (name, paths) in duplicates {
+            message.push_str(&format!("  `{name}`:\n"));
+            for path in paths {
+                message.push_str(&format!("    - `{}`\n", quote!(#path)));
+            }
+        }
+        message.push_str("Rename one of the functions to make the command name unique.");
+
+        return syn::Error::new_spanned(input_for_error, message)
+            .to_compile_error()
+            .into();
     }
 
     let arms =

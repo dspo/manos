@@ -2698,6 +2698,7 @@ name = "gpui-manos-webview-macros"
 version = "0.1.0"
 dependencies = [
  "http",
+ "proc-macro2",
  "quote",
  "serde",
  "syn 1.0.109",
