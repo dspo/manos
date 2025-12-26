@@ -52,6 +52,14 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/chevron-down.svg"),
     ),
     (
+        "icons/chevron-right.svg",
+        include_bytes!("../assets/icons/chevron-right.svg"),
+    ),
+    (
+        "icons/check.svg",
+        include_bytes!("../assets/icons/check.svg"),
+    ),
+    (
         "icons/code-xml.svg",
         include_bytes!("../assets/icons/code-xml.svg"),
     ),
@@ -63,6 +71,7 @@ const ASSETS: &[(&str, &[u8])] = &[
         "icons/file-up.svg",
         include_bytes!("../assets/icons/file-up.svg"),
     ),
+    ("icons/file.svg", include_bytes!("../assets/icons/file.svg")),
     ("icons/film.svg", include_bytes!("../assets/icons/film.svg")),
     (
         "icons/highlighter.svg",
@@ -71,6 +80,18 @@ const ASSETS: &[(&str, &[u8])] = &[
     (
         "icons/github.svg",
         include_bytes!("../assets/icons/github.svg"),
+    ),
+    (
+        "icons/folder-closed.svg",
+        include_bytes!("../assets/icons/folder-closed.svg"),
+    ),
+    (
+        "icons/folder.svg",
+        include_bytes!("../assets/icons/folder.svg"),
+    ),
+    (
+        "icons/folder-open.svg",
+        include_bytes!("../assets/icons/folder-open.svg"),
     ),
     (
         "icons/image.svg",

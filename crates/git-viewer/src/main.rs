@@ -11,15 +11,19 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui::{KeyBinding, actions};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Root, TitleBar, VirtualListScrollHandle, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Root, Sizable as _, StyledExt as _,
+    TitleBar, VirtualListScrollHandle, WindowExt as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Input, InputState},
     notification::Notification,
     popover::Popover,
+    resizable::{resizable_panel, v_resizable},
     scroll::{Scrollbar, ScrollbarState},
+    tab::{Tab, TabBar},
     v_virtual_list,
 };
+use gpui_manos_components::assets::ExtrasAssetSource;
 
 const CONTEXT: &str = "GitViewer";
 
@@ -98,12 +102,32 @@ enum ChangeTreeRow {
         name: String,
         depth: usize,
         file_count: usize,
+        selected_count: usize,
         collapsed: bool,
     },
     File {
         entry: FileEntry,
         depth: usize,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriState {
+    Unchecked,
+    Partial,
+    Checked,
+}
+
+impl TriState {
+    fn for_counts(total: usize, selected: usize) -> Self {
+        if total == 0 || selected == 0 {
+            Self::Unchecked
+        } else if selected >= total {
+            Self::Checked
+        } else {
+            Self::Partial
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -168,6 +192,7 @@ enum CommandPaletteCommand {
     ToggleSplitLayout,
     ToggleWhitespace,
     ExpandAll,
+    RefreshGitStatus,
     OpenFileHistory,
     ApplyEditor,
     SaveConflict,
@@ -222,6 +247,11 @@ const COMMAND_PALETTE_ITEMS: &[CommandPaletteItem] = &[
         command: CommandPaletteCommand::ExpandAll,
         title: "展开全部折叠",
         keywords: "expand all folds 展开 折叠",
+    },
+    CommandPaletteItem {
+        command: CommandPaletteCommand::RefreshGitStatus,
+        title: "刷新 Git 状态",
+        keywords: "refresh reload git status 刷新 重新加载",
     },
     CommandPaletteItem {
         command: CommandPaletteCommand::OpenFileHistory,
@@ -362,6 +392,8 @@ struct ConflictViewState {
 
 struct GitViewerApp {
     repo_root: PathBuf,
+    workspace_name: String,
+    branch_name: String,
     files: Vec<FileEntry>,
     loading: bool,
     git_available: bool,
@@ -383,6 +415,13 @@ struct GitViewerApp {
     split_layout: SplitLayout,
     view_mode: DiffViewMode,
     status_filter: StatusFilter,
+    changes_tree_rows: Vec<ChangeTreeRow>,
+    changes_scroll_handle: VirtualListScrollHandle,
+    changes_scroll_state: ScrollbarState,
+    changes_list_item_sizes: Rc<Vec<Size<Pixels>>>,
+    changes_list_item_height: Pixels,
+    selected_for_commit: HashSet<String>,
+    open_file_seq: u64,
 }
 
 impl GitViewerApp {
@@ -392,26 +431,45 @@ impl GitViewerApp {
         let repo_root_for_task = repo_root.clone();
         let git_available = Command::new("git").arg("--version").output().is_ok();
         let focus_handle = cx.focus_handle().tab_stop(true);
+        let workspace_name = workspace_name_from_path(&repo_root);
+        let branch_name = if git_available {
+            "…".to_string()
+        } else {
+            "No Git".to_string()
+        };
+
+        window.set_window_title(&format!("{workspace_name} — {branch_name}"));
 
         if git_available {
             cx.spawn_in(window, async move |_, window| {
-                let entries = window
+                let repo_root_for_branch = repo_root_for_task.clone();
+                let (entries, branch_label) = window
                     .background_executor()
                     .spawn(async move {
-                        fetch_git_status(&repo_root_for_task)
+                        let entries = fetch_git_status(&repo_root_for_task)
                             .map_err(|err| {
                                 eprintln!("git status failed: {err:?}");
                                 err
                             })
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        let branch_label =
+                            fetch_git_branch(&repo_root_for_branch).unwrap_or_else(|err| {
+                                eprintln!("git branch detect failed: {err:?}");
+                                "No Repo".to_string()
+                            });
+                        (entries, branch_label)
                     })
                     .await;
 
-                let _ = window.update(|_window, cx| {
-                    this.update(cx, |this, _cx| {
+                let _ = window.update(|window, cx| {
+                    this.update(cx, |this, cx| {
                         this.loading = false;
                         this.files = entries;
-                    })
+                        this.branch_name = branch_label;
+                        cx.notify();
+                    });
+                    let title = this.read(cx).window_title();
+                    window.set_window_title(&title);
                 });
 
                 Some(())
@@ -438,13 +496,16 @@ impl GitViewerApp {
 
         let commit_message_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .code_editor("text")
+                .multi_line()
+                .rows(6)
                 .placeholder("Commit message")
                 .default_value("")
         });
 
         Self {
             repo_root,
+            workspace_name,
+            branch_name,
             files: Vec::new(),
             loading: git_available,
             git_available,
@@ -469,11 +530,22 @@ impl GitViewerApp {
             split_layout: SplitLayout::TwoPane,
             view_mode: DiffViewMode::Split,
             status_filter: StatusFilter::All,
+            changes_tree_rows: Vec::new(),
+            changes_scroll_handle: VirtualListScrollHandle::new(),
+            changes_scroll_state: ScrollbarState::default(),
+            changes_list_item_sizes: Rc::new(Vec::new()),
+            changes_list_item_height: px(0.),
+            selected_for_commit: HashSet::new(),
+            open_file_seq: 0,
         }
     }
 
     fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    fn window_title(&self) -> String {
+        format!("{} — {}", self.workspace_name, self.branch_name)
     }
 
     fn open_demo(&mut self) {
@@ -518,7 +590,7 @@ impl GitViewerApp {
                 .update(|_, cx| this.read(cx).view_mode)
                 .unwrap_or(DiffViewMode::Split);
 
-            let (old_text, new_text, model, old_lines, new_lines) = window
+            let (old_text, new_text, model, old_lines, new_lines, rows, hunk_rows) = window
                 .background_executor()
                 .spawn(async move {
                     let (model, old_lines, new_lines) = build_diff_model(
@@ -527,7 +599,18 @@ impl GitViewerApp {
                         diff_options.ignore_whitespace,
                         diff_options.context_lines,
                     );
-                    (old_text, new_text, model, old_lines, new_lines)
+                    let rows =
+                        build_display_rows_from_model(&model, &old_lines, &new_lines, view_mode);
+                    let hunk_rows = rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            matches!(row, DisplayRow::HunkHeader { .. }).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        old_text, new_text, model, old_lines, new_lines, rows, hunk_rows,
+                    )
                 })
                 .await;
 
@@ -540,17 +623,18 @@ impl GitViewerApp {
                     this.update(cx, |this, _cx| {
                         this.diff_content_revision = this.diff_content_revision.wrapping_add(1);
                         this.conflict_view = None;
-                        this.diff_view = Some(DiffViewState::from_precomputed(
+                        this.diff_view = Some(DiffViewState::from_precomputed_rows(
                             format!("Large Diff Demo ({line_count} lines)").into(),
                             None,
                             None,
                             CompareTarget::HeadToWorktree,
                             old_text,
                             new_text,
-                            view_mode,
                             model,
                             old_lines,
                             new_lines,
+                            rows,
+                            hunk_rows,
                         ));
                         this.screen = AppScreen::DiffView;
                     });
@@ -636,6 +720,20 @@ impl GitViewerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_file_seq = self.open_file_seq.wrapping_add(1);
+        let open_seq = self.open_file_seq;
+
+        self.diff_content_revision = self.diff_content_revision.wrapping_add(1);
+        self.conflict_view = None;
+        self.diff_view = Some(DiffViewState::loading(
+            format!("{status} {path}").into(),
+            Some(path.clone()),
+            Some(status.clone()),
+            target.clone(),
+        ));
+        self.screen = AppScreen::DiffView;
+        cx.notify();
+
         let this = cx.entity();
         let repo_root = self.repo_root.clone();
         let path_for_task = path.clone();
@@ -722,7 +820,7 @@ impl GitViewerApp {
                 .update(|_, cx| this.read(cx).view_mode)
                 .unwrap_or(DiffViewMode::Split);
 
-            let (old_text, new_text, model, old_lines, new_lines) = window
+            let (old_text, new_text, model, old_lines, new_lines, rows, hunk_rows) = window
                 .background_executor()
                 .spawn(async move {
                     let (model, old_lines, new_lines) = build_diff_model(
@@ -731,7 +829,18 @@ impl GitViewerApp {
                         diff_options.ignore_whitespace,
                         diff_options.context_lines,
                     );
-                    (old_text, new_text, model, old_lines, new_lines)
+                    let rows =
+                        build_display_rows_from_model(&model, &old_lines, &new_lines, view_mode);
+                    let hunk_rows = rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            matches!(row, DisplayRow::HunkHeader { .. }).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        old_text, new_text, model, old_lines, new_lines, rows, hunk_rows,
+                    )
                 })
                 .await;
 
@@ -756,22 +865,27 @@ impl GitViewerApp {
                         );
                     }
 
-                    this.update(cx, |this, _cx| {
+                    this.update(cx, |this, cx| {
+                        if this.open_file_seq != open_seq {
+                            return;
+                        }
                         this.diff_content_revision = this.diff_content_revision.wrapping_add(1);
                         this.conflict_view = None;
-                        this.diff_view = Some(DiffViewState::from_precomputed(
+                        this.diff_view = Some(DiffViewState::from_precomputed_rows(
                             format!("{status_for_task} {path_for_task}").into(),
                             Some(path_for_task.clone()),
                             Some(status_for_task.clone()),
                             target,
                             old_text,
                             new_text,
-                            view_mode,
                             model,
                             old_lines,
                             new_lines,
+                            rows,
+                            hunk_rows,
                         ));
                         this.screen = AppScreen::DiffView;
+                        cx.notify();
                     });
                 })
                 .ok();
@@ -817,6 +931,19 @@ impl GitViewerApp {
             Some(status) if !status.trim().is_empty() => format!("{status} {path}").into(),
             _ => path.clone().into(),
         };
+
+        self.open_file_seq = self.open_file_seq.wrapping_add(1);
+        let open_seq = self.open_file_seq;
+        self.diff_content_revision = self.diff_content_revision.wrapping_add(1);
+        self.conflict_view = None;
+        self.diff_view = Some(DiffViewState::loading(
+            title.clone(),
+            Some(path.clone()),
+            status.clone(),
+            compare_target.clone(),
+        ));
+        self.screen = AppScreen::DiffView;
+        cx.notify();
 
         window.push_notification(
             Notification::new().message(format!(
@@ -869,7 +996,7 @@ impl GitViewerApp {
                 .update(|_, cx| this.read(cx).view_mode)
                 .unwrap_or(DiffViewMode::Split);
 
-            let (old_text, new_text, model, old_lines, new_lines) = window
+            let (old_text, new_text, model, old_lines, new_lines, rows, hunk_rows) = window
                 .background_executor()
                 .spawn(async move {
                     let (model, old_lines, new_lines) = build_diff_model(
@@ -878,7 +1005,18 @@ impl GitViewerApp {
                         diff_options.ignore_whitespace,
                         diff_options.context_lines,
                     );
-                    (old_text, new_text, model, old_lines, new_lines)
+                    let rows =
+                        build_display_rows_from_model(&model, &old_lines, &new_lines, view_mode);
+                    let hunk_rows = rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            matches!(row, DisplayRow::HunkHeader { .. }).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        old_text, new_text, model, old_lines, new_lines, rows, hunk_rows,
+                    )
                 })
                 .await;
 
@@ -903,22 +1041,27 @@ impl GitViewerApp {
                         );
                     }
 
-                    this.update(cx, |this, _cx| {
+                    this.update(cx, |this, cx| {
+                        if this.open_file_seq != open_seq {
+                            return;
+                        }
                         this.diff_content_revision = this.diff_content_revision.wrapping_add(1);
                         this.conflict_view = None;
-                        this.diff_view = Some(DiffViewState::from_precomputed(
+                        this.diff_view = Some(DiffViewState::from_precomputed_rows(
                             title,
                             Some(path_for_task.clone()),
                             status_for_task.clone(),
                             compare_target.clone(),
                             old_text,
                             new_text,
-                            view_mode,
                             model,
                             old_lines,
                             new_lines,
+                            rows,
+                            hunk_rows,
                         ));
                         this.screen = AppScreen::DiffView;
+                        cx.notify();
                     });
                 })
                 .ok();
@@ -967,7 +1110,372 @@ impl GitViewerApp {
         }
     }
 
-    fn commit_from_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_directory_selection(&mut self, dir_path: String, select: bool) {
+        #[derive(Clone, Copy)]
+        enum GroupScope {
+            Any,
+            TrackedOnly,
+            UntrackedOnly,
+        }
+
+        let (scope, dir_prefix) = if dir_path == ":group:changes" {
+            (GroupScope::TrackedOnly, None)
+        } else if dir_path == ":group:untracked" {
+            (GroupScope::UntrackedOnly, None)
+        } else if let Some(rest) = dir_path.strip_prefix(":group:changes/") {
+            (GroupScope::TrackedOnly, Some(rest))
+        } else if let Some(rest) = dir_path.strip_prefix(":group:untracked/") {
+            (GroupScope::UntrackedOnly, Some(rest))
+        } else {
+            (GroupScope::Any, Some(dir_path.as_str()))
+        };
+
+        let prefix = dir_prefix.map(|dir| format!("{dir}/"));
+        for entry in self
+            .files
+            .iter()
+            .filter(|entry| matches_filter(entry, self.status_filter))
+        {
+            match scope {
+                GroupScope::Any => {}
+                GroupScope::TrackedOnly => {
+                    if is_untracked_status(&entry.status) {
+                        continue;
+                    }
+                }
+                GroupScope::UntrackedOnly => {
+                    if !is_untracked_status(&entry.status) {
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(prefix) = prefix.as_deref() {
+                if !entry.path.starts_with(prefix) {
+                    continue;
+                }
+            }
+
+            if select {
+                self.selected_for_commit.insert(entry.path.clone());
+            } else {
+                self.selected_for_commit.remove(&entry.path);
+            }
+        }
+    }
+
+    fn ordered_worktree_files(&self) -> Vec<&FileEntry> {
+        let mut entries: Vec<&FileEntry> = self
+            .files
+            .iter()
+            .filter(|entry| !is_ignored_status(&entry.status))
+            .collect();
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        entries
+    }
+
+    fn file_nav_state(&self, current_path: Option<&str>) -> (bool, bool) {
+        let Some(current_path) = current_path else {
+            return (false, false);
+        };
+
+        let entries = self.ordered_worktree_files();
+        let Some(index) = entries.iter().position(|entry| entry.path == current_path) else {
+            return (false, false);
+        };
+
+        (index > 0, index + 1 < entries.len())
+    }
+
+    fn open_adjacent_file(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let current_path = self
+            .diff_view
+            .as_ref()
+            .and_then(|view| view.path.clone())
+            .or_else(|| {
+                self.conflict_view
+                    .as_ref()
+                    .and_then(|view| view.path.clone())
+            });
+        let Some(current_path) = current_path else {
+            return;
+        };
+
+        let entries = self.ordered_worktree_files();
+        if entries.is_empty() {
+            return;
+        }
+        let Some(index) = entries.iter().position(|entry| entry.path == current_path) else {
+            return;
+        };
+
+        let next_index = if delta.is_negative() {
+            index.saturating_sub(delta.wrapping_abs() as usize)
+        } else {
+            (index + delta as usize).min(entries.len().saturating_sub(1))
+        };
+
+        if next_index == index {
+            return;
+        }
+
+        let Some(entry) = entries.get(next_index) else {
+            return;
+        };
+
+        self.open_file(entry.path.clone(), entry.status.clone(), window, cx);
+    }
+
+    fn changes_item_sizes(&mut self, row_height: Pixels, count: usize) -> Rc<Vec<Size<Pixels>>> {
+        if self.changes_list_item_height != row_height
+            || self.changes_list_item_sizes.len() != count
+        {
+            self.changes_list_item_height = row_height;
+            self.changes_list_item_sizes = Rc::new(vec![size(px(0.), row_height); count]);
+        }
+        self.changes_list_item_sizes.clone()
+    }
+
+    fn render_changes_tree_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let selected_path = self
+            .diff_view
+            .as_ref()
+            .and_then(|view| view.path.clone())
+            .or_else(|| {
+                self.conflict_view
+                    .as_ref()
+                    .and_then(|view| view.path.clone())
+            });
+
+        let Some(row) = self.changes_tree_rows.get(index).cloned() else {
+            return div().h(px(24.)).into_any_element();
+        };
+
+        match row {
+            ChangeTreeRow::Directory {
+                path,
+                name,
+                depth,
+                file_count,
+                selected_count,
+                collapsed,
+            } => {
+                let row_id = stable_hash_for_id(&path);
+                let indent = px(8. + (depth as f32) * 12.);
+                let checkbox_state = TriState::for_counts(file_count, selected_count);
+                let checkbox_disabled = file_count == 0 || !self.git_available || self.loading;
+                div()
+                    .id(("changes-dir-row", row_id))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(24.))
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .hover(|this| this.bg(theme.list_hover))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, {
+                        let path = path.clone();
+                        cx.listener(move |this, _, _window, cx| {
+                            this.toggle_changes_dir(&path);
+                            cx.notify();
+                        })
+                    })
+                    .child(
+                        div()
+                            .w(px(12.))
+                            .ml(indent)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .xsmall(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                                window.prevent_default();
+                                cx.stop_propagation();
+                            })
+                            .child(tristate_checkbox(
+                                ("changes-dir-select", row_id),
+                                checkbox_state,
+                                checkbox_disabled,
+                                theme,
+                                {
+                                    let dir_path = path.clone();
+                                    let file_count = file_count;
+                                    let selected_count = selected_count;
+                                    cx.listener(move |this, _, _window, cx| {
+                                        let select = selected_count < file_count;
+                                        this.toggle_directory_selection(dir_path.clone(), select);
+                                        cx.notify();
+                                    })
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.))
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .w(px(16.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        Icon::new(if collapsed {
+                                            IconName::FolderClosed
+                                        } else {
+                                            IconName::FolderOpen
+                                        })
+                                        .xsmall(),
+                                    ),
+                            )
+                            .child(div().truncate().child(name))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{file_count} files")),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            ChangeTreeRow::File { entry, depth } => {
+                let path = entry.path;
+                let status = entry.status;
+                let status_for_open = status.clone();
+                let path_for_open = path.clone();
+                let path_for_select = path.clone();
+                let row_id = stable_hash_for_id(&path);
+                let is_selected = selected_path.as_deref() == Some(path.as_str());
+                let name = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
+                let indent = px(20. + (depth as f32) * 12.);
+                let checkbox_checked = self.selected_for_commit.contains(&path);
+                let checkbox_disabled =
+                    !self.git_available || self.loading || is_ignored_status(&status);
+                let badge_color = if status.contains('U') {
+                    theme.red
+                } else if status_xy(&status).is_some_and(|(x, _)| is_modified_status_code(x)) {
+                    theme.blue
+                } else if status_xy(&status).is_some_and(|(_, y)| is_modified_status_code(y)) {
+                    theme.green
+                } else {
+                    theme.muted_foreground
+                };
+
+                div()
+                    .id(("changes-file-row", row_id))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(24.))
+                    .px(px(4.))
+                    .rounded(px(4.))
+                    .when(is_selected, |this| this.bg(theme.list_active))
+                    .when(!is_selected, |this| {
+                        this.hover(|this| this.bg(theme.list_hover))
+                    })
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .ml(indent)
+                            .w(px(18.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Checkbox::new(("changes-file-select", row_id))
+                                    .checked(checkbox_checked)
+                                    .disabled(checkbox_disabled)
+                                    .tab_stop(false)
+                                    .on_click({
+                                        let app = cx.entity();
+                                        move |checked, _window, cx| {
+                                            app.update(cx, |this, cx| {
+                                                if *checked {
+                                                    this.selected_for_commit
+                                                        .insert(path_for_select.clone());
+                                                } else {
+                                                    this.selected_for_commit
+                                                        .remove(&path_for_select);
+                                                }
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .on_mouse_down(MouseButton::Left, {
+                                cx.listener(move |this, _, window, cx| {
+                                    this.open_file(
+                                        path_for_open.clone(),
+                                        status_for_open.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                    cx.notify();
+                                })
+                            })
+                            .child(
+                                div()
+                                    .w(px(16.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(Icon::new(IconName::File).xsmall()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone())
+                                    .text_color(badge_color)
+                                    .child(status.clone()),
+                            )
+                            .child(div().truncate().child(name)),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn commit_from_panel(&mut self, push_after: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.git_available {
             window.push_notification(
                 Notification::new().message("未检测到 git 命令，无法提交"),
@@ -987,11 +1495,18 @@ impl GitViewerApp {
         }
 
         let counts = StatusCounts::from_entries(&self.files);
-        if counts.staged == 0 && !self.commit_amend {
+        if counts.conflicts > 0 {
             window.push_notification(
-                Notification::new().message("没有已暂存变更（Staged=0），请先 Stage 再提交"),
+                Notification::new().message("存在冲突文件，暂不能提交（请先解决冲突）"),
                 cx,
             );
+            return;
+        }
+
+        let mut selected_paths: Vec<String> = self.selected_for_commit.iter().cloned().collect();
+        selected_paths.sort();
+        if selected_paths.is_empty() && !self.commit_amend {
+            window.push_notification(Notification::new().message("请先勾选要提交的文件"), cx);
             return;
         }
 
@@ -1002,6 +1517,8 @@ impl GitViewerApp {
         window.push_notification(
             Notification::new().message(if amend {
                 "正在提交（--amend）…".to_string()
+            } else if push_after {
+                "正在提交并 Push…".to_string()
             } else {
                 "正在提交…".to_string()
             }),
@@ -1010,20 +1527,53 @@ impl GitViewerApp {
 
         let this = cx.entity();
         let repo_root = self.repo_root.clone();
+        let files_snapshot = self.files.clone();
         cx.spawn_in(window, async move |_, window| {
             let repo_root_bg = repo_root.clone();
             let message_bg = message.clone();
-            let (commit_result, status_result) = window
+            let (commit_result, push_result, status_result) = window
                 .background_executor()
                 .spawn(async move {
-                    let mut args: Vec<&str> = vec!["commit", "-F", "-"];
-                    if amend {
-                        args.insert(1, "--amend");
+                    if !selected_paths.is_empty() {
+                        let mut untracked_paths = Vec::new();
+                        for entry in &files_snapshot {
+                            if selected_paths.iter().any(|path| path == &entry.path)
+                                && is_untracked_status(&entry.status)
+                            {
+                                untracked_paths.push(entry.path.clone());
+                            }
+                        }
+
+                        if !untracked_paths.is_empty() {
+                            let mut add_args: Vec<String> = vec!["add".into(), "--".into()];
+                            add_args.extend(untracked_paths);
+                            if let Err(err) = run_git(repo_root_bg.as_path(), add_args) {
+                                let status_result = fetch_git_status(&repo_root_bg);
+                                return (Err(err), None, status_result);
+                            }
+                        }
                     }
+
+                    let mut commit_args: Vec<String> =
+                        vec!["commit".into(), "-F".into(), "-".into()];
+                    if amend {
+                        commit_args.push("--amend".into());
+                    }
+                    if !selected_paths.is_empty() {
+                        commit_args.push("--only".into());
+                        commit_args.push("--".into());
+                        commit_args.extend(selected_paths.clone());
+                    }
+
                     let commit_result =
-                        run_git_with_stdin(repo_root_bg.as_path(), args, &message_bg);
+                        run_git_with_stdin(repo_root_bg.as_path(), commit_args, &message_bg);
+                    let push_result = if push_after && commit_result.is_ok() {
+                        Some(run_git(repo_root_bg.as_path(), ["push"]))
+                    } else {
+                        None
+                    };
                     let status_result = fetch_git_status(&repo_root_bg);
-                    (commit_result, status_result)
+                    (commit_result, push_result, status_result)
                 })
                 .await;
 
@@ -1033,6 +1583,7 @@ impl GitViewerApp {
                         this.committing = false;
                         if commit_result.is_ok() {
                             this.commit_amend = false;
+                            this.selected_for_commit.clear();
                             this.commit_message_input.update(cx, |state, cx| {
                                 state.set_value(String::new(), window, cx);
                             });
@@ -1044,7 +1595,7 @@ impl GitViewerApp {
                         cx.notify();
                     });
 
-                    match commit_result {
+                    match &commit_result {
                         Ok(_) => {
                             window.push_notification(Notification::new().message("提交成功"), cx)
                         }
@@ -1052,6 +1603,17 @@ impl GitViewerApp {
                             Notification::new().message(format!("提交失败：{err:#}")),
                             cx,
                         ),
+                    }
+
+                    if let Some(push_result) = push_result {
+                        match push_result {
+                            Ok(_) => window
+                                .push_notification(Notification::new().message("Push 成功"), cx),
+                            Err(err) => window.push_notification(
+                                Notification::new().message(format!("Push 失败：{err:#}")),
+                                cx,
+                            ),
+                        }
                     }
 
                     if let Err(err) = status_result {
@@ -1088,25 +1650,80 @@ impl GitViewerApp {
         let repo_root = self.repo_root.clone();
         cx.spawn_in(window, async move |_, window| {
             let repo_root_bg = repo_root.clone();
-            let entries = window
+            let (entries, branch_label) = window
                 .background_executor()
                 .spawn(async move {
-                    fetch_git_status(&repo_root_bg)
+                    let entries = fetch_git_status(&repo_root_bg)
                         .map_err(|err| {
                             eprintln!("git status failed: {err:?}");
                             err
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    let branch_label = fetch_git_branch(&repo_root_bg).unwrap_or_else(|err| {
+                        eprintln!("git branch detect failed: {err:?}");
+                        "No Repo".to_string()
+                    });
+                    (entries, branch_label)
                 })
                 .await;
 
             window
-                .update(|_window, cx| {
+                .update(|window, cx| {
                     this.update(cx, |this, cx| {
                         this.loading = false;
                         this.files = entries;
+                        this.branch_name = branch_label;
+                        let mut valid_paths = HashSet::new();
+                        for entry in &this.files {
+                            if !is_ignored_status(&entry.status) {
+                                valid_paths.insert(entry.path.clone());
+                            }
+                        }
+                        this.selected_for_commit
+                            .retain(|path| valid_paths.contains(path));
+
+                        let open_path = this
+                            .diff_view
+                            .as_ref()
+                            .and_then(|view| view.path.clone())
+                            .or_else(|| {
+                                this.conflict_view
+                                    .as_ref()
+                                    .and_then(|view| view.path.clone())
+                            });
+
+                        if let Some(open_path) = open_path {
+                            let updated_status = this
+                                .files
+                                .iter()
+                                .find(|entry| entry.path == open_path)
+                                .map(|entry| entry.status.clone())
+                                .or_else(|| {
+                                    this.diff_view.as_ref().and_then(|view| view.status.clone())
+                                })
+                                .unwrap_or_default();
+
+                            if let Some(diff_view) = this.diff_view.as_ref() {
+                                let target = diff_view.compare_target.clone();
+                                if matches!(target, CompareTarget::Refs { .. }) {
+                                    this.open_file_diff_with_target(
+                                        open_path,
+                                        updated_status,
+                                        target,
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    this.open_file(open_path, updated_status, window, cx);
+                                }
+                            } else if this.conflict_view.as_ref().is_some() {
+                                this.open_file(open_path, updated_status, window, cx);
+                            }
+                        }
                         cx.notify();
                     });
+                    let title = this.read(cx).window_title();
+                    window.set_window_title(&title);
                 })
                 .ok();
 
@@ -1341,6 +1958,7 @@ impl GitViewerApp {
                             .any(|row| matches!(row, DisplayRow::Fold { .. }))
                     })
             }
+            CommandPaletteCommand::RefreshGitStatus => self.git_available && !self.loading,
             CommandPaletteCommand::OpenFileHistory => {
                 self.git_available
                     && self.screen == AppScreen::DiffView
@@ -1425,6 +2043,9 @@ impl GitViewerApp {
                 if matches!(self.screen, AppScreen::DiffView) {
                     self.expand_all_folds();
                 }
+            }
+            CommandPaletteCommand::RefreshGitStatus => {
+                self.refresh_git_status(window, cx);
             }
             CommandPaletteCommand::OpenFileHistory => {
                 if matches!(self.screen, AppScreen::DiffView) {
@@ -1558,6 +2179,9 @@ impl GitViewerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_file_seq = self.open_file_seq.wrapping_add(1);
+        let open_seq = self.open_file_seq;
+
         let this = cx.entity();
         let repo_root = self.repo_root.clone();
         let path_for_task = path.clone();
@@ -1596,13 +2220,17 @@ impl GitViewerApp {
                             .code_editor("text")
                             .default_value(initial_text)
                     });
-                    this.update(cx, |this, _cx| {
+                    this.update(cx, |this, cx| {
+                        if this.open_file_seq != open_seq {
+                            return;
+                        }
                         this.open_conflict_view(
                             format!("{status_for_task} {path_for_task}").into(),
                             Some(path_for_task),
                             text,
                             result_input,
                         );
+                        cx.notify();
                     });
                 })
                 .ok();
@@ -1695,7 +2323,7 @@ impl GitViewerApp {
                 return Some(());
             };
 
-            let (old_text, new_text, model, old_lines, new_lines) = window
+            let (old_text, new_text, model, old_lines, new_lines, rows, hunk_rows) = window
                 .background_executor()
                 .spawn(async move {
                     let (model, old_lines, new_lines) = build_diff_model(
@@ -1704,7 +2332,18 @@ impl GitViewerApp {
                         diff_options.ignore_whitespace,
                         diff_options.context_lines,
                     );
-                    (old_text, new_text, model, old_lines, new_lines)
+                    let rows =
+                        build_display_rows_from_model(&model, &old_lines, &new_lines, view_mode);
+                    let hunk_rows = rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            matches!(row, DisplayRow::HunkHeader { .. }).then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        old_text, new_text, model, old_lines, new_lines, rows, hunk_rows,
+                    )
                 })
                 .await;
 
@@ -1724,17 +2363,18 @@ impl GitViewerApp {
                             return;
                         }
 
-                        let mut next = DiffViewState::from_precomputed(
+                        let mut next = DiffViewState::from_precomputed_rows(
                             title,
                             path,
                             status,
                             compare_target,
                             old_text,
                             new_text,
-                            view_mode,
                             model,
                             old_lines,
                             new_lines,
+                            rows,
+                            hunk_rows,
                         );
                         next.scroll_handle = scroll_handle;
                         next.scroll_state = scroll_state;
@@ -2943,15 +3583,22 @@ impl GitViewerApp {
             .border_r_1()
             .border_color(theme.border.alpha(0.7))
             .bg(theme.background)
-            .child(changes_panel.flex_1().min_h(px(0.)))
             .child(
-                div()
-                    .flex_none()
-                    .h(px(240.))
-                    .border_t_1()
-                    .border_color(theme.border.alpha(0.7))
-                    .bg(theme.background)
-                    .child(commit_panel),
+                v_resizable("sidebar-split")
+                    .child(resizable_panel().child(changes_panel.size_full()))
+                    .child(
+                        resizable_panel()
+                            .size(px(260.))
+                            .size_range(px(160.)..px(720.))
+                            .child(
+                                div()
+                                    .size_full()
+                                    .border_t_1()
+                                    .border_color(theme.border.alpha(0.7))
+                                    .bg(theme.background)
+                                    .child(commit_panel.size_full()),
+                            ),
+                    ),
             )
             .into_any_element()
     }
@@ -2974,279 +3621,94 @@ impl GitViewerApp {
             format!("Changes {} files", filtered_files.len()).into()
         };
 
+        let selected_index = match self.status_filter {
+            StatusFilter::All => 0,
+            StatusFilter::Conflicts => 1,
+            StatusFilter::Staged => 2,
+            StatusFilter::Unstaged => 3,
+            StatusFilter::Untracked => 4,
+        };
         let app = cx.entity();
-        let refresh_button = Button::new("sidebar-refresh")
-            .label("刷新")
-            .ghost()
-            .disabled(!self.git_available || self.loading)
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.refresh_git_status(window, cx);
-                cx.notify();
-            }));
+        let filter_bar = TabBar::new("changes-filter-tabs")
+            .segmented()
+            .small()
+            .selected_index(selected_index)
+            .on_click(move |ix, _window, cx| {
+                let filter = match *ix {
+                    0 => StatusFilter::All,
+                    1 => StatusFilter::Conflicts,
+                    2 => StatusFilter::Staged,
+                    3 => StatusFilter::Unstaged,
+                    4 => StatusFilter::Untracked,
+                    _ => StatusFilter::All,
+                };
+                app.update(cx, |this, cx| {
+                    this.status_filter = filter;
+                    cx.notify();
+                });
+            })
+            .children([
+                Tab::new().label(format!("All {}", counts.all)),
+                Tab::new().label(format!("Conflicts {}", counts.conflicts)),
+                Tab::new().label(format!("Staged {}", counts.staged)),
+                Tab::new().label(format!("Unstaged {}", counts.unstaged)),
+                Tab::new().label(format!("Untracked {}", counts.untracked)),
+            ]);
 
-        let demo_menu = {
-            let app_for_menu = app.clone();
-            Popover::new("sidebar-demo-menu")
-                .appearance(false)
-                .trigger(
-                    Button::new("sidebar-demo-trigger")
-                        .label("Demo")
-                        .ghost()
-                        .on_click(|_, _, _| {}),
-                )
-                .content(move |_, _window, cx| {
-                    let theme = cx.theme();
-                    let popover = cx.entity();
+        let row_height = px(24.);
+        let scroll_handle = self.changes_scroll_handle.clone();
+        let scroll_state = self.changes_scroll_state.clone();
 
-                    let make_action = move |id: &'static str,
-                                            label: SharedString,
-                                            action: Rc<dyn Fn(&mut Window, &mut App) + 'static>| {
-                        let popover = popover.clone();
-                        Button::new(id)
-                            .label(label)
-                            .ghost()
-                            .w_full()
-                            .on_click({
-                                let action = action.clone();
-                                move |_, window, cx| {
-                                    action(window, cx);
-                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                }
-                            })
-                            .into_any_element()
-                    };
+        let tree_view: AnyElement = if self.loading {
+            self.changes_tree_rows.clear();
+            div()
+                .px(px(10.))
+                .py(px(8.))
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("加载中…")
+                .into_any_element()
+        } else {
+            self.changes_tree_rows = build_changes_tree_rows(
+                &filtered_files,
+                &self.changes_collapsed_dirs,
+                &self.selected_for_commit,
+            );
 
-                    let app_for_demo = app_for_menu.clone();
-                    let open_demo = Rc::new(move |_window: &mut Window, cx: &mut App| {
-                        app_for_demo.update(cx, |this, cx| {
-                            this.open_demo();
-                            cx.notify();
-                        });
-                    });
-
-                    let app_for_large = app_for_menu.clone();
-                    let open_large = Rc::new(move |window: &mut Window, cx: &mut App| {
-                        app_for_large.update(cx, |this, cx| {
-                            this.open_large_demo(window, cx);
-                        });
-                    });
-
-                    let app_for_conflict = app_for_menu.clone();
-                    let open_conflict = Rc::new(move |window: &mut Window, cx: &mut App| {
-                        app_for_conflict.update(cx, |this, cx| {
-                            this.open_conflict_demo(window, cx);
-                        });
-                    });
-
-                    div()
-                        .p(px(8.))
-                        .bg(theme.popover)
-                        .border_1()
-                        .border_color(theme.border)
-                        .rounded(theme.radius)
-                        .shadow_md()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(make_action(
-                            "sidebar-demo-diff",
-                            "Diff Demo".into(),
-                            open_demo,
-                        ))
-                        .child(make_action(
-                            "sidebar-demo-large",
-                            "Large Diff Demo".into(),
-                            open_large,
-                        ))
-                        .child(make_action(
-                            "sidebar-demo-conflict",
-                            "Conflict Demo".into(),
-                            open_conflict,
-                        ))
-                })
-        };
-
-        let filter_button = |filter: StatusFilter, id: &'static str, label: String| {
-            let mut button = Button::new(id).label(label);
-            if self.status_filter == filter {
-                button = button.primary();
-            } else {
-                button = button
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.status_filter = filter;
-                        cx.notify();
-                    }));
-            }
-            button
-        };
-
-        let filter_bar = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .flex_wrap()
-            .child(filter_button(
-                StatusFilter::All,
-                "sidebar-filter-all",
-                format!("All {}", counts.all),
-            ))
-            .child(filter_button(
-                StatusFilter::Conflicts,
-                "sidebar-filter-conflicts",
-                format!("Conflicts {}", counts.conflicts),
-            ))
-            .child(filter_button(
-                StatusFilter::Staged,
-                "sidebar-filter-staged",
-                format!("Staged {}", counts.staged),
-            ))
-            .child(filter_button(
-                StatusFilter::Unstaged,
-                "sidebar-filter-unstaged",
-                format!("Unstaged {}", counts.unstaged),
-            ))
-            .child(filter_button(
-                StatusFilter::Untracked,
-                "sidebar-filter-untracked",
-                format!("Untracked {}", counts.untracked),
-            ));
-
-        let selected_path = self
-            .diff_view
-            .as_ref()
-            .and_then(|view| view.path.clone())
-            .or_else(|| {
-                self.conflict_view
-                    .as_ref()
-                    .and_then(|view| view.path.clone())
-            });
-
-        let rows = build_changes_tree_rows(&filtered_files, &self.changes_collapsed_dirs);
-        let list_children: Vec<AnyElement> = if self.loading {
-            vec![
-                div()
-                    .px(px(10.))
-                    .py(px(8.))
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("加载中…")
-                    .into_any_element(),
-            ]
-        } else if rows.is_empty() {
-            vec![
+            if self.changes_tree_rows.is_empty() {
                 div()
                     .px(px(10.))
                     .py(px(8.))
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .child("没有变更文件")
-                    .into_any_element(),
-            ]
-        } else {
-            rows.into_iter()
-                .enumerate()
-                .map(|(index, row)| match row {
-                    ChangeTreeRow::Directory {
-                        path,
-                        name,
-                        depth,
-                        file_count,
-                        collapsed,
-                    } => {
-                        let is_selected = selected_path
-                            .as_deref()
-                            .is_some_and(|p| p == path || p.starts_with(&format!("{path}/")));
-                        let indent = px(10. + (depth as f32) * 14.);
-                        let label = format!("{name}  ({file_count})");
-                        div()
-                            .id(("changes-dir-row", index))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .h(px(28.))
-                            .px(px(6.))
-                            .rounded(px(6.))
-                            .when(is_selected, |this| this.bg(theme.muted.alpha(0.18)))
-                            .hover(|this| this.bg(theme.muted.alpha(0.12)))
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, {
-                                let path = path.clone();
-                                cx.listener(move |this, _, _window, cx| {
-                                    this.toggle_changes_dir(&path);
-                                    cx.notify();
-                                })
-                            })
-                            .child(
-                                div()
-                                    .w(px(14.))
-                                    .ml(indent)
-                                    .text_color(theme.muted_foreground)
-                                    .child(if collapsed { "▸" } else { "▾" }),
-                            )
-                            .child(div().truncate().child(label))
-                            .into_any_element()
-                    }
-                    ChangeTreeRow::File { entry, depth } => {
-                        let path = entry.path.clone();
-                        let status = entry.status.clone();
-                        let status_for_click = status.clone();
-                        let is_selected = selected_path.as_deref() == Some(path.as_str());
-                        let name = path.rsplit('/').next().unwrap_or(path.as_str()).to_string();
-                        let indent = px(24. + (depth as f32) * 14.);
-                        let badge_color = if status.contains('U') {
-                            theme.red
-                        } else if status_xy(&status).is_some_and(|(x, _)| x != ' ' && x != '?') {
-                            theme.blue
-                        } else if status_xy(&status).is_some_and(|(_, y)| y != ' ' && y != '?') {
-                            theme.green
-                        } else {
-                            theme.muted_foreground
-                        };
+                    .into_any_element()
+            } else {
+                let item_sizes = self.changes_item_sizes(row_height, self.changes_tree_rows.len());
+                let list = v_virtual_list(
+                    cx.entity(),
+                    "changes-tree-list",
+                    item_sizes,
+                    move |this, visible_range, window, cx| {
+                        visible_range
+                            .map(|index| this.render_changes_tree_row(index, window, cx))
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .track_scroll(&scroll_handle);
 
-                        div()
-                            .id(("changes-file-row", index))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .h(px(28.))
-                            .px(px(6.))
-                            .rounded(px(6.))
-                            .when(is_selected, |this| {
-                                this.bg(theme.accent).text_color(theme.accent_foreground)
-                            })
-                            .when(!is_selected, |this| {
-                                this.bg(theme.transparent)
-                                    .text_color(theme.popover_foreground)
-                            })
-                            .hover(|this| this.bg(theme.accent.alpha(0.15)))
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, {
-                                cx.listener(move |this, _, window, cx| {
-                                    this.open_file(
-                                        path.clone(),
-                                        status_for_click.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                    cx.notify();
-                                })
-                            })
-                            .child(div().ml(indent).w(px(14.)).child(""))
-                            .child(
-                                div()
-                                    .w(px(44.))
-                                    .text_xs()
-                                    .font_family(theme.mono_font_family.clone())
-                                    .text_color(badge_color)
-                                    .child(status.clone()),
-                            )
-                            .child(div().truncate().child(name))
-                            .into_any_element()
-                    }
-                })
-                .collect()
+                div()
+                    .id("changes-tree-viewport")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .relative()
+                    .overflow_hidden()
+                    .child(list)
+                    .child(Scrollbar::uniform_scroll(&scroll_state, &scroll_handle))
+                    .into_any_element()
+            }
         };
 
         div()
@@ -3267,29 +3729,10 @@ impl GitViewerApp {
                             .text_sm()
                             .text_color(theme.muted_foreground)
                             .child(header),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(refresh_button)
-                            .child(demo_menu),
                     ),
             )
             .child(filter_bar)
-            .child(
-                div()
-                    .id("changes-tree-scroll")
-                    .flex()
-                    .flex_col()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .scrollbar_width(px(8.))
-                    .gap(px(2.))
-                    .children(list_children),
-            )
+            .child(tree_view)
     }
 
     fn render_commit_panel(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -3297,12 +3740,18 @@ impl GitViewerApp {
         let git_available = self.git_available;
         let committing = self.committing;
         let counts = StatusCounts::from_entries(&self.files);
+        let selected_count = self.selected_for_commit.len();
 
-        let can_commit = git_available && !committing && (counts.staged > 0 || self.commit_amend);
+        let can_commit = git_available
+            && !committing
+            && counts.conflicts == 0
+            && (selected_count > 0 || self.commit_amend);
         let commit_label: SharedString = if !git_available {
             "Commit（git 不可用）".into()
         } else if committing {
             "Commit（提交中…）".into()
+        } else if counts.conflicts > 0 {
+            "Commit（存在冲突）".into()
         } else {
             "Commit".into()
         };
@@ -3312,7 +3761,24 @@ impl GitViewerApp {
             .primary()
             .disabled(!can_commit)
             .on_click(cx.listener(|this, _, window, cx| {
-                this.commit_from_panel(window, cx);
+                this.commit_from_panel(false, window, cx);
+                cx.notify();
+            }));
+
+        let outline_variant = gpui_component::button::ButtonCustomVariant::new(cx)
+            .color(theme.background)
+            .foreground(theme.foreground)
+            .border(theme.border)
+            .hover(theme.list_hover)
+            .active(theme.list_active)
+            .shadow(false);
+
+        let commit_and_push_btn = Button::new("commit-push-button")
+            .label("Commit and Push…")
+            .custom(outline_variant)
+            .disabled(!can_commit)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.commit_from_panel(true, window, cx);
                 cx.notify();
             }));
 
@@ -3329,7 +3795,6 @@ impl GitViewerApp {
                     .justify_between()
                     .gap(px(8.))
                     .child(div().text_sm().child("Commit"))
-                    .child(commit_btn),
             )
             .child(
                 div()
@@ -3358,8 +3823,8 @@ impl GitViewerApp {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(format!(
-                                "Staged {} · Unstaged {} · Untracked {}",
-                                counts.staged, counts.unstaged, counts.untracked
+                                "Selected {} · Conflicts {} · Untracked {}",
+                                selected_count, counts.conflicts, counts.untracked
                             )),
                     ),
             )
@@ -3377,13 +3842,22 @@ impl GitViewerApp {
             )
             .child(
                 div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("提示：Commit 只提交已暂存内容；可在 Diff 工具条中 Stage/Unstage"),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(commit_btn)
+                    .child(commit_and_push_btn),
             )
+            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                "提示：Commit 只提交勾选的文件（使用 git commit --only）；Diff 里的 Stage/Unstage 依然可用",
+            ))
     }
 
     fn render_diff_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let current_path = self.diff_view.as_ref().and_then(|view| view.path.clone());
+        let (can_prev_file, can_next_file) = self.file_nav_state(current_path.as_deref());
+
         let Some(diff_view) = self.diff_view.as_mut() else {
             return div().p(px(12.)).child("No diff view");
         };
@@ -3401,13 +3875,14 @@ impl GitViewerApp {
         let file_status = diff_view.status.as_deref().unwrap_or_default();
         let has_file_path = diff_view.path.is_some();
         let git_available = self.git_available;
+        let can_refresh = git_available && !self.loading;
         let can_stage = git_available
             && has_file_path
             && (is_untracked_status(file_status)
-                || status_xy(file_status).is_some_and(|(_, y)| y != ' ' && y != '?' && y != '!'));
+                || status_xy(file_status).is_some_and(|(_, y)| is_modified_status_code(y)));
         let can_unstage = git_available
             && has_file_path
-            && status_xy(file_status).is_some_and(|(x, _)| x != ' ' && x != '?' && x != '!');
+            && status_xy(file_status).is_some_and(|(x, _)| is_modified_status_code(x));
         let has_hunks = hunk_count > 0;
         let can_stage_hunk = git_available
             && has_file_path
@@ -3960,16 +4435,6 @@ impl GitViewerApp {
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        Button::new("back")
-                            .label("返回")
-                            .ghost()
-                            .tooltip_with_action("返回", &Back, Some(CONTEXT))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close_diff_view();
-                                cx.notify();
-                            })),
-                    )
                     .child(div().flex_1().min_w(px(0.)).truncate().child(title)),
             )
             .child(
@@ -4010,8 +4475,28 @@ impl GitViewerApp {
                     )
                     .child(compare_control)
                     .child(
+                        Button::new("prev-file")
+                            .label("Prev file")
+                            .ghost()
+                            .disabled(!can_prev_file)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_adjacent_file(-1, window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("next-file")
+                            .label("Next file")
+                            .ghost()
+                            .disabled(!can_next_file)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_adjacent_file(1, window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("prev-hunk")
-                            .label("上一 hunk")
+                            .label("Prev diff")
                             .ghost()
                             .tooltip_with_action("上一 hunk", &Prev, Some(CONTEXT))
                             .disabled(!can_prev_hunk)
@@ -4022,12 +4507,22 @@ impl GitViewerApp {
                     )
                     .child(
                         Button::new("next-hunk")
-                            .label("下一 hunk")
+                            .label("Next diff")
                             .ghost()
                             .tooltip_with_action("下一 hunk", &Next, Some(CONTEXT))
                             .disabled(!can_next_hunk)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.jump_hunk(1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("diff-refresh")
+                            .label("Refresh")
+                            .ghost()
+                            .disabled(!can_refresh)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh_git_status(window, cx);
                                 cx.notify();
                             })),
                     )
@@ -4294,6 +4789,13 @@ impl GitViewerApp {
     }
 
     fn render_conflict_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let current_path = self
+            .conflict_view
+            .as_ref()
+            .and_then(|view| view.path.clone());
+        let (can_prev_file, can_next_file) = self.file_nav_state(current_path.as_deref());
+        let can_refresh = self.git_available && !self.loading;
+
         let Some(conflict_view) = self.conflict_view.as_mut() else {
             return div().p(px(12.)).child("No conflict view");
         };
@@ -4536,16 +5038,6 @@ impl GitViewerApp {
                     .flex_row()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        Button::new("conflict-back")
-                            .label("返回")
-                            .ghost()
-                            .tooltip_with_action("返回", &Back, Some(CONTEXT))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close_conflict_view();
-                                cx.notify();
-                            })),
-                    )
                     .child(div().flex_1().min_w(px(0.)).truncate().child(title)),
             )
             .child(
@@ -4556,6 +5048,26 @@ impl GitViewerApp {
                     .gap(px(12.))
                     .flex_wrap()
                     .child(div().child(format!("冲突: {conflict_position}")))
+                    .child(
+                        Button::new("conflict-prev-file")
+                            .label("Prev file")
+                            .ghost()
+                            .disabled(!can_prev_file)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_adjacent_file(-1, window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("conflict-next-file")
+                            .label("Next file")
+                            .ghost()
+                            .disabled(!can_next_file)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_adjacent_file(1, window, cx);
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         Button::new("conflict-prev")
                             .label("上一冲突")
@@ -4575,6 +5087,16 @@ impl GitViewerApp {
                             .disabled(!can_next)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.jump_conflict(1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("conflict-refresh")
+                            .label("Refresh")
+                            .ghost()
+                            .disabled(!can_refresh)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh_git_status(window, cx);
                                 cx.notify();
                             })),
                     )
@@ -6179,12 +6701,42 @@ impl Render for GitViewerApp {
         };
 
         let sidebar = self.render_sidebar(window, cx);
+        let theme = cx.theme();
 
-        let content = div()
+        let title_bar = TitleBar::new().child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(theme.foreground)
+                        .child(self.workspace_name.clone()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("·"),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(self.branch_name.clone()),
+                ),
+        );
+
+        let layout = div()
             .id("git-viewer-layout")
             .flex()
             .flex_row()
-            .size_full()
+            .flex_1()
+            .min_h(px(0.))
             .child(sidebar)
             .child(
                 div()
@@ -6194,6 +6746,15 @@ impl Render for GitViewerApp {
                     .min_w(px(0.))
                     .child(main_content),
             )
+            .into_any_element();
+
+        let content = div()
+            .id("git-viewer-content")
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(title_bar)
+            .child(layout)
             .into_any_element();
 
         let file_history_overlay = self.render_file_history_overlay(window, cx);
@@ -6505,6 +7066,67 @@ impl DiffViewState {
         };
         this.recalc_hunk_rows();
         this
+    }
+
+    fn from_precomputed_rows(
+        title: SharedString,
+        path: Option<String>,
+        status: Option<String>,
+        compare_target: CompareTarget,
+        old_text: String,
+        new_text: String,
+        diff_model: diffview::DiffModel,
+        old_lines: Vec<String>,
+        new_lines: Vec<String>,
+        rows: Vec<DisplayRow>,
+        hunk_rows: Vec<usize>,
+    ) -> Self {
+        Self {
+            title,
+            path,
+            status,
+            compare_target,
+            old_text,
+            new_text,
+            old_lines,
+            new_lines,
+            diff_model,
+            rows,
+            hunk_rows,
+            current_hunk: 0,
+            scroll_handle: VirtualListScrollHandle::new(),
+            scroll_state: ScrollbarState::default(),
+            list_item_sizes: Rc::new(Vec::new()),
+            list_item_height: px(0.),
+        }
+    }
+
+    fn loading(
+        title: SharedString,
+        path: Option<String>,
+        status: Option<String>,
+        compare_target: CompareTarget,
+    ) -> Self {
+        Self {
+            title,
+            path,
+            status,
+            compare_target,
+            old_text: String::new(),
+            new_text: String::new(),
+            old_lines: Vec::new(),
+            new_lines: Vec::new(),
+            diff_model: diffview::DiffModel::default(),
+            rows: vec![DisplayRow::HunkHeader {
+                text: "Loading…".into(),
+            }],
+            hunk_rows: Vec::new(),
+            current_hunk: 0,
+            scroll_handle: VirtualListScrollHandle::new(),
+            scroll_state: ScrollbarState::default(),
+            list_item_sizes: Rc::new(Vec::new()),
+            list_item_height: px(0.),
+        }
     }
 
     fn item_sizes(&mut self, row_height: Pixels) -> Rc<Vec<Size<Pixels>>> {
@@ -7245,6 +7867,52 @@ fn detect_repo_root(start_dir: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn workspace_name_from_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn fetch_git_branch(repo_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .context("执行 git rev-parse 失败")?;
+
+    if !output.status.success() {
+        return Ok("No Repo".to_string());
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Ok("No Repo".to_string());
+    }
+
+    if branch == "HEAD" {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .context("执行 git rev-parse --short HEAD 失败")?;
+
+        if output.status.success() {
+            let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !hash.is_empty() {
+                return Ok(format!("detached@{hash}"));
+            }
+        }
+
+        return Ok("DETACHED".to_string());
+    }
+
+    Ok(branch)
+}
+
 fn parse_type_1_record(record: &str) -> Option<FileEntry> {
     // `1 <xy> <sub> <mH> <mI> <mW> <hH> <hI> <path>`
     let mut parts = record.splitn(9, ' ');
@@ -7284,10 +7952,13 @@ struct StatusCounts {
 impl StatusCounts {
     fn from_entries(entries: &[FileEntry]) -> Self {
         let mut counts = Self::default();
-        counts.all = entries.len();
 
         for entry in entries {
             let status = entry.status.as_str();
+            if is_ignored_status(status) {
+                continue;
+            }
+            counts.all += 1;
             if is_untracked_status(status) {
                 counts.untracked += 1;
                 continue;
@@ -7298,10 +7969,10 @@ impl StatusCounts {
             }
 
             if let Some((x, y)) = status_xy(status) {
-                if x != ' ' && x != '?' && x != '!' {
+                if is_modified_status_code(x) {
                     counts.staged += 1;
                 }
-                if y != ' ' && y != '?' && y != '!' {
+                if is_modified_status_code(y) {
                     counts.unstaged += 1;
                 }
             }
@@ -7312,6 +7983,10 @@ impl StatusCounts {
 }
 
 fn matches_filter(entry: &FileEntry, filter: StatusFilter) -> bool {
+    if is_ignored_status(&entry.status) {
+        return false;
+    }
+
     match filter {
         StatusFilter::All => true,
         StatusFilter::Conflicts => is_conflict_status(&entry.status),
@@ -7320,15 +7995,73 @@ fn matches_filter(entry: &FileEntry, filter: StatusFilter) -> bool {
             if is_conflict_status(&entry.status) || is_untracked_status(&entry.status) {
                 return false;
             }
-            status_xy(&entry.status).is_some_and(|(x, _)| x != ' ' && x != '?' && x != '!')
+            status_xy(&entry.status).is_some_and(|(x, _)| is_modified_status_code(x))
         }
         StatusFilter::Unstaged => {
             if is_conflict_status(&entry.status) || is_untracked_status(&entry.status) {
                 return false;
             }
-            status_xy(&entry.status).is_some_and(|(_, y)| y != ' ' && y != '?' && y != '!')
+            status_xy(&entry.status).is_some_and(|(_, y)| is_modified_status_code(y))
         }
     }
+}
+
+fn tristate_checkbox(
+    id: impl Into<ElementId>,
+    state: TriState,
+    disabled: bool,
+    theme: &gpui_component::Theme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let border_color = if matches!(state, TriState::Unchecked) {
+        theme.input
+    } else {
+        theme.primary
+    };
+    let border_color = border_color.alpha(if disabled { 0.5 } else { 1.0 });
+    let radius = theme.radius.min(px(4.));
+    let icon = match state {
+        TriState::Unchecked => None,
+        TriState::Partial => Some(IconName::Minus),
+        TriState::Checked => Some(IconName::Check),
+    };
+
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(14.))
+        .border_1()
+        .border_color(border_color)
+        .rounded(radius)
+        .when(!matches!(state, TriState::Unchecked), |this| {
+            this.bg(theme.primary.alpha(if disabled { 0.5 } else { 1.0 }))
+        })
+        .when(disabled, |this| this.cursor_default())
+        .when(!disabled, |this| this.cursor_pointer().on_click(on_click))
+        .when_some(icon, |this, icon| {
+            this.child(
+                div()
+                    .text_color(
+                        theme
+                            .primary_foreground
+                            .alpha(if disabled { 0.5 } else { 1.0 }),
+                    )
+                    .child(Icon::new(icon).xsmall()),
+            )
+        })
+        .into_any_element()
+}
+
+fn stable_hash_for_id(value: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn status_xy(status: &str) -> Option<(char, char)> {
@@ -7340,8 +8073,20 @@ fn is_untracked_status(status: &str) -> bool {
     status == "??"
 }
 
+fn is_ignored_status(status: &str) -> bool {
+    status == "!!"
+}
+
 fn is_conflict_status(status: &str) -> bool {
     status.contains('U') || status == "AA" || status == "DD"
+}
+
+fn is_clean_status_code(code: char) -> bool {
+    code == '.' || code == ' '
+}
+
+fn is_modified_status_code(code: char) -> bool {
+    !is_clean_status_code(code) && code != '?' && code != '!'
 }
 
 fn default_compare_target(status: &str) -> CompareTarget {
@@ -7353,10 +8098,10 @@ fn default_compare_target(status: &str) -> CompareTarget {
         return CompareTarget::HeadToWorktree;
     };
 
-    if y != ' ' && y != '?' && y != '!' {
+    if is_modified_status_code(y) {
         return CompareTarget::IndexToWorktree;
     }
-    if x != ' ' && x != '?' && x != '!' {
+    if is_modified_status_code(x) {
         return CompareTarget::HeadToIndex;
     }
 
@@ -7372,6 +8117,7 @@ struct ChangesTreeNode {
 fn build_changes_tree_rows(
     files: &[FileEntry],
     collapsed_dirs: &HashSet<String>,
+    selected_for_commit: &HashSet<String>,
 ) -> Vec<ChangeTreeRow> {
     fn insert_node(root: &mut ChangesTreeNode, entry: FileEntry) {
         let mut node = root;
@@ -7389,6 +8135,18 @@ fn build_changes_tree_rows(
         node.files.len() + node.dirs.values().map(total_files).sum::<usize>()
     }
 
+    fn selected_files(node: &ChangesTreeNode, selected_for_commit: &HashSet<String>) -> usize {
+        node.files
+            .iter()
+            .filter(|entry| selected_for_commit.contains(&entry.path))
+            .count()
+            + node
+                .dirs
+                .values()
+                .map(|child| selected_files(child, selected_for_commit))
+                .sum::<usize>()
+    }
+
     fn walk_dir(
         rows: &mut Vec<ChangeTreeRow>,
         node: &ChangesTreeNode,
@@ -7396,14 +8154,17 @@ fn build_changes_tree_rows(
         name: String,
         depth: usize,
         collapsed_dirs: &HashSet<String>,
+        selected_for_commit: &HashSet<String>,
     ) {
         let file_count = total_files(node);
+        let selected_count = selected_files(node, selected_for_commit);
         let collapsed = collapsed_dirs.contains(&path);
         rows.push(ChangeTreeRow::Directory {
             path: path.clone(),
             name,
             depth,
             file_count,
+            selected_count,
             collapsed,
         });
 
@@ -7420,6 +8181,7 @@ fn build_changes_tree_rows(
                 child_name.clone(),
                 depth + 1,
                 collapsed_dirs,
+                selected_for_commit,
             );
         }
 
@@ -7433,29 +8195,94 @@ fn build_changes_tree_rows(
         }
     }
 
-    let mut root = ChangesTreeNode::default();
+    fn build_tree_rows(
+        files: &[FileEntry],
+        collapsed_dirs: &HashSet<String>,
+        base_depth: usize,
+        path_prefix: Option<&str>,
+        selected_for_commit: &HashSet<String>,
+    ) -> Vec<ChangeTreeRow> {
+        let mut root = ChangesTreeNode::default();
+        for entry in files.iter().cloned() {
+            insert_node(&mut root, entry);
+        }
+
+        let mut rows = Vec::new();
+        for (dir_name, dir_node) in root.dirs.iter() {
+            let path = match path_prefix {
+                Some(prefix) => format!("{prefix}/{dir_name}"),
+                None => dir_name.clone(),
+            };
+            walk_dir(
+                &mut rows,
+                dir_node,
+                path,
+                dir_name.clone(),
+                base_depth,
+                collapsed_dirs,
+                selected_for_commit,
+            );
+        }
+
+        let mut root_files = root.files.clone();
+        root_files.sort_by(|a, b| a.path.cmp(&b.path));
+        for entry in root_files {
+            rows.push(ChangeTreeRow::File {
+                entry,
+                depth: base_depth,
+            });
+        }
+
+        rows
+    }
+
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
     for entry in files.iter().cloned() {
-        insert_node(&mut root, entry);
+        if is_untracked_status(&entry.status) {
+            untracked.push(entry);
+        } else if !is_ignored_status(&entry.status) {
+            tracked.push(entry);
+        }
     }
 
     let mut rows = Vec::new();
 
-    for (dir_name, dir_node) in root.dirs.iter() {
-        walk_dir(
-            &mut rows,
-            dir_node,
-            dir_name.clone(),
-            dir_name.clone(),
-            0,
-            collapsed_dirs,
-        );
-    }
+    let mut push_group = |key: &str, label: &str, group_files: &[FileEntry]| {
+        if group_files.is_empty() {
+            return;
+        }
 
-    let mut root_files = root.files.clone();
-    root_files.sort_by(|a, b| a.path.cmp(&b.path));
-    for entry in root_files {
-        rows.push(ChangeTreeRow::File { entry, depth: 0 });
-    }
+        let group_path = format!(":group:{key}");
+        let collapsed = collapsed_dirs.contains(&group_path);
+        let selected_count = group_files
+            .iter()
+            .filter(|entry| selected_for_commit.contains(&entry.path))
+            .count();
+        rows.push(ChangeTreeRow::Directory {
+            path: group_path.clone(),
+            name: label.to_string(),
+            depth: 0,
+            file_count: group_files.len(),
+            selected_count,
+            collapsed,
+        });
+
+        if collapsed {
+            return;
+        }
+
+        rows.extend(build_tree_rows(
+            group_files,
+            collapsed_dirs,
+            1,
+            Some(&group_path),
+            selected_for_commit,
+        ));
+    };
+
+    push_group("changes", "Changes", &tracked);
+    push_group("untracked", "Unversioned Files", &untracked);
 
     rows
 }
@@ -7667,7 +8494,7 @@ fn main() {
         }
     };
 
-    let app = Application::new();
+    let app = Application::new().with_assets(ExtrasAssetSource::new());
 
     app.run(move |cx| {
         gpui_component::init(cx);
@@ -7683,7 +8510,6 @@ fn main() {
                 {
                     let start_dir = start_dir.clone();
                     move |window, cx| {
-                        window.set_window_title(&format!("git-viewer — {}", start_dir.display()));
                         let view = cx.new(|cx| GitViewerApp::new(window, cx, start_dir.clone()));
                         let handle = view.read(cx).focus_handle();
                         window.focus(&handle);
