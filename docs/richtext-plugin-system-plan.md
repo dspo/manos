@@ -304,7 +304,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
-- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`toggle.wrap_selection`、`toggle.unwrap`、`toggle.toggle_collapsed`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
+- Command IDs（示例）：`core.insert_divider`、`image.insert`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`toggle.wrap_selection`、`toggle.unwrap`、`toggle.toggle_collapsed`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
 - Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`block.indent_level`、`blockquote.is_active`、`toggle.is_active`、`toggle.is_collapsed`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
 - Transaction Transform IDs（示例）：`autoformat.on_space`
 - 代码位置：`crates/plate-core/src/plugin.rs`
@@ -324,6 +324,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Iteration 12（Indent）已实现：IndentPlugin（block.indent_* + normalize + query）+ list_level/outdent 支持 + toolbar Indent。
 - Iteration 13（Toggle）已实现：TogglePlugin（schema + normalize + commands + query）+ view 折叠渲染 + chevron 命中测试 + toolbar Toggle/Collapse。
 - Iteration 14（Transaction Hooks + Autoformat）已实现：新增 `transaction_transforms` 扩展点（apply 前可预览/改写 tx）+ AutoformatPlugin（Markdown shortcuts）端到端闭环。
+- Iteration 15（Image Block Void）已实现：ImagePlugin（block void，attrs: `src/alt`）+ view 占位渲染 + toolbar “Insert image” dialog + 回删/删除移除 image block。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -846,6 +847,46 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - `[ ] ` / `[x] ` → todo（checked false/true）
   - **Undo/Redo**：转换动作可被 undo/redo 正确回滚。
   - **IME 安全**：中文输入法 composition（预编辑态）不应被 autoformat 打断（本阶段用单测覆盖 `ime:replace_and_mark_text` 不触发；实际中文 IME 可在 story 里手动验证）。
+
+### Iteration 15：Block Void（Image）端到端闭环
+
+> 目标：补齐富文本编辑器“媒体节点”的最小闭环：一个 **block-level void** 的 `image` 节点（schema + command + 渲染 + undo/redo + JSON round-trip），为后续图片上传/拖拽/resize 等上层能力打底。
+
+**要实现什么**
+- `gpui-plate-core`：
+  - ImagePlugin：
+    - `NodeSpec { kind: "image", role: Block, is_void: true }`
+    - attrs：`src: string`（必填），`alt: string`（可选）
+  - command：`image.insert({ src, alt? })`：
+    - 插入一个 `image` block（void）到当前 block 之后
+    - 自动插入一个空 paragraph 在 image 之后，并将 caret 移动到该 paragraph（保证插入后立刻可继续输入）
+- `gpui-manos-plate`（view）：
+  - 渲染：`image` 暂以占位卡片渲染（显示 “Image” + src/alt），后续可替换为真实图片渲染。
+  - 删除体验：`Backspace`/`Delete` 在相邻段落边界可移除 `image` block（与 divider 一致）。
+- `story`：
+  - Toolbar：新增 “Insert image” 按钮，弹窗输入 URL 后调用 `image.insert`。
+
+**怎么实现（关键做法）**
+- core：
+  - 复用 divider 的“block 后插入 void + paragraph”插入策略，确保 selection 始终落在 text block 上（避免 view 层需要处理“选区落在 void block 内”的复杂语义）。
+- view：
+  - 在 block renderer 中新增 `Node::Void(kind == "image")` 分支渲染占位卡片。
+  - 在 `Backspace/Delete` 的“边界移除 divider”逻辑中同样覆盖 `image`。
+- story：
+  - 复用 link 的 dialog/input 模式：只负责获取 src 并触发 command，不直接触碰树结构。
+
+**要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
+- 手动验收清单（Iteration 15 通过标准）：
+  - **插入**：点击 toolbar 的 Image → 输入一个 URL → OK：
+    - 编辑区出现 image 占位块（可看到 URL/alt 文本）。
+    - 光标自动落到 image 下方的新段落，可继续输入。
+  - **删除**：
+    - 光标在 image 下方段落行首按 Backspace → image 被删除。
+    - 光标在 image 上方段落行尾按 Delete → image 被删除。
+  - **Undo/Redo**：插入/删除 image 都可被 undo/redo 正确回滚。
+  - **JSON round-trip**：Save As → Open 后 image 节点仍存在且 attrs（src/alt）不丢。
 
 ## 9. 风险与对策
 

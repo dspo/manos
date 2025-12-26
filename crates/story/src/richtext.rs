@@ -24,6 +24,7 @@ pub struct RichTextExample {
     editor: Entity<RichTextState>,
     file_path: Option<PathBuf>,
     link_input: Entity<InputState>,
+    image_input: Entity<InputState>,
 }
 
 impl RichTextExample {
@@ -42,11 +43,18 @@ impl RichTextExample {
             state
         });
 
+        let image_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("https://example.com/image.png", window, cx);
+            state
+        });
+
         Self {
             app_menu_bar,
             editor,
             file_path: None,
             link_input,
+            image_input,
         }
     }
 
@@ -84,6 +92,37 @@ impl RichTextExample {
                             editor.command_set_link(url, cx);
                         }
                     });
+                    let handle = editor.read(cx).focus_handle();
+                    window.focus(&handle);
+                    true
+                })
+        });
+    }
+
+    fn open_image_dialog(&self, initial: String, window: &mut Window, cx: &mut Context<Self>) {
+        let image_input = self.image_input.clone();
+        let editor = self.editor.clone();
+
+        image_input.update(cx, |state, cx| {
+            state.set_value(initial, window, cx);
+        });
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let image_input = image_input.clone();
+            let editor = editor.clone();
+            let handle = image_input.focus_handle(cx);
+            window.focus(&handle);
+            dialog
+                .title("Insert Image")
+                .w(px(520.))
+                .child(div().p(px(12.)).child(Input::new(&image_input).w_full()))
+                .on_ok(move |_, window, cx| {
+                    let src = image_input.read(cx).value().trim().to_string();
+                    if !src.is_empty() {
+                        editor.update(cx, |editor, cx| {
+                            editor.command_insert_image(src, None, cx);
+                        });
+                    }
                     let handle = editor.read(cx).focus_handle();
                     window.focus(&handle);
                     true
@@ -307,6 +346,13 @@ impl Render for RichTextExample {
                                     .update(cx, |ed, cx| ed.command_insert_divider(cx));
                                 let handle = this.editor.read(cx).focus_handle();
                                 window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("image", PlateIconName::Image)
+                            .tooltip("Insert image")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_image_dialog(String::new(), window, cx);
                             })),
                     )
                     .child(

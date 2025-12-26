@@ -165,6 +165,7 @@ impl PluginRegistry {
             Box::new(ListPlugin),
             Box::new(TablePlugin),
             Box::new(MentionPlugin),
+            Box::new(ImagePlugin),
         ];
         Self::new(plugins).expect("richtext registry must be valid")
     }
@@ -1993,6 +1994,53 @@ impl PlatePlugin for MentionPlugin {
                     .and_then(|tx| {
                         editor.apply(tx).map_err(|e| {
                             CommandError::new(format!("Failed to insert mention: {e:?}"))
+                        })
+                    })
+            }),
+        }]
+    }
+}
+
+struct ImagePlugin;
+
+impl PlatePlugin for ImagePlugin {
+    fn id(&self) -> &'static str {
+        "image"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "image".to_string(),
+            role: NodeRole::Block,
+            is_void: true,
+            children: ChildConstraint::None,
+        }]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![CommandSpec {
+            id: "image.insert".to_string(),
+            label: "Insert image".to_string(),
+            handler: std::sync::Arc::new(|editor, args| {
+                let src = args
+                    .as_ref()
+                    .and_then(|v| v.get("src"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| CommandError::new("Missing args.src"))?
+                    .to_string();
+                let alt = args
+                    .as_ref()
+                    .and_then(|v| v.get("alt"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                insert_image(editor, src, alt)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to insert image: {e:?}"))
                         })
                     })
             }),
@@ -4444,6 +4492,51 @@ fn insert_mention(editor: &crate::core::Editor, label: String) -> Result<Transac
     Ok(Transaction::new(ops)
         .selection_after(selection_after)
         .source("command:mention.insert"))
+}
+
+fn insert_image(
+    editor: &crate::core::Editor,
+    src: String,
+    alt: Option<String>,
+) -> Result<Transaction, String> {
+    let focus = editor.selection().focus.clone();
+    let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
+
+    let (parent_path, insert_at) = if block_path.is_empty() {
+        (Vec::new(), editor.doc().children.len())
+    } else {
+        let (block_ix, parent) = block_path.split_last().unwrap();
+        (parent.to_vec(), block_ix + 1)
+    };
+
+    let image_path = {
+        let mut path = parent_path.clone();
+        path.push(insert_at);
+        path
+    };
+    let paragraph_element_path = {
+        let mut path = parent_path.clone();
+        path.push(insert_at + 1);
+        path
+    };
+    let paragraph_text_path = {
+        let mut path = paragraph_element_path.clone();
+        path.push(0);
+        path
+    };
+
+    Ok(Transaction::new(vec![
+        Op::InsertNode {
+            path: image_path,
+            node: Node::image(src, alt),
+        },
+        Op::InsertNode {
+            path: paragraph_element_path.clone(),
+            node: Node::paragraph(""),
+        },
+    ])
+    .selection_after(Selection::collapsed(Point::new(paragraph_text_path, 0)))
+    .source("command:image.insert"))
 }
 
 fn apply_mark_range(

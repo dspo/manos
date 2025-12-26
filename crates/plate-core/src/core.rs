@@ -45,6 +45,18 @@ impl Node {
             attrs: Attrs::default(),
         })
     }
+
+    pub fn image(src: impl Into<String>, alt: Option<String>) -> Self {
+        let mut attrs = Attrs::default();
+        attrs.insert("src".to_string(), Value::String(src.into()));
+        if let Some(alt) = alt.filter(|alt| !alt.is_empty()) {
+            attrs.insert("alt".to_string(), Value::String(alt));
+        }
+        Node::Void(VoidNode {
+            kind: "image".to_string(),
+            attrs,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

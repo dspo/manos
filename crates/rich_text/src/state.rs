@@ -1594,13 +1594,19 @@ impl RichTextState {
 
                     if matches!(
                         node_at_path(self.editor.doc(), &prev_path),
-                        Some(Node::Void(v)) if v.kind == "divider"
+                        Some(Node::Void(v)) if v.kind == "divider" || v.kind == "image"
                     ) {
+                        let source = match node_at_path(self.editor.doc(), &prev_path) {
+                            Some(Node::Void(v)) if v.kind == "image" => {
+                                "key:backspace:remove_image"
+                            }
+                            _ => "key:backspace:remove_divider",
+                        };
                         self.push_tx(
                             gpui_plate_core::Transaction::new(vec![
                                 gpui_plate_core::Op::RemoveNode { path: prev_path },
                             ])
-                            .source("key:backspace:remove_divider"),
+                            .source(source),
                             cx,
                         );
                         return;
@@ -1656,13 +1662,17 @@ impl RichTextState {
 
                 if matches!(
                     node_at_path(self.editor.doc(), &next_path),
-                    Some(Node::Void(v)) if v.kind == "divider"
+                    Some(Node::Void(v)) if v.kind == "divider" || v.kind == "image"
                 ) {
+                    let source = match node_at_path(self.editor.doc(), &next_path) {
+                        Some(Node::Void(v)) if v.kind == "image" => "key:delete:remove_image",
+                        _ => "key:delete:remove_divider",
+                    };
                     self.push_tx(
                         gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode {
                             path: next_path,
                         }])
-                        .source("key:delete:remove_divider"),
+                        .source(source),
                         cx,
                     );
                     return;
@@ -2041,6 +2051,21 @@ impl RichTextState {
 
     pub fn command_insert_divider(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("core.insert_divider", None, cx);
+    }
+
+    pub fn command_insert_image(
+        &mut self,
+        src: String,
+        alt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.delete_selection_if_any(cx);
+        let args = if let Some(alt) = alt {
+            serde_json::json!({ "src": src, "alt": alt })
+        } else {
+            serde_json::json!({ "src": src })
+        };
+        _ = self.run_command_and_refresh("image.insert", Some(args), cx);
     }
 
     pub fn command_insert_mention(&mut self, label: String, cx: &mut Context<Self>) {
@@ -3782,6 +3807,40 @@ impl Render for RichTextState {
                         .rounded(theme.radius / 2.)
                         .p(px(6.))
                         .child(div().flex_col().gap(px(6.)).children(rows))
+                        .into_any_element()
+                }
+                Node::Void(v) if v.kind == "image" => {
+                    let src = v.attrs.get("src").and_then(|v| v.as_str()).unwrap_or("");
+                    let alt = v.attrs.get("alt").and_then(|v| v.as_str()).unwrap_or("");
+                    let caption = if alt.is_empty() {
+                        src.to_string()
+                    } else {
+                        format!("{alt} · {src}")
+                    };
+
+                    div()
+                        .border_1()
+                        .border_color(theme.border)
+                        .rounded(theme.radius / 2.)
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h(px(140.))
+                                .w_full()
+                                .bg(theme.muted)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(theme.muted_foreground)
+                                .child("Image"),
+                        )
+                        .child(
+                            div()
+                                .p(px(8.))
+                                .text_color(theme.muted_foreground)
+                                .text_size(px(12.))
+                                .child(caption),
+                        )
                         .into_any_element()
                 }
                 Node::Void(v) if v.kind == "divider" => div()
