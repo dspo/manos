@@ -304,8 +304,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
 
 内置命令与查询（便于工具层/插件协作）：
-- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
-- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`block.indent_level`、`blockquote.is_active`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
+- Command IDs（示例）：`core.insert_divider`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`blockquote.wrap_selection`、`blockquote.unwrap`、`toggle.wrap_selection`、`toggle.unwrap`、`toggle.toggle_collapsed`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_below`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`
+- Query IDs（示例）：`marks.get_active`、`marks.is_bold_active`、`marks.is_italic_active`、`marks.is_underline_active`、`marks.is_strikethrough_active`、`marks.is_code_active`、`marks.has_link_active`、`block.heading_level`、`block.indent_level`、`blockquote.is_active`、`toggle.is_active`、`toggle.is_collapsed`、`todo.is_active`、`todo.is_checked`、`list.active_type`、`list.is_active`（参数：`{ "type": "bulleted" | "ordered" }`）、`table.is_active`
 - 代码位置：`crates/plate-core/src/plugin.rs`
 
 ### 当前进度（阶段性）
@@ -321,6 +321,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Iteration 10（容器型 Block + Blockquote）已实现：BlockquotePlugin（schema + normalize + commands + query）+ view 递归渲染（包含 table cell 内嵌容器）+ toolbar Quote。
 - Iteration 11（Todo/Task）已实现：TodoPlugin（schema + normalize + commands + query）+ checkbox 前缀可点击（command → tx → undo）+ toolbar Todo。
 - Iteration 12（Indent）已实现：IndentPlugin（block.indent_* + normalize + query）+ list_level/outdent 支持 + toolbar Indent。
+- Iteration 13（Toggle）已实现：TogglePlugin（schema + normalize + commands + query）+ view 折叠渲染 + chevron 命中测试 + toolbar Toggle/Collapse。
 
 ### Iteration 1：新内核最小闭环（树模型 + ops + normalize + JSON + 渲染）
 
@@ -755,7 +756,51 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - **Indent 按钮**：Indent/Outdent 可对 paragraph/heading/todo_item 生效；多段选区时整段一起缩进/反缩进。
   - **List level**：对 list_item 点击 Indent 会增加层级缩进（marker 跟随右移）；Outdent 会减少层级；空 list_item 回车/Backspace 触发 `list.unwrap` 时若有层级会先 outdent。
   - **Todo + indent**：todo 行缩进会同时移动 checkbox 与文本；回车拆分出的新 todo 行继承 indent 但默认 unchecked。
-  - **JSON round-trip**：Save As → Open 后 `indent/list_level` 仍然生效（渲染一致）。
+- **JSON round-trip**：Save As → Open 后 `indent/list_level` 仍然生效（渲染一致）。
+
+### Iteration 13：Toggle（可折叠容器 Block）
+
+> 目标：实现 Toggle（可折叠容器）节点，验证“容器节点 + attrs 折叠渲染 + 可交互前缀命中测试 + selection/undo 语义”的完整闭环。
+
+**要实现什么**
+- `gpui-plate-core`：
+  - `TogglePlugin`：
+    - schema：`toggle` 为 block container（`BlockOnly` children）。
+    - attrs：`collapsed: bool`。
+    - normalize：
+      - 补齐/纠正 `collapsed`（默认 `false`）。
+      - 保证 `toggle` 至少有一个 title child；若为空或首 child 不是 `paragraph/heading`，插入 `paragraph("")` 作为 title。
+    - commands：`toggle.wrap_selection`、`toggle.unwrap`、`toggle.toggle_collapsed`（支持 args：`{ "path": [...] }` 直接定位目标 toggle）。
+    - queries：`toggle.is_active`、`toggle.is_collapsed`。
+  - selection 语义：当折叠导致 selection 落在隐藏内容（children[1..]）时，将 anchor/focus 迁移到 title 末尾（避免 view 出现“光标在不可见区域”）。
+- `gpui-manos-plate`（view）：
+  - 渲染：
+    - title 行：chevron 前缀 + title text block（heading 样式与 indent 正常生效）。
+    - collapsed 时隐藏 children[1..]（仅渲染 title）。
+  - hit-test：点击 title 行左侧 chevron 区域触发 `toggle.toggle_collapsed({path})`，并阻止进入拖拽选区模式。
+  - 视图层 text block order：`text_block_paths` 跳过折叠 toggle 的隐藏内容，保证键盘导航/多段选择不会进入不可见 blocks。
+- `story`：
+  - Toolbar：新增 Toggle（wrap/unwrap）与 Collapse/Expand 按钮，只走 command/query。
+
+**怎么实现（关键做法）**
+- core：
+  - wrap/unwrap 复用 blockquote 的“同 parent 范围选区包装/拆包 + selection remap”思路。
+  - 折叠命令在 core 内完成 selection 修正（迁移到 title 末尾），避免把“可见性”耦合进 EditorView。
+- view：
+  - chevron 命中测试复用 todo checkbox 的方式：基于 `layout_cache` 的 text bounds，使用 `bounds.left() - 常量宽度` 推导前缀区域。
+  - 折叠只影响渲染与可见 block order，不修改文档结构；undo/redo 通过 command→tx 自动覆盖。
+
+**要验收什么**
+- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 单测：`cargo test -p gpui-plate-core`
+- 手动验收清单（Iteration 13 通过标准）：
+  - **Wrap/Unwrap**：选中多段（至少 2 行）后点 Toggle，将选区 blocks 包进一个 toggle；再点 Toggle 还原（selection 不乱跳）。
+  - **折叠/展开**：点击 title 左侧 chevron 或 toolbar 的 Collapse/Expand：
+    - 折叠后只显示 title；展开后恢复显示内容。
+    - 若折叠时光标在内容区，折叠后光标自动移动到 title 末尾（可见且可继续输入）。
+  - **键盘导航**：折叠状态下用上下方向键移动光标，不会落入 toggle 的隐藏内容。
+  - **Undo/Redo**：折叠/展开、wrap/unwrap 都可被 undo/redo 正确回滚。
+  - **JSON round-trip**：Save As → Open 后 `toggle` 的 children 结构与 `collapsed` 状态保持一致（未启用插件也不丢数据）。
 
 ## 9. 风险与对策
 

@@ -163,7 +163,19 @@ fn text_block_paths(doc: &Document, registry: &PluginRegistry) -> Vec<Vec<usize>
             if is_text_block_kind(registry, &el.kind) {
                 out.push(path.clone());
             } else {
-                walk(&el.children, path, out, registry);
+                if el.kind == "toggle"
+                    && el
+                        .attrs
+                        .get("collapsed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                {
+                    if let Some(first) = el.children.first() {
+                        walk(std::slice::from_ref(first), path, out, registry);
+                    }
+                } else {
+                    walk(&el.children, path, out, registry);
+                }
             }
 
             path.pop();
@@ -2054,6 +2066,18 @@ impl RichTextState {
         }
     }
 
+    pub fn command_toggle_toggle(&mut self, cx: &mut Context<Self>) {
+        if self.is_toggle_active() {
+            _ = self.run_command_and_refresh("toggle.unwrap", None, cx);
+        } else {
+            _ = self.run_command_and_refresh("toggle.wrap_selection", None, cx);
+        }
+    }
+
+    pub fn command_toggle_collapsed(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("toggle.toggle_collapsed", None, cx);
+    }
+
     pub fn command_toggle_todo(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("todo.toggle", None, cx);
     }
@@ -2255,6 +2279,18 @@ impl RichTextState {
     pub fn is_blockquote_active(&self) -> bool {
         self.editor
             .run_query::<bool>("blockquote.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn is_toggle_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("toggle.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn is_toggle_collapsed(&self) -> bool {
+        self.editor
+            .run_query::<bool>("toggle.is_collapsed", None)
             .unwrap_or(false)
     }
 
@@ -3136,6 +3172,66 @@ impl Element for RichTextInputHandlerElement {
                     return;
                 }
 
+                // Clicking the toggle chevron toggles the collapsed state without entering
+                // "drag selecting" mode.
+                if event.click_count == 1 && !event.modifiers.shift && !event.modifiers.secondary()
+                {
+                    let toggle_path: Option<Vec<usize>> = (|| {
+                        let this = state.read(cx);
+                        let block_path = this.text_block_path_for_point(event.position)?;
+                        let (child_ix, toggle_path) = block_path.split_last()?;
+                        if *child_ix != 0 {
+                            return None;
+                        }
+                        let toggle_path = toggle_path.to_vec();
+                        let toggle_el = element_at_path(this.editor.doc(), &toggle_path)?;
+                        if toggle_el.kind != "toggle" {
+                            return None;
+                        }
+
+                        let cache = this.layout_cache.get(&block_path)?;
+                        let y_ok = event.position.y >= cache.bounds.top()
+                            && event.position.y <= cache.bounds.bottom();
+                        if !y_ok {
+                            return None;
+                        }
+
+                        let chevron_left = cache.bounds.left() - px(26.);
+                        let chevron_right = cache.bounds.left() - px(2.);
+                        let x_ok =
+                            event.position.x >= chevron_left && event.position.x <= chevron_right;
+                        x_ok.then_some(toggle_path)
+                    })();
+
+                    if let Some(toggle_path) = toggle_path {
+                        let focus_handle = { state.read(cx).focus_handle.clone() };
+                        window.focus(&focus_handle);
+
+                        state.update(cx, |this, cx| {
+                            let mut title_path = toggle_path.clone();
+                            title_path.push(0);
+                            let focus =
+                                this.point_for_block_offset(&title_path, 0)
+                                    .unwrap_or_else(|| {
+                                        let mut path = title_path.clone();
+                                        path.push(0);
+                                        CorePoint::new(path, 0)
+                                    });
+                            this.set_selection_points(focus.clone(), focus, cx);
+                            this.selecting = false;
+                            this.selection_anchor = None;
+
+                            let args = serde_json::json!({ "path": toggle_path });
+                            _ = this.run_command_and_refresh(
+                                "toggle.toggle_collapsed",
+                                Some(args),
+                                cx,
+                            );
+                        });
+                        return;
+                    }
+                }
+
                 // Clicking the todo checkbox toggles the checked state without entering
                 // "drag selecting" mode.
                 if event.click_count == 1 && !event.modifiers.shift && !event.modifiers.secondary()
@@ -3473,6 +3569,117 @@ impl Render for RichTextState {
                 .into_any_element()
         }
 
+        fn render_toggle(
+            el: &ElementNode,
+            path: Vec<usize>,
+            window: &mut Window,
+            theme: &gpui_component::Theme,
+            state: &Entity<RichTextState>,
+            registry: &PluginRegistry,
+        ) -> AnyElement {
+            let collapsed = el
+                .attrs
+                .get("collapsed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let Some(Node::Element(title_el)) = el.children.first() else {
+                return div()
+                    .text_color(theme.muted_foreground)
+                    .italic()
+                    .child(format!("<invalid toggle at {:?}>", path))
+                    .into_any_element();
+            };
+
+            let mut title_path = path.clone();
+            title_path.push(0);
+
+            let mut line = RichTextLineElement::new(state.clone(), title_path);
+            if title_el.kind == "heading" {
+                let level = title_el
+                    .attrs
+                    .get("level")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .clamp(1, 6);
+                let mut style = window.text_style();
+                let size = match level {
+                    1 => 28.0,
+                    2 => 22.0,
+                    3 => 18.0,
+                    4 => 16.0,
+                    5 => 14.0,
+                    _ => 13.0,
+                };
+                style.font_size = px(size).into();
+                style.line_height = px(size * 1.25).into();
+                style.font_weight = FontWeight::SEMIBOLD;
+                line = line.with_base_text_style(style);
+            }
+
+            let indent_level = title_el
+                .attrs
+                .get("indent")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let chevron = if collapsed { "▸" } else { "▾" };
+
+            let title_row = div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.))
+                .when(indent_level > 0, |this| {
+                    this.pl(px(16. * indent_level as f32))
+                })
+                .child(
+                    div()
+                        .w(px(18.))
+                        .h(px(18.))
+                        .mt(px(2.))
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child(chevron),
+                )
+                .child(div().flex_1().min_w(px(0.)).child(line))
+                .into_any_element();
+
+            if collapsed {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(title_row)
+                    .into_any_element();
+            }
+
+            let mut content: Vec<AnyElement> = Vec::new();
+            for (ix, child) in el.children.iter().enumerate().skip(1) {
+                let mut child_path = path.clone();
+                child_path.push(ix);
+                content.push(render_block(
+                    child, child_path, window, theme, state, registry,
+                ));
+            }
+
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(title_row)
+                .when(!content.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .pl(px(26.))
+                            .child(div().flex_col().gap(px(6.)).children(content)),
+                    )
+                })
+                .into_any_element()
+        }
+
         fn render_block(
             node: &Node,
             path: Vec<usize>,
@@ -3490,6 +3697,9 @@ impl Render for RichTextState {
                 }
                 Node::Element(el) if is_text_block_kind(registry, &el.kind) => {
                     render_text_block(el, path, window, state)
+                }
+                Node::Element(el) if el.kind == "toggle" => {
+                    render_toggle(el, path, window, theme, state, registry)
                 }
                 Node::Element(el) if el.kind == "blockquote" => {
                     let mut children: Vec<AnyElement> = Vec::new();

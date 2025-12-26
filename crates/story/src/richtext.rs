@@ -202,6 +202,8 @@ impl Render for RichTextExample {
             table_active,
             heading_level,
             quote,
+            toggle,
+            toggle_collapsed,
             todo,
             indent_level,
         ) = {
@@ -215,6 +217,8 @@ impl Render for RichTextExample {
                 editor.is_table_active(),
                 editor.heading_level(),
                 editor.is_blockquote_active(),
+                editor.is_toggle_active(),
+                editor.is_toggle_collapsed(),
                 editor.is_todo_active(),
                 editor.indent_level(),
             )
@@ -641,6 +645,33 @@ impl Render for RichTextExample {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.editor
                                     .update(cx, |ed, cx| ed.command_toggle_blockquote(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("toggle", PlateIconName::ListCollapse)
+                            .selected(toggle)
+                            .tooltip("Toggle (wrap/unwrap)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_toggle_toggle(cx));
+                                let handle = this.editor.read(cx).focus_handle();
+                                window.focus(&handle);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("toggle-collapse", PlateIconName::ChevronDown)
+                            .disabled(!toggle)
+                            .selected(toggle_collapsed)
+                            .tooltip(if toggle_collapsed {
+                                "Expand"
+                            } else {
+                                "Collapse"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.editor
+                                    .update(cx, |ed, cx| ed.command_toggle_collapsed(cx));
                                 let handle = this.editor.read(cx).focus_handle();
                                 window.focus(&handle);
                             })),

@@ -143,6 +143,7 @@ impl PluginRegistry {
             Box::new(MarksCommandsPlugin),
             Box::new(HeadingPlugin),
             Box::new(BlockquotePlugin),
+            Box::new(TogglePlugin),
             Box::new(TodoPlugin),
             Box::new(IndentPlugin),
             Box::new(ListPlugin),
@@ -1090,6 +1091,190 @@ impl NormalizePass for NormalizeBlockquoteChildren {
                         path,
                         node: Node::paragraph(""),
                     });
+                }
+            }
+
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                let spec_children = registry
+                    .node_specs
+                    .get(&el.kind)
+                    .map(|s| s.children.clone())
+                    .unwrap_or(ChildConstraint::Any);
+                if spec_children == ChildConstraint::InlineOnly || el.children.is_empty() {
+                    continue;
+                }
+
+                parent_path.push(ix);
+                normalize_container(&el.children, parent_path, registry, ops);
+                parent_path.pop();
+            }
+        }
+
+        normalize_container(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
+struct TogglePlugin;
+
+impl PlatePlugin for TogglePlugin {
+    fn id(&self) -> &'static str {
+        "toggle"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "toggle".to_string(),
+            role: NodeRole::Block,
+            is_void: false,
+            children: ChildConstraint::BlockOnly,
+        }]
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeToggleStructure)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec {
+                id: "toggle.wrap_selection".to_string(),
+                label: "Wrap selection in toggle".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    wrap_selection_in_toggle(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to wrap toggle: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "toggle.unwrap".to_string(),
+                label: "Unwrap toggle".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    unwrap_nearest_toggle(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to unwrap toggle: {e:?}"))
+                            })
+                        })
+                }),
+            },
+            CommandSpec {
+                id: "toggle.toggle_collapsed".to_string(),
+                label: "Toggle collapsed".to_string(),
+                handler: std::sync::Arc::new(|editor, args| {
+                    toggle_toggle_collapsed(editor, args.as_ref())
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to toggle collapsed: {e:?}"))
+                            })
+                        })
+                }),
+            },
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![
+            QuerySpec {
+                id: "toggle.is_active".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| Ok(Value::Bool(is_in_toggle(editor)))),
+            },
+            QuerySpec {
+                id: "toggle.is_collapsed".to_string(),
+                handler: std::sync::Arc::new(|editor, _args| {
+                    Ok(Value::Bool(active_toggle_collapsed(editor)))
+                }),
+            },
+        ]
+    }
+}
+
+struct NormalizeToggleStructure;
+
+impl NormalizePass for NormalizeToggleStructure {
+    fn id(&self) -> &'static str {
+        "toggle.normalize_structure"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_container(
+            children: &[Node],
+            parent_path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                if el.kind == "toggle" {
+                    let mut toggle_path = parent_path.clone();
+                    toggle_path.push(ix);
+
+                    if el
+                        .attrs
+                        .get("collapsed")
+                        .and_then(|v| v.as_bool())
+                        .is_none()
+                    {
+                        let mut set = Attrs::default();
+                        set.insert("collapsed".to_string(), Value::Bool(false));
+                        ops.push(Op::SetNodeAttrs {
+                            path: toggle_path.clone(),
+                            patch: crate::core::AttrPatch {
+                                set,
+                                remove: Vec::new(),
+                            },
+                        });
+                    }
+
+                    if el.children.is_empty() {
+                        let mut insert_path = toggle_path.clone();
+                        insert_path.push(0);
+                        ops.push(Op::InsertNode {
+                            path: insert_path,
+                            node: Node::paragraph(""),
+                        });
+                    } else {
+                        let title_ok = el
+                            .children
+                            .first()
+                            .and_then(|n| match n {
+                                Node::Element(el) => Some(el),
+                                Node::Text(_) | Node::Void(_) => None,
+                            })
+                            .is_some_and(|el| matches!(el.kind.as_str(), "paragraph" | "heading"));
+                        if !title_ok {
+                            let mut insert_path = toggle_path.clone();
+                            insert_path.push(0);
+                            ops.push(Op::InsertNode {
+                                path: insert_path,
+                                node: Node::paragraph(""),
+                            });
+                        }
+                    }
                 }
             }
 
@@ -2173,6 +2358,299 @@ fn unwrap_nearest_blockquote(editor: &mut crate::core::Editor) -> Result<Transac
     Ok(Transaction::new(ops)
         .selection_after(selection_after)
         .source("command:blockquote.unwrap"))
+}
+
+fn is_in_toggle(editor: &crate::core::Editor) -> bool {
+    nearest_toggle_path(editor.doc(), &editor.selection().focus.path).is_some()
+}
+
+fn active_toggle_collapsed(editor: &crate::core::Editor) -> bool {
+    let Some(toggle_path) = nearest_toggle_path(editor.doc(), &editor.selection().focus.path)
+    else {
+        return false;
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), &toggle_path) else {
+        return false;
+    };
+    if el.kind != "toggle" {
+        return false;
+    }
+    el.attrs
+        .get("collapsed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn nearest_toggle_path(doc: &Document, point_path: &[usize]) -> Option<Path> {
+    let mut path: Path = point_path.to_vec();
+    while !path.is_empty() {
+        if let Some(Node::Element(el)) = node_at_path(doc, &path) {
+            if el.kind == "toggle" {
+                return Some(path);
+            }
+        }
+        path.pop();
+    }
+    None
+}
+
+fn wrap_selection_in_toggle(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let (start, end) = ordered_selection_points(&sel);
+    let start_block_path = start
+        .path
+        .split_last()
+        .map(|(_, p)| p.to_vec())
+        .ok_or_else(|| "Selection start is not in a text block".to_string())?;
+    let end_block_path = end
+        .path
+        .split_last()
+        .map(|(_, p)| p.to_vec())
+        .ok_or_else(|| "Selection end is not in a text block".to_string())?;
+
+    let (start_ix, start_parent) = start_block_path
+        .split_last()
+        .ok_or_else(|| "Selection start is not a block node".to_string())?;
+    let (end_ix, end_parent) = end_block_path
+        .split_last()
+        .ok_or_else(|| "Selection end is not a block node".to_string())?;
+
+    if start_parent != end_parent {
+        return Err("Selection must be within a single block container".into());
+    }
+
+    let (start_ix, end_ix) = if start_ix <= end_ix {
+        (*start_ix, *end_ix)
+    } else {
+        (*end_ix, *start_ix)
+    };
+
+    let Some(parent_children) = children_at_path(editor.doc(), start_parent) else {
+        return Err("Selection parent is not a container".into());
+    };
+    if start_ix >= parent_children.len() || end_ix >= parent_children.len() {
+        return Err("Selection block range is out of bounds".into());
+    }
+
+    let selected: Vec<Node> = parent_children
+        .iter()
+        .cloned()
+        .take(end_ix + 1)
+        .skip(start_ix)
+        .collect();
+
+    let title_offset = selected
+        .first()
+        .and_then(|n| match n {
+            Node::Element(el) => Some(el.kind.as_str()),
+            _ => None,
+        })
+        .is_some_and(|kind| matches!(kind, "paragraph" | "heading"));
+
+    let mut children = Vec::new();
+    if !title_offset {
+        children.push(Node::paragraph(""));
+    }
+    children.extend(selected);
+    let title_shift = if title_offset { 0 } else { 1 };
+
+    let mut attrs = Attrs::default();
+    attrs.insert("collapsed".to_string(), Value::Bool(false));
+    let toggle = Node::Element(ElementNode {
+        kind: "toggle".to_string(),
+        attrs,
+        children,
+    });
+
+    let mut ops: Vec<Op> = Vec::new();
+    for ix in (start_ix..=end_ix).rev() {
+        let mut path = start_parent.to_vec();
+        path.push(ix);
+        ops.push(Op::RemoveNode { path });
+    }
+    let mut insert_path = start_parent.to_vec();
+    insert_path.push(start_ix);
+    ops.push(Op::InsertNode {
+        path: insert_path.clone(),
+        node: toggle,
+    });
+
+    let remap_point = |point: &Point| -> Point {
+        if !point.path.starts_with(start_parent) || point.path.len() < start_parent.len() + 2 {
+            return point.clone();
+        }
+        let block_ix = point.path[start_parent.len()];
+        if block_ix < start_ix || block_ix > end_ix {
+            return point.clone();
+        }
+        let mut new_path = start_parent.to_vec();
+        new_path.push(start_ix);
+        new_path.push(title_shift + (block_ix - start_ix));
+        new_path.extend_from_slice(&point.path[start_parent.len() + 1..]);
+        Point {
+            path: new_path,
+            offset: point.offset,
+        }
+    };
+
+    let selection_after = Selection {
+        anchor: remap_point(&sel.anchor),
+        focus: remap_point(&sel.focus),
+    };
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:toggle.wrap_selection"))
+}
+
+fn unwrap_nearest_toggle(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let Some(toggle_path) = nearest_toggle_path(editor.doc(), &sel.focus.path) else {
+        return Ok(Transaction::new(Vec::new()).source("command:toggle.unwrap"));
+    };
+    let (toggle_ix, parent_path) = toggle_path
+        .split_last()
+        .ok_or_else(|| "Invalid toggle path".to_string())?;
+    let toggle_ix = *toggle_ix;
+    let parent_path = parent_path.to_vec();
+    let Some(Node::Element(toggle_el)) = node_at_path(editor.doc(), &toggle_path).cloned() else {
+        return Err("Toggle node not found".into());
+    };
+    if toggle_el.kind != "toggle" {
+        return Ok(Transaction::new(Vec::new()).source("command:toggle.unwrap"));
+    }
+
+    let children = toggle_el.children;
+
+    let mut ops: Vec<Op> = Vec::new();
+    ops.push(Op::RemoveNode {
+        path: toggle_path.clone(),
+    });
+
+    for (i, node) in children.into_iter().enumerate() {
+        let mut path = parent_path.clone();
+        path.push(toggle_ix + i);
+        ops.push(Op::InsertNode { path, node });
+    }
+
+    let remap_point = |point: &Point| -> Point {
+        if point.path.len() < toggle_path.len() + 1 {
+            return point.clone();
+        }
+        if !point.path.starts_with(&toggle_path) {
+            return point.clone();
+        }
+        let inner_ix = point.path[toggle_path.len()];
+        let mut new_path = parent_path.clone();
+        new_path.push(toggle_ix + inner_ix);
+        new_path.extend_from_slice(&point.path[toggle_path.len() + 1..]);
+        Point {
+            path: new_path,
+            offset: point.offset,
+        }
+    };
+
+    let selection_after = Selection {
+        anchor: remap_point(&sel.anchor),
+        focus: remap_point(&sel.focus),
+    };
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:toggle.unwrap"))
+}
+
+fn toggle_toggle_collapsed(
+    editor: &mut crate::core::Editor,
+    args: Option<&Value>,
+) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let toggle_path = parse_path_arg(args)
+        .filter(|path| {
+            matches!(
+                node_at_path(editor.doc(), path),
+                Some(Node::Element(el)) if el.kind == "toggle"
+            )
+        })
+        .or_else(|| nearest_toggle_path(editor.doc(), &sel.focus.path));
+
+    let Some(toggle_path) = toggle_path else {
+        return Ok(Transaction::new(Vec::new()).source("command:toggle.toggle_collapsed"));
+    };
+
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), &toggle_path) else {
+        return Err("Toggle node not found".into());
+    };
+
+    let current = el
+        .attrs
+        .get("collapsed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let next = !current;
+
+    let mut set = Attrs::default();
+    set.insert("collapsed".to_string(), Value::Bool(next));
+
+    let mut selection_after = sel.clone();
+    if next {
+        let mut title_block_path = toggle_path.clone();
+        title_block_path.push(0);
+
+        let title_point = node_at_path(editor.doc(), &title_block_path)
+            .and_then(|node| match node {
+                Node::Element(el) => Some(el),
+                _ => None,
+            })
+            .map(|title_el| {
+                let global_len: usize = title_el
+                    .children
+                    .iter()
+                    .map(|n| match n {
+                        Node::Text(t) => t.text.len(),
+                        Node::Void(v) => v.inline_text_len(),
+                        Node::Element(_) => 0,
+                    })
+                    .sum();
+                point_for_global_offset(&title_block_path, &title_el.children, global_len)
+            })
+            .or_else(|| {
+                normalize_point_to_existing_text(
+                    editor.doc(),
+                    &Point::new(title_block_path.clone(), 0),
+                )
+            })
+            .unwrap_or_else(|| Point::new(title_block_path.clone(), 0));
+
+        let remap_point = |point: &Point| -> Point {
+            if point.path.len() < toggle_path.len() + 1 {
+                return point.clone();
+            }
+            if !point.path.starts_with(&toggle_path) {
+                return point.clone();
+            }
+            let child_ix = point.path[toggle_path.len()];
+            if child_ix == 0 {
+                return point.clone();
+            }
+            title_point.clone()
+        };
+
+        selection_after = Selection {
+            anchor: remap_point(&sel.anchor),
+            focus: remap_point(&sel.focus),
+        };
+    }
+
+    Ok(Transaction::new(vec![Op::SetNodeAttrs {
+        path: toggle_path,
+        patch: crate::core::AttrPatch {
+            set,
+            remove: Vec::new(),
+        },
+    }])
+    .selection_after(selection_after)
+    .source("command:toggle.toggle_collapsed"))
 }
 
 fn is_in_todo(editor: &crate::core::Editor) -> bool {
