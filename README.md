@@ -20,3 +20,4 @@ This repository is intended to host additional GPUI components about a Richtext 
 
 - DnD List design: `docs/dnd-list-component-design.md`
 - DnD Tree implementation notes: `docs/dnd-tree.md`
+- WebView module: `crates/webview/README.MD`

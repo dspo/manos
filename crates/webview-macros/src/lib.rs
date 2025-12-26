@@ -1,8 +1,233 @@
 //! gpui-manos-webview macros
 
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{parse_macro_input, Ident};
+use quote::{format_ident, quote};
+use syn::{
+    AttributeArgs, FnArg, Ident, ItemFn, Lit, Meta, NestedMeta, Pat, Path, ReturnType, Token, Type,
+    parse_macro_input,
+};
+
+#[proc_macro_attribute]
+pub fn command(attributes: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attributes as AttributeArgs);
+    let function = parse_macro_input!(item as ItemFn);
+
+    if function.sig.asyncness.is_some() {
+        return syn::Error::new_spanned(
+            function.sig.fn_token,
+            "async commands are not supported yet",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let mut root: Path = syn::parse_str("::gpui_manos_webview").expect("valid default root path");
+    let mut rename_all = "camelCase".to_string();
+
+    for arg in args {
+        let NestedMeta::Meta(meta) = arg else {
+            return syn::Error::new_spanned(arg, "unexpected attribute argument")
+                .to_compile_error()
+                .into();
+        };
+
+        match meta {
+            Meta::NameValue(nv) if nv.path.is_ident("rename_all") => {
+                let Lit::Str(value) = &nv.lit else {
+                    return syn::Error::new_spanned(
+                        &nv.lit,
+                        "expected a string literal (\"camelCase\" or \"snake_case\")",
+                    )
+                    .to_compile_error()
+                    .into();
+                };
+
+                let value = value.value();
+                match value.as_str() {
+                    "camelCase" | "snake_case" => rename_all = value,
+                    _ => {
+                        return syn::Error::new_spanned(
+                            &nv.lit,
+                            "expected \"camelCase\" or \"snake_case\"",
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                }
+            }
+            Meta::NameValue(nv) if nv.path.is_ident("root") => {
+                let Lit::Str(value) = &nv.lit else {
+                    return syn::Error::new_spanned(&nv.lit, "expected a string literal")
+                        .to_compile_error()
+                        .into();
+                };
+
+                let value = value.value();
+                let path = if value == "crate" {
+                    "crate".to_string()
+                } else {
+                    format!("::{value}")
+                };
+
+                root = match syn::parse_str::<Path>(&path) {
+                    Ok(path) => path,
+                    Err(err) => return err.to_compile_error().into(),
+                };
+            }
+            other => {
+                return syn::Error::new_spanned(
+                    other,
+                    "unsupported attribute argument (supported: root = \"...\", rename_all = \"...\")",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+
+    let command_fn = function.sig.ident.clone();
+    let wrapper_fn = format_ident!("__cmd__{}", command_fn);
+    let args_struct = format_ident!("__gpui_cmd_args__{}", command_fn);
+    let vis = &function.vis;
+
+    let mut arg_idents = Vec::new();
+    let mut arg_types = Vec::new();
+    for input in &function.sig.inputs {
+        match input {
+            FnArg::Receiver(receiver) => {
+                return syn::Error::new_spanned(receiver, "commands must be free functions")
+                    .to_compile_error()
+                    .into();
+            }
+            FnArg::Typed(pat_type) => match &*pat_type.pat {
+                Pat::Ident(pat_ident) => {
+                    arg_idents.push(pat_ident.ident.clone());
+                    arg_types.push((*pat_type.ty).clone());
+                }
+                other => {
+                    return syn::Error::new_spanned(
+                        other,
+                        "unsupported argument pattern (expected an identifier)",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            },
+        }
+    }
+
+    let serde_rename_all = rename_all;
+
+    let parse_args = if arg_idents.is_empty() {
+        quote!()
+    } else {
+        quote! {
+            #[allow(non_camel_case_types)]
+            #[derive(#root::serde::Deserialize)]
+            #[serde(rename_all = #serde_rename_all)]
+            struct #args_struct {
+                #( #arg_idents: #arg_types, )*
+            }
+
+            let __gpui_args: #args_struct = match #root::serde_json::from_slice(&__gpui_body) {
+                Ok(args) => args,
+                Err(err) => return #root::ipc::bad_request(err),
+            };
+
+            let #args_struct { #( #arg_idents, )* } = __gpui_args;
+        }
+    };
+
+    let call = if arg_idents.is_empty() {
+        quote!(#command_fn())
+    } else {
+        quote!(#command_fn(#(#arg_idents),*))
+    };
+
+    let respond = match &function.sig.output {
+        ReturnType::Type(_, ty) if is_result_type(ty) => quote! {
+            match #call {
+                Ok(output) => #root::ipc::ok_json(&output),
+                Err(err) => #root::ipc::internal_error(err.to_string()),
+            }
+        },
+        _ => quote! {
+            let output = #call;
+            #root::ipc::ok_json(&output)
+        },
+    };
+
+    let wrapper = quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        #vis fn #wrapper_fn(request: #root::http::Request<Vec<u8>>) -> #root::http::Response<Vec<u8>> {
+            use ::std::string::ToString as _;
+            let __gpui_body = request.into_body();
+            #parse_args
+            #respond
+        }
+    };
+
+    quote! {
+        #function
+        #wrapper
+    }
+    .into()
+}
+
+#[proc_macro]
+pub fn generate_handler(input: TokenStream) -> TokenStream {
+    let command_paths: syn::punctuated::Punctuated<Path, Token![,]> =
+        parse_macro_input!(input with syn::punctuated::Punctuated::parse_terminated);
+
+    let mut command_idents = Vec::new();
+    let mut wrapper_paths = Vec::new();
+
+    for command_path in command_paths {
+        let mut wrapper_path = command_path.clone();
+        let last = wrapper_path
+            .segments
+            .last_mut()
+            .expect("parsed command path has no segments");
+
+        let command_ident = last.ident.clone();
+        last.ident = format_ident!("__cmd__{}", command_ident);
+
+        command_idents.push(command_ident);
+        wrapper_paths.push(wrapper_path);
+    }
+
+    let arms =
+        command_idents
+            .iter()
+            .zip(wrapper_paths.iter())
+            .map(|(command_ident, wrapper_path)| {
+                quote! { stringify!(#command_ident) => Some(#wrapper_path(request)), }
+            });
+
+    quote! {
+        move |invoke| {
+            let command = invoke.command;
+            let request = invoke.request;
+            match command.as_str() {
+                #(#arms)*
+                _ => None,
+            }
+        }
+    }
+    .into()
+}
+
+fn is_result_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "Result")
+}
 
 /// Wraps a function with signature `Fn(http::Request<Vec<u8>> -> http::Response<Vec<u8>>)` into a tuple `(func_name, func)`.
 ///
@@ -146,22 +371,22 @@ pub fn command_handler(input: TokenStream) -> TokenStream {
                 use serde_json::{from_slice, to_vec, Value};
 
                 // Response builder
-                fn response_builder(status_code: StatusCode) -> http::response::Builder {
+                fn response_builder(status_code: StatusCode, tauri_response: &'static str) -> http::response::Builder {
                     http::Response::builder()
                         .status(status_code)
                         .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))
                         .header(http::header::ACCESS_CONTROL_EXPOSE_HEADERS, "Tauri-Response")
-                        .header("Tauri-Response", "ok")
+                        .header("Tauri-Response", tauri_response)
                 }
 
                 fn response_bad_request<S: ToString>(content: S) -> http::Result<http::Response<Vec<u8>>> {
-                    response_builder(StatusCode::BAD_REQUEST)
+                    response_builder(StatusCode::BAD_REQUEST, "error")
                         .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
                         .body(content.to_string().into_bytes())
                 }
 
                 fn response_internal_server_error<S: ToString>(content: S) -> http::Result<http::Response<Vec<u8>>> {
-                    response_builder(StatusCode::INTERNAL_SERVER_ERROR)
+                    response_builder(StatusCode::INTERNAL_SERVER_ERROR, "error")
                         .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
                         .body(content.to_string().into_bytes())
                 }
@@ -190,7 +415,7 @@ pub fn command_handler(input: TokenStream) -> TokenStream {
                             }
                         };
 
-                        response_builder(StatusCode::OK)
+                        response_builder(StatusCode::OK, "ok")
                             .header(
                                 CONTENT_TYPE,
                                 if from_slice::<Value>(&serialized).is_ok() {
@@ -303,22 +528,22 @@ pub fn command_handlers(input: TokenStream) -> TokenStream {
                     use std::string::ToString;
 
                     // Response builder
-                    fn response_builder(status_code: StatusCode) -> http::response::Builder {
+                    fn response_builder(status_code: StatusCode, tauri_response: &'static str) -> http::response::Builder {
                         http::Response::builder()
                             .status(status_code)
                             .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))
                             .header(http::header::ACCESS_CONTROL_EXPOSE_HEADERS, "Tauri-Response")
-                            .header("Tauri-Response", "ok")
+                            .header("Tauri-Response", tauri_response)
                     }
 
                     fn response_bad_request<S: ToString>(content: S) -> http::Result<http::Response<Vec<u8>>> {
-                        response_builder(StatusCode::BAD_REQUEST)
+                        response_builder(StatusCode::BAD_REQUEST, "error")
                             .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
                             .body(content.to_string().into_bytes())
                     }
 
                     fn response_internal_server_error<S: ToString>(content: S) -> http::Result<http::Response<Vec<u8>>> {
-                        response_builder(StatusCode::INTERNAL_SERVER_ERROR)
+                        response_builder(StatusCode::INTERNAL_SERVER_ERROR, "error")
                             .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
                             .body(content.to_string().into_bytes())
                     }
@@ -347,7 +572,7 @@ pub fn command_handlers(input: TokenStream) -> TokenStream {
                                 }
                             };
 
-                            response_builder(StatusCode::OK)
+                            response_builder(StatusCode::OK, "ok")
                                 .header(
                                     CONTENT_TYPE,
                                     if from_slice::<Value>(&serialized).is_ok() {

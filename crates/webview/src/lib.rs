@@ -1,21 +1,37 @@
 pub mod webview;
+pub use http;
+pub use serde;
+pub use serde_json;
 pub use wry;
 
 use http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE};
 use serde::Serialize;
 use serialize_to_javascript::{DefaultTemplate, Template, default_template};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use wry::{Error as WryError, Result, WebView, WebViewBuilder, WebViewId};
 
-pub use gpui_manos_webview_macros::{api_handler, command_handlers};
+pub use gpui_manos_webview_macros::{
+    api_handler, api_handlers, command, command_handler, command_handlers, generate_handler,
+};
 
 // todo: implement dev server
+
+pub struct Invoke {
+    pub command: String,
+    pub request: http::Request<Vec<u8>>,
+}
+
+pub type InvokeHandler =
+    Arc<dyn Fn(Invoke) -> Option<http::Response<Vec<u8>>> + Send + Sync + 'static>;
 
 pub struct Builder<'a> {
     builder: WebViewBuilder<'a>,
     webview_id: WebViewId<'a>,
+    invoke_handler: Option<InvokeHandler>,
     handlers: HashMap<
         String,
         Arc<dyn Fn(http::Request<Vec<u8>>) -> http::Response<Vec<u8>> + Send + Sync + 'static>,
@@ -27,6 +43,7 @@ impl<'a> Builder<'a> {
         Builder {
             builder: WebViewBuilder::new(),
             webview_id: WebViewId::default(),
+            invoke_handler: None,
             handlers: HashMap::new(),
         }
     }
@@ -44,13 +61,25 @@ impl<'a> Builder<'a> {
         self
     }
 
-    pub fn invoke_handler_single<F>(mut self, api: (String, F)) -> Self
+    /// Registers a single low-level HTTP handler (used by the `ipc://` custom protocol).
+    pub fn serve_api<F>(mut self, api: (String, F)) -> Self
     where
         F: Fn(http::Request<Vec<u8>>) -> http::Response<Vec<u8>> + Send + Sync + 'static,
     {
         let (name, f) = api;
         self.handlers.insert(name, Arc::new(f));
 
+        self
+    }
+
+    /// Registers an invoke handler, similar to Tauri's `Builder::invoke_handler`.
+    ///
+    /// Typically used with `gpui_manos_webview::generate_handler![...]`.
+    pub fn invoke_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Invoke) -> Option<http::Response<Vec<u8>>> + Send + Sync + 'static,
+    {
+        self.invoke_handler = Some(Arc::new(handler));
         self
     }
 
@@ -120,6 +149,7 @@ impl<'a> Builder<'a> {
 
     fn with_apis(self) -> Self {
         let handlers = self.handlers.clone();
+        let invoke_handler = self.invoke_handler.clone();
         self.apply(move |b| {
             b.with_asynchronous_custom_protocol(
                 "ipc".into(),
@@ -132,17 +162,113 @@ impl<'a> Builder<'a> {
                         request.uri().host(),
                         request.uri().path()
                     );
-                    if let Some(path) = request.uri().path().strip_prefix('/') {
-                        if let Some(handler) = handlers.get(path) {
-                            let response = handler(request);
+
+                    let raw_path = request.uri().path().to_string();
+                    let command = decode_uri_component(
+                        raw_path.strip_prefix('/').unwrap_or(raw_path.as_str()),
+                    );
+
+                    if let Some(ref handler) = invoke_handler {
+                        let invoke = Invoke { command, request };
+                        if let Some(response) = handler(invoke) {
                             responder.respond(response);
                             return;
                         }
+
+                        responder.respond(ipc::not_found(raw_path));
+                        return;
                     }
-                    responder.respond(response_not_found(request.uri().path()));
+
+                    if let Some(handler) = handlers.get(&command) {
+                        let response = handler(request);
+                        responder.respond(response);
+                        return;
+                    }
+
+                    responder.respond(ipc::not_found(raw_path));
                 },
             )
         })
+    }
+}
+
+fn decode_uri_component(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = from_hex(bytes[i + 1]);
+            let lo = from_hex(bytes[i + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub mod ipc {
+    use super::*;
+    use http::HeaderValue;
+
+    fn response_builder(
+        status_code: http::StatusCode,
+        tauri_response: &'static str,
+    ) -> http::response::Builder {
+        http::Response::builder()
+            .status(status_code)
+            .header(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"))
+            .header(
+                http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                "Tauri-Response",
+            )
+            .header("Tauri-Response", HeaderValue::from_static(tauri_response))
+    }
+
+    pub fn ok_json<T: serde::Serialize>(value: &T) -> http::Response<Vec<u8>> {
+        match serde_json::to_vec(value) {
+            Ok(body) => response_builder(http::StatusCode::OK, "ok")
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(body)
+                .unwrap(),
+            Err(err) => internal_error(err),
+        }
+    }
+
+    pub fn bad_request<S: ToString>(message: S) -> http::Response<Vec<u8>> {
+        response_builder(http::StatusCode::BAD_REQUEST, "error")
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+            .body(message.to_string().into_bytes())
+            .unwrap()
+    }
+
+    pub fn internal_error<S: ToString>(message: S) -> http::Response<Vec<u8>> {
+        response_builder(http::StatusCode::INTERNAL_SERVER_ERROR, "error")
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+            .body(message.to_string().into_bytes())
+            .unwrap()
+    }
+
+    pub fn not_found<S: ToString>(message: S) -> http::Response<Vec<u8>> {
+        response_builder(http::StatusCode::NOT_FOUND, "error")
+            .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
+            .body(format!("{} not found", message.to_string()).into_bytes())
+            .unwrap()
     }
 }
 
@@ -161,54 +287,38 @@ fn serve_static<S: ToString>(
         request.uri().host(),
         request.uri().path()
     );
-    // Read the file content from file path
-    let root = PathBuf::from(static_path.to_string());
-    let path = if path == "/" {
-        "index.html"
-    } else {
-        //  removing leading slash
-        &path[1..]
-    };
 
-    let content = match std::fs::canonicalize(root.join(path)) {
-        Ok(path) => match std::fs::read(path) {
-            Ok(content) => content,
-            Err(err) => {
-                println!("failed to read file: {err}");
-                return Ok(response_not_found(err)); // todo: change it to internal server error
-            }
-        },
+    let static_root = static_path.to_string();
+    let root = match fs::canonicalize(&static_root) {
+        Ok(root) => root,
         Err(err) => {
-            println!("failed to canonicalize path: {err}");
-            return Ok(response_not_found(path));
+            println!("failed to canonicalize static root `{static_root}`: {err}");
+            return Ok(response_internal_server_err("static root not accessible"));
         }
     };
 
-    // Return asset contents and mime types based on file extentions
-    // If you don't want to do this manually, there are some crates for you.
-    // Such as `infer` and `mime_guess`.
-    let mimetype = if path.ends_with(".html") || path == "/" {
-        "text/html"
-    } else if path.ends_with(".js") {
-        "text/javascript"
-    } else if path.ends_with(".png") {
-        "image/png"
-    } else if path.ends_with(".wasm") {
-        "application/wasm"
-    } else if path.ends_with(".css") {
-        "text/css"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        return Ok(response_not_implemented(path));
-    };
-
-    http::Response::builder()
-        .status(http::StatusCode::OK)
-        .header(CONTENT_TYPE, mimetype)
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(content)
-        .map_err(Into::into)
+    match resolve_static_asset(&root, path) {
+        Ok(asset) => response_asset(asset),
+        Err(StaticAssetError::NotFound(requested)) => {
+            println!("static asset not found: {}", requested.display());
+            Ok(response_not_found(requested.display()))
+        }
+        Err(StaticAssetError::OutsideRoot(requested)) => {
+            println!(
+                "attempt to read outside static root: {}",
+                requested.display()
+            );
+            Ok(response_forbidden(requested.display()))
+        }
+        Err(StaticAssetError::IsDirectory(requested)) => {
+            println!("requested path is a directory: {}", requested.display());
+            Ok(response_forbidden(requested.display()))
+        }
+        Err(StaticAssetError::Io(err)) => {
+            println!("failed to read static asset: {err}");
+            Ok(response_internal_server_err("failed to read static asset"))
+        }
+    }
 }
 
 fn response_not_found<S: ToString>(content: S) -> http::Response<Vec<u8>> {
@@ -220,20 +330,100 @@ fn response_not_found<S: ToString>(content: S) -> http::Response<Vec<u8>> {
         .unwrap()
 }
 
-fn response_not_implemented<S: ToString>(content: S) -> http::Response<Vec<u8>> {
-    http::Response::builder()
-        .status(http::StatusCode::NOT_IMPLEMENTED)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-        .body(format!("{} not implemented", content.to_string()).into_bytes())
-        .unwrap()
-}
-
 fn response_internal_server_err<S: ToString>(content: S) -> http::Response<Vec<u8>> {
     http::Response::builder()
         .status(http::StatusCode::INTERNAL_SERVER_ERROR)
         .header(CONTENT_TYPE, "text/plain")
         .body(content.to_string().as_bytes().to_vec())
+        .unwrap()
+}
+
+struct StaticAsset {
+    bytes: Vec<u8>,
+    mime: String,
+}
+
+enum StaticAssetError {
+    NotFound(PathBuf),
+    OutsideRoot(PathBuf),
+    IsDirectory(PathBuf),
+    Io(io::Error),
+}
+
+fn resolve_static_asset(
+    root: &Path,
+    uri_path: &str,
+) -> std::result::Result<StaticAsset, StaticAssetError> {
+    let relative = sanitize_path(uri_path)?;
+    let candidate = root.join(&relative);
+
+    let resolved = match fs::canonicalize(&candidate) {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(StaticAssetError::NotFound(relative));
+        }
+        Err(err) => return Err(StaticAssetError::Io(err)),
+    };
+
+    if !resolved.starts_with(root) {
+        return Err(StaticAssetError::OutsideRoot(relative));
+    }
+
+    if resolved.is_dir() {
+        return Err(StaticAssetError::IsDirectory(relative));
+    }
+
+    let bytes = fs::read(&resolved).map_err(StaticAssetError::Io)?;
+    let mime = mime_guess::from_path(&resolved)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+
+    Ok(StaticAsset { bytes, mime })
+}
+
+fn sanitize_path(path: &str) -> std::result::Result<PathBuf, StaticAssetError> {
+    let decoded = decode_uri_component(path);
+    let trimmed = decoded.trim_start_matches('/');
+    let fallback = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
+    let mut buf = PathBuf::new();
+
+    for component in Path::new(fallback).components() {
+        match component {
+            Component::Normal(part) => buf.push(part),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(StaticAssetError::OutsideRoot(PathBuf::from(fallback)));
+            }
+        }
+    }
+
+    if buf.as_os_str().is_empty() {
+        buf.push("index.html");
+    }
+
+    Ok(buf)
+}
+
+fn response_asset(asset: StaticAsset) -> http::Result<http::Response<Vec<u8>>> {
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(CONTENT_TYPE, asset.mime)
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(asset.bytes)
+        .map_err(Into::into)
+}
+
+fn response_forbidden<S: ToString>(content: S) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(http::StatusCode::FORBIDDEN)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(format!("{} is not accessible", content.to_string()).into_bytes())
         .unwrap()
 }
 
