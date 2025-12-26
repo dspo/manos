@@ -9,3 +9,4 @@ anyhow.workspace = true
 diffview = { path = "../diffview" }
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-manos-components = { path = "../extras" }
