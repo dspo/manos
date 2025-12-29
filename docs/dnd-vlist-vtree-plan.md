@@ -1,7 +1,9 @@
 # DnD Virtual List / Tree（dnd_vlist & dnd_vtree）实现计划
 
-> 目标：在现有 `gpui-dnd-list` / `gpui-dnd-tree`（基于 `gpui::uniform_list`）基础上，新增两套基于 `gpui-component::v_virtual_list` 的可拖拽重排组件：`gpui-dnd-vlist` 与 `gpui-dnd-vtree`。  
+> 目标：在现有 `DndList` / `DndTree`（基于 `gpui::uniform_list`）基础上，新增两套基于 `gpui-component::v_virtual_list` 的可拖拽重排组件：`DndVList` 与 `DndVTree`。  
 > 其中 `v` 表示 *virtual*（虚拟列表），核心差异是 **每一行/项支持自定义尺寸（高度）**，并保持长列表性能。
+>
+> 注：上述组件当前已合并在 `crates/dnd`（crate 名：`gpui-manos-dnd`）中。
 
 ---
 
@@ -77,20 +79,16 @@
 ## 5. 迭代计划（Milestones）
 
 ### Iteration 0：项目结构
-1. 新建 crates：
-   - `crates/dnd_vlist`（crate 名：`gpui-dnd-vlist`）
-   - `crates/dnd_vtree`（crate 名：`gpui-dnd-vtree`）
-2. 更新 workspace：
-   - `Cargo.toml` 的 `workspace.members`
-   - `workspace.dependencies` 增加两项 path 依赖
+1. 当前项目结构：所有 DnD 组件已合并为单一 crate：
+   - `crates/dnd`（crate 名：`gpui-manos-dnd`）
 
-### Iteration 1：实现 `gpui-dnd-vlist`
+### Iteration 1：实现 `DndVList`
 1. 复用 `dnd_list` 的 DnD/选择/禁用/回调结构
 2. 替换渲染为 `gpui_component::v_virtual_list`
 3. 引入 `DndVListItem::height/size` 并在重排时保持尺寸随 item 一起移动
 4. 增加基本单元测试（重排后顺序与尺寸一致）
 
-### Iteration 2：实现 `gpui-dnd-vtree`
+### Iteration 2：实现 `DndVTree`
 1. 复用 `dnd_tree` 的树结构与 drop preview 逻辑（gap+depth）
 2. 引入 `DndVTreeItem::row_height/size`
 3. 将拖拽命中与插入线 y 坐标改为使用前缀和（支持可变高度）
@@ -113,4 +111,3 @@
    - 插入线 y 坐标与视觉落点一致
    - 水平手势与深度推导逻辑保持一致
 4. 对外 API 风格与 `dnd_list/dnd_tree` 一致，便于迁移与复用。
-

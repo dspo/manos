@@ -4,8 +4,8 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, Sizable as _, h_flex, v_flex};
-use gpui_dnd_vtree::{
-    DndVTreeIndicatorCap, DndVTreeItem, DndVTreeRowState, DndVTreeState, dnd_vtree,
+use gpui_manos_dnd::{
+    DndVTreeEntry, DndVTreeIndicatorCap, DndVTreeItem, DndVTreeRowState, DndVTreeState, dnd_vtree,
 };
 
 pub struct DndVTreeExample {
@@ -201,7 +201,7 @@ impl Render for DndVTreeExample {
 
 fn render_tree_row(
     ix: usize,
-    entry: &gpui_dnd_vtree::DndVTreeEntry,
+    entry: &DndVTreeEntry,
     row_state: DndVTreeRowState,
     cx: &mut App,
 ) -> ListItem {

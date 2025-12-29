@@ -3,7 +3,7 @@ use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, IconName, Sizable as _, h_flex, v_flex};
-use gpui_dnd_list::{DndListItem, DndListRowState, DndListState, dnd_list};
+use gpui_manos_dnd::{DndListItem, DndListRowState, DndListState, dnd_list};
 
 pub struct DndListExample {
     list: Entity<DndListState<()>>,

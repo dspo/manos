@@ -1,5 +1,5 @@
 [package]
-name = "gpui-dnd-list"
+name = "gpui-manos-dnd"
 version = "0.1.0"
 publish = false
 edition.workspace = true
