@@ -4,6 +4,8 @@ members = [
     "crates/diffview",
     "crates/dnd_list",
     "crates/dnd_tree",
+    "crates/dnd_vlist",
+    "crates/dnd_vtree",
     "crates/extras",
     "crates/rich_text",
     "crates/story",
@@ -25,6 +27,8 @@ gpui-manos-components = { path = "crates/extras", version = "0.1.0" }
 gpui-manos-plate = { path = "crates/rich_text", version = "0.1.0" }
 gpui-dnd-list = { path = "crates/dnd_list", version = "0.1.0" }
 gpui-dnd-tree = { path = "crates/dnd_tree", version = "0.1.0" }
+gpui-dnd-vlist = { path = "crates/dnd_vlist", version = "0.1.0" }
+gpui-dnd-vtree = { path = "crates/dnd_vtree", version = "0.1.0" }
 gpui-manos-webview = { path = "crates/webview", version = "0.1.0" }
 gpui-manos-webview-macros = { path = "crates/webview-macros", version = "0.1.0" }
 http = { version = "1.3.1" }
