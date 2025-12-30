@@ -5741,6 +5741,11 @@ pub(crate) fn run(start_dir: PathBuf) {
         gpui_component::init(cx);
         init_keybindings(cx);
         cx.activate(true);
+        let _ = cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        });
 
         let loaded_fonts = fonts::try_load_user_fonts(cx);
         let applied_theme_fonts = fonts::select_theme_fonts_from_env(cx);
