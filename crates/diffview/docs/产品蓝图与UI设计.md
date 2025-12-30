@@ -12,15 +12,18 @@
 - 启动降级：启动时探测 `git` 是否可执行；缺失时提示并禁用仓库状态与 Git 操作（demo 仍可用）。
 - 文件列表：`git status --porcelain=v2 -z` 拉取；过滤 All/Conflicts/Staged/Unstaged/Untracked；点击文件进入 diff 或冲突视图。
 - 二方 diff：Split/Inline；Split 支持“对齐(单滚动)”与“分栏(真双/多 pane + 同步滚动)”两种布局；支持折叠上下文、展开全部、忽略空白、上一/下一 hunk。
+- Diff 内查找：Diff 工具条查找栏（`Cmd/Ctrl+Shift+F`），支持上一/下一匹配与行高亮。
+- Diff 工作区编辑器：Diff 页支持底部可拖拽面板，按文件类型语法高亮；支持应用预览/从磁盘重载/保存到文件并刷新 diff 与 git status（仅当对比目标包含工作区）。
 - 右侧标尺：diff hunk / 冲突块分布标记 + 点击跳转（基础版）。
 - 对比目标：支持 `HEAD↔工作区 / 暂存↔工作区 / HEAD↔暂存` 切换（为部分暂存/回滚语义服务）。
 - 任意 refs/历史对比：Diff 页“对比”Popover 内支持输入 `HEAD~1/a1b2c3/INDEX/:/WORKTREE` 等 refs；并提供“从历史选择 commit…”弹窗（`git log -- <path>`），可在 `parent→commit`（查看该提交引入的变更）与 `commit→工作区` 间切换。
 - Git 操作：文件级 stage/unstage；**当前 hunk** 级 stage/unstage/revert（基于 patch 生成 + `git apply`/`git apply --cached`）。
+- 文件级便捷操作：Changes 树与 Diff 工具条 More 菜单提供 Rollback（含 untracked 删除）、在文件管理器中显示、复制路径。
 - 冲突视图：解析 `<<<<<<< / ======= / >>>>>>>`（含 diff3 `|||||||`）；上一/下一冲突；逐块采纳 ours/theirs/base/保留两侧；底部“合并结果”编辑器（编辑后点击“应用”刷新冲突检测）；冲突清零后可保存到文件或保存并 `git add`；分栏布局下支持 Ours/Base/Theirs（Base 仅在 diff3 存在时显示）。
 - 小窗口适配：Diff/Conflict 工具条将“对比目标/视图&Git/保存操作”收纳到 Popover（`对比` / `更多`）；其它区域用 `flex-wrap` 兜底，避免按钮被挤出不可点。
-- 键盘快捷键（基础）：Esc 返回；Alt+N/P 导航；Alt+W 忽略空白；Alt+V 切换 Split/Inline；Alt+L 切换对齐/分栏；Cmd/Ctrl+S 保存冲突结果（冲突清零后）。
+- 键盘快捷键（基础）：Esc 返回；Alt+N/P 导航；Alt+W 忽略空白；Alt+V 切换 Split/Inline；Alt+L 切换对齐/分栏；Alt+A 应用编辑；Cmd/Ctrl+S 保存（冲突清零后保存冲突结果 / Diff 页保存工作区编辑器）。
 - CommandPalette：`Cmd/Ctrl+K` 或 `Cmd/Ctrl+Shift+P` 打开命令面板，支持搜索并执行常用命令（导航、切换视图/布局/空白、展开折叠、打开历史对比、冲突保存等）。
-- 性能与体验（基础版）：git/IO/diff 计算移到 `background_executor`；忽略空白/上下文改动采用 120ms 防抖 + 后台重算；虚拟列表 `item_sizes` 缓存减少大向量分配；提供 Large Diff Demo（`GIT_VIEWER_LARGE_DEMO_LINES`）用于 1-5 万行验收。
+- 性能与体验（基础版）：git/IO/diff 计算移到 `background_executor`；打开 diff 时双侧版本读取并行化；忽略空白/上下文改动采用 120ms 防抖 + 后台重算；虚拟列表 `item_sizes` 缓存减少大向量分配；**diff 结果 LRU 缓存（不绑定 Split/Inline）+ 邻近文件预取** 降低重复计算与切换等待；可选 `GIT_VIEWER_TIMING=1` 显示加载耗时；提供 Large Diff Demo（`GIT_VIEWER_LARGE_DEMO_LINES`）用于 1-5 万行验收。
 
 ## 信息架构与流程
 - 根布局：左侧文件面板 + 顶部工具条 + 主视图 + 右侧标尺/辅助（可折叠） + 底部状态栏。
