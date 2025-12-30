@@ -9,6 +9,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "0.22"
 gpui = "0.2.2"
 gpui-component = "0.4.0"
 gpui-manos-components = { path = "crates/extras", version = "0.1.0" }

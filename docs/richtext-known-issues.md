@@ -1,22 +1,8 @@
-# RichText：已知问题（Tracked Issues）
+# RichText：Known Issues / Deferred Work
 
-本文件用于记录 `richtext` 示例（`gpui-manos-plate` + `gpui-plate-core`）在当前阶段的已知问题，便于验收与后续迭代排期。
+本文件用于记录当前阶段**明确暂不处理**、但需要在未来补齐的事项（便于验收与迭代规划对齐）。
 
-运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+## Deferred
 
-相关文档：
-- [RichText：插件系统与未来架构计划（激进重构版）](richtext-plugin-system-plan.md)
-- [RichText Editor：扩展性与重构方向（面向未来）](richtext-extensibility.md)
+- **Mention 需要 “User” 概念**：完整的 mention 体验需要用户实体（至少 `id`/`display_name`/可能的 `avatar`）与可搜索/可选择的建议列表；在项目尚未引入 User 体系前，mention 相关能力只作为技术验证，不作为产品能力验收项。
 
-## 已知问题
-
-### 1) 双击选词：中文边界不理想
-
-- 现象：双击选词对中文（以及部分 CJK 混排）选择边界不符合预期。
-- 原因：当前使用简单的字符分类（word/whitespace/punct）做“近似选词”，未接入更完善的分词/字素簇规则。
-- 影响范围：仅影响双击选词体验；不影响键盘输入/IME/undo/redo/序列化。
-- 建议方向（后续迭代）：引入更合适的文本边界规则（例如字素簇/Unicode word boundary，必要时引入分词库作为可选特性）。
-
-## 交互提示
-
-- Link：`Cmd/Ctrl+Click` 打开 URL（普通点击仍用于移动光标/选择文本）。

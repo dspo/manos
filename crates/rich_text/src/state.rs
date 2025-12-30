@@ -1,16 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use base64::Engine as _;
 use gpui::actions;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::ActiveTheme as _;
+use gpui_component::{ActiveTheme as _, WindowExt as _, notification::Notification};
 use gpui_plate_core::{
     Attrs, ChildConstraint, Document, Editor, ElementNode, Marks, Node, NodeRole, PlateValue,
     PluginRegistry, Point as CorePoint, Selection, TextNode,
 };
+use serde::{Deserialize, Serialize};
 
-pub(super) const CONTEXT: &str = "RichText";
+use crate::{
+    BlockAlign, BundleAsset, BundleExportReport, CollectAssetsReport, EmbedLocalImagesReport,
+    PortabilityIssue, PortabilityIssueLevel, PortabilityReport,
+};
+
+pub const CONTEXT: &str = "RichText";
 
 actions!(
     rich_text,
@@ -206,8 +216,32 @@ pub struct InlineTextSegment {
 pub struct LineLayoutCache {
     pub bounds: Bounds<Pixels>,
     pub text_layout: gpui::TextLayout,
+    pub text_align: TextAlign,
     pub text: SharedString,
     pub segments: Vec<InlineTextSegment>,
+}
+
+#[derive(Clone)]
+pub struct BlockBoundsCache {
+    pub bounds: Bounds<Pixels>,
+    pub kind: SharedString,
+}
+
+#[derive(Clone)]
+struct ColumnsResizeState {
+    columns_path: Vec<usize>,
+    boundary_ix: usize,
+    start_mouse_x: Pixels,
+    total_width: Pixels,
+    start_widths: Vec<Pixels>,
+    start_fractions: Vec<f32>,
+    preview_fractions: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+struct FindActiveMatch {
+    block_path: Vec<usize>,
+    range_index: usize,
 }
 
 pub struct RichTextState {
@@ -218,12 +252,617 @@ pub struct RichTextState {
     selection_anchor: Option<CorePoint>,
     viewport_bounds: Bounds<Pixels>,
     layout_cache: HashMap<Vec<usize>, LineLayoutCache>,
+    block_bounds_cache: HashMap<Vec<usize>, BlockBoundsCache>,
+    embedded_image_cache: HashMap<String, Arc<Image>>,
+    document_base_dir: Option<PathBuf>,
     text_block_order: Vec<Vec<usize>>,
+    find_query: Option<String>,
+    find_matches: HashMap<Vec<usize>, Vec<Range<usize>>>,
+    find_active: Option<FindActiveMatch>,
     ime_marked_range: Option<Range<usize>>,
+    selected_block_path: Option<Vec<usize>>,
+    columns_resizing: Option<ColumnsResizeState>,
     did_auto_focus: bool,
+    pending_notifications: Vec<String>,
+}
+
+const PLATE_CLIPBOARD_FRAGMENT_KIND: &str = "gpui-manos-plate/fragment";
+const PLATE_CLIPBOARD_FRAGMENT_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PlateClipboardFragmentMode {
+    Block,
+    Range,
+}
+
+impl Default for PlateClipboardFragmentMode {
+    fn default() -> Self {
+        Self::Block
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlateClipboardFragment {
+    kind: String,
+    version: u64,
+    #[serde(default)]
+    mode: PlateClipboardFragmentMode,
+    nodes: Vec<Node>,
+}
+
+impl PlateClipboardFragment {
+    fn new(nodes: Vec<Node>) -> Self {
+        Self {
+            kind: PLATE_CLIPBOARD_FRAGMENT_KIND.to_string(),
+            version: PLATE_CLIPBOARD_FRAGMENT_VERSION,
+            mode: PlateClipboardFragmentMode::Block,
+            nodes,
+        }
+    }
+
+    fn new_range(nodes: Vec<Node>) -> Self {
+        Self {
+            kind: PLATE_CLIPBOARD_FRAGMENT_KIND.to_string(),
+            version: PLATE_CLIPBOARD_FRAGMENT_VERSION,
+            mode: PlateClipboardFragmentMode::Range,
+            nodes,
+        }
+    }
+
+    fn from_clipboard(item: &ClipboardItem) -> Option<Self> {
+        for entry in item.entries() {
+            let ClipboardEntry::String(s) = entry else {
+                continue;
+            };
+            let payload: PlateClipboardFragment = s.metadata_json()?;
+            if payload.kind == PLATE_CLIPBOARD_FRAGMENT_KIND
+                && payload.version == PLATE_CLIPBOARD_FRAGMENT_VERSION
+            {
+                return Some(payload);
+            }
+        }
+        None
+    }
 }
 
 impl RichTextState {
+    fn queue_notification(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.pending_notifications.push(message.into());
+        cx.notify();
+    }
+
+    fn data_url_for_image(image: &Image) -> String {
+        format!(
+            "data:{};base64,{}",
+            image.format.mime_type(),
+            base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+        )
+    }
+
+    fn decode_data_url_bytes(src: &str) -> Option<(String, Vec<u8>)> {
+        let src = src.strip_prefix("data:")?;
+        let (meta, data) = src.split_once(',')?;
+
+        let is_base64 = meta
+            .split(';')
+            .any(|part| part.trim().eq_ignore_ascii_case("base64"));
+        if !is_base64 {
+            return None;
+        }
+
+        let mime = meta.split(';').next().unwrap_or("").trim().to_string();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()?;
+        Some((mime, bytes))
+    }
+
+    fn parse_data_url_image(src: &str) -> Option<Image> {
+        let (mime, bytes) = Self::decode_data_url_bytes(src)?;
+        let format = ImageFormat::from_mime_type(&mime)?;
+        Some(Image::from_bytes(format, bytes))
+    }
+
+    fn get_or_decode_data_url_image(
+        cache: &mut HashMap<String, Arc<Image>>,
+        src: &str,
+    ) -> Option<Arc<Image>> {
+        if !src.starts_with("data:") {
+            return None;
+        }
+        if let Some(img) = cache.get(src) {
+            return Some(img.clone());
+        }
+        let img = Arc::new(Self::parse_data_url_image(src)?);
+        cache.insert(src.to_string(), img.clone());
+        Some(img)
+    }
+
+    fn mime_and_format_for_image_path(path: &Path) -> Option<(&'static str, ImageFormat)> {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        match ext.as_str() {
+            "png" => Some(("image/png", ImageFormat::Png)),
+            "jpg" | "jpeg" => Some(("image/jpeg", ImageFormat::Jpeg)),
+            "webp" => Some(("image/webp", ImageFormat::Webp)),
+            "gif" => Some(("image/gif", ImageFormat::Gif)),
+            "svg" => Some(("image/svg+xml", ImageFormat::Svg)),
+            "bmp" => Some(("image/bmp", ImageFormat::Bmp)),
+            "tif" | "tiff" => Some(("image/tiff", ImageFormat::Tiff)),
+            _ => None,
+        }
+    }
+
+    fn image_ext_for_mime(mime: &str) -> Option<&'static str> {
+        match mime.trim().to_lowercase().as_str() {
+            "image/png" => Some("png"),
+            "image/jpeg" | "image/jpg" => Some("jpg"),
+            "image/webp" => Some("webp"),
+            "image/gif" => Some("gif"),
+            "image/svg+xml" => Some("svg"),
+            "image/bmp" => Some("bmp"),
+            "image/tiff" => Some("tiff"),
+            _ => None,
+        }
+    }
+
+    fn local_image_path_for_src(src: &str, document_base_dir: Option<&Path>) -> Option<PathBuf> {
+        let src = src.trim();
+        if src.is_empty() {
+            return None;
+        }
+        if src.starts_with("data:")
+            || src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("resource://")
+        {
+            return None;
+        }
+
+        let mut path = if let Some(rest) = src.strip_prefix("file://") {
+            PathBuf::from(rest)
+        } else {
+            PathBuf::from(Self::normalize_image_src(src))
+        };
+
+        if !path.is_absolute() {
+            let base = document_base_dir?;
+            path = base.join(path);
+        }
+
+        if !path.exists() || !path.is_file() {
+            return None;
+        }
+
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
+    }
+
+    fn embed_local_images_in_document(
+        doc: &mut Document,
+        document_base_dir: Option<&Path>,
+    ) -> EmbedLocalImagesReport {
+        fn walk_nodes(
+            nodes: &mut [Node],
+            report: &mut EmbedLocalImagesReport,
+            document_base_dir: Option<&Path>,
+        ) {
+            for node in nodes {
+                match node {
+                    Node::Element(el) => walk_nodes(&mut el.children, report, document_base_dir),
+                    Node::Void(v) if v.kind == "image" => {
+                        let Some(src) = v.attrs.get("src").and_then(|v| v.as_str()) else {
+                            report.skipped += 1;
+                            continue;
+                        };
+                        let Some(local_path) =
+                            RichTextState::local_image_path_for_src(src, document_base_dir)
+                        else {
+                            report.skipped += 1;
+                            continue;
+                        };
+                        let Some((mime, _format)) =
+                            RichTextState::mime_and_format_for_image_path(&local_path)
+                        else {
+                            report.skipped += 1;
+                            continue;
+                        };
+                        let bytes = match std::fs::read(&local_path) {
+                            Ok(bytes) => bytes,
+                            Err(_) => {
+                                report.failed += 1;
+                                continue;
+                            }
+                        };
+                        let data_url = format!(
+                            "data:{mime};base64,{}",
+                            base64::engine::general_purpose::STANDARD.encode(&bytes)
+                        );
+                        v.attrs
+                            .insert("src".to_string(), serde_json::Value::String(data_url));
+                        report.embedded += 1;
+                    }
+                    Node::Void(_) | Node::Text(_) => {}
+                }
+            }
+        }
+
+        let mut report = EmbedLocalImagesReport::default();
+        walk_nodes(&mut doc.children, &mut report, document_base_dir);
+        report
+    }
+
+    pub fn make_plate_value_portable(
+        value: PlateValue,
+        document_base_dir: Option<PathBuf>,
+    ) -> (PlateValue, EmbedLocalImagesReport) {
+        let mut doc = value.into_document();
+        let report = Self::embed_local_images_in_document(&mut doc, document_base_dir.as_deref());
+        (PlateValue::from_document(doc), report)
+    }
+
+    fn bundle_local_images_in_document(
+        doc: &mut Document,
+        document_base_dir: Option<&Path>,
+    ) -> (Vec<BundleAsset>, BundleExportReport) {
+        fn walk_nodes(
+            nodes: &mut [Node],
+            document_base_dir: Option<&Path>,
+            assets: &mut Vec<BundleAsset>,
+            asset_paths: &mut HashMap<String, ()>,
+            report: &mut BundleExportReport,
+        ) {
+            for node in nodes {
+                match node {
+                    Node::Element(el) => walk_nodes(
+                        &mut el.children,
+                        document_base_dir,
+                        assets,
+                        asset_paths,
+                        report,
+                    ),
+                    Node::Void(v) if v.kind == "image" => {
+                        let Some(src) = v.attrs.get("src").and_then(|v| v.as_str()) else {
+                            report.skipped += 1;
+                            continue;
+                        };
+
+                        let (bytes, ext, is_data_url) = if src.trim().starts_with("data:") {
+                            let Some((mime, bytes)) = RichTextState::decode_data_url_bytes(src)
+                            else {
+                                report.failed += 1;
+                                continue;
+                            };
+                            (
+                                bytes,
+                                RichTextState::image_ext_for_mime(&mime)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_default(),
+                                true,
+                            )
+                        } else {
+                            let Some(local_path) =
+                                RichTextState::local_image_path_for_src(src, document_base_dir)
+                            else {
+                                report.skipped += 1;
+                                continue;
+                            };
+                            let bytes = match std::fs::read(&local_path) {
+                                Ok(bytes) => bytes,
+                                Err(_) => {
+                                    report.failed += 1;
+                                    continue;
+                                }
+                            };
+                            let ext = local_path
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_lowercase();
+                            (bytes, ext, false)
+                        };
+
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        bytes.hash(&mut hasher);
+                        let digest = hasher.finish();
+
+                        let file_name = if ext.is_empty() {
+                            format!("{digest:016x}")
+                        } else {
+                            format!("{digest:016x}.{ext}")
+                        };
+                        let relative_path = format!("assets/{file_name}");
+
+                        v.attrs.insert(
+                            "src".to_string(),
+                            serde_json::Value::String(relative_path.clone()),
+                        );
+                        report.bundled += 1;
+                        if is_data_url {
+                            report.bundled_data_url += 1;
+                        }
+
+                        if asset_paths.contains_key(&relative_path) {
+                            continue;
+                        }
+                        asset_paths.insert(relative_path.clone(), ());
+                        assets.push(BundleAsset {
+                            relative_path,
+                            bytes,
+                        });
+                    }
+                    Node::Void(_) | Node::Text(_) => {}
+                }
+            }
+        }
+
+        let mut assets: Vec<BundleAsset> = Vec::new();
+        let mut asset_paths: HashMap<String, ()> = HashMap::new();
+        let mut report = BundleExportReport::default();
+        walk_nodes(
+            &mut doc.children,
+            document_base_dir,
+            &mut assets,
+            &mut asset_paths,
+            &mut report,
+        );
+        (assets, report)
+    }
+
+    pub fn make_plate_value_bundle(
+        value: PlateValue,
+        document_base_dir: Option<PathBuf>,
+    ) -> (PlateValue, Vec<BundleAsset>, BundleExportReport) {
+        let mut doc = value.into_document();
+        let (assets, report) =
+            Self::bundle_local_images_in_document(&mut doc, document_base_dir.as_deref());
+        (PlateValue::from_document(doc), assets, report)
+    }
+
+    fn normalize_image_src(src: &str) -> String {
+        let src = src.trim();
+        if src.is_empty() {
+            return String::new();
+        }
+        if src.contains("://") || src.starts_with("data:") {
+            return src.to_string();
+        }
+
+        let expanded = if let Some(rest) = src.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                format!("{home}/{rest}")
+            } else {
+                src.to_string()
+            }
+        } else {
+            src.to_string()
+        };
+
+        let path = Path::new(&expanded);
+        if !path.is_absolute() {
+            return expanded;
+        }
+        if !path.exists() {
+            return expanded;
+        }
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            return canon.to_string_lossy().to_string();
+        }
+
+        expanded
+    }
+
+    fn relative_path_to_slash_string(path: &Path) -> String {
+        path.iter()
+            .map(|c| c.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn normalize_image_src_for_document(&self, src: &str) -> String {
+        let src = src.trim();
+        if src.is_empty() {
+            return String::new();
+        }
+
+        if src.starts_with("data:")
+            || src.starts_with("http://")
+            || src.starts_with("https://")
+            || src.starts_with("resource://")
+        {
+            return src.to_string();
+        }
+
+        let normalized = if let Some(rest) = src.strip_prefix("file://") {
+            Self::normalize_image_src(rest)
+        } else {
+            Self::normalize_image_src(src)
+        };
+        if normalized.is_empty() {
+            return String::new();
+        }
+
+        let Some(document_base_dir) = self.document_base_dir.as_deref() else {
+            return normalized;
+        };
+
+        let base_dir = std::fs::canonicalize(document_base_dir)
+            .unwrap_or_else(|_| document_base_dir.to_path_buf());
+
+        let path = PathBuf::from(&normalized);
+        if !path.is_absolute() || !path.exists() {
+            return normalized;
+        }
+
+        let canonical_path = std::fs::canonicalize(&path).unwrap_or(path);
+        let Ok(rel) = canonical_path.strip_prefix(&base_dir) else {
+            return normalized;
+        };
+
+        let rel = Self::relative_path_to_slash_string(rel);
+        if rel.is_empty() { normalized } else { rel }
+    }
+
+    pub fn referenced_relative_image_paths(&self) -> Vec<String> {
+        fn walk(nodes: &[Node], out: &mut HashSet<String>) {
+            for node in nodes {
+                match node {
+                    Node::Element(el) => walk(&el.children, out),
+                    Node::Void(v) if v.kind == "image" => {
+                        let Some(src) = v.attrs.get("src").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let src = src.trim();
+                        if src.is_empty()
+                            || src.starts_with("data:")
+                            || src.contains("://")
+                            || Path::new(src).is_absolute()
+                        {
+                            continue;
+                        }
+                        out.insert(src.to_string());
+                    }
+                    Node::Void(_) | Node::Text(_) => {}
+                }
+            }
+        }
+
+        let mut out: HashSet<String> = HashSet::new();
+        walk(&self.editor.doc().children, &mut out);
+        let mut out: Vec<String> = out.into_iter().collect();
+        out.sort();
+        out
+    }
+
+    pub fn document_base_dir(&self) -> Option<PathBuf> {
+        self.document_base_dir.clone()
+    }
+
+    pub fn portability_report(&self) -> PortabilityReport {
+        fn walk(nodes: &[Node], out: &mut Vec<String>) {
+            for node in nodes {
+                match node {
+                    Node::Element(el) => walk(&el.children, out),
+                    Node::Void(v) if v.kind == "image" => {
+                        if let Some(src) = v.attrs.get("src").and_then(|v| v.as_str()) {
+                            out.push(src.to_string());
+                        }
+                    }
+                    Node::Void(_) | Node::Text(_) => {}
+                }
+            }
+        }
+
+        let base_dir = self.document_base_dir.clone();
+        let base_dir_canon = base_dir
+            .as_deref()
+            .and_then(|dir| std::fs::canonicalize(dir).ok())
+            .or_else(|| base_dir.clone());
+
+        let mut image_srcs: Vec<String> = Vec::new();
+        walk(&self.editor.doc().children, &mut image_srcs);
+
+        let mut report = PortabilityReport {
+            base_dir,
+            ..PortabilityReport::default()
+        };
+
+        for src in image_srcs {
+            let src = src.trim().to_string();
+            report.images_total += 1;
+
+            if src.is_empty() {
+                report.issues.push(PortabilityIssue {
+                    level: PortabilityIssueLevel::Error,
+                    src,
+                    message: "Empty image src".to_string(),
+                });
+                continue;
+            }
+
+            if src.starts_with("data:") {
+                report.images_data_url += 1;
+                report.issues.push(PortabilityIssue {
+                    level: PortabilityIssueLevel::Warning,
+                    src,
+                    message:
+                        "Embedded data URL (large). Consider Collect Assets or Export Plate Bundle."
+                            .to_string(),
+                });
+                continue;
+            }
+
+            if src.starts_with("http://") || src.starts_with("https://") {
+                report.images_http += 1;
+                report.issues.push(PortabilityIssue {
+                    level: PortabilityIssueLevel::Warning,
+                    src,
+                    message: "External URL (not self-contained). Consider Collect Assets or Export Plate Bundle.".to_string(),
+                });
+                continue;
+            }
+
+            if src.starts_with("resource://") {
+                report.images_resource += 1;
+                continue;
+            }
+
+            let normalized = if let Some(rest) = src.strip_prefix("file://") {
+                Self::normalize_image_src(rest)
+            } else {
+                Self::normalize_image_src(&src)
+            };
+            let path = PathBuf::from(&normalized);
+
+            if path.is_absolute() {
+                if path.exists() && path.is_file() {
+                    report.images_absolute_ok += 1;
+                    report.issues.push(PortabilityIssue {
+                        level: PortabilityIssueLevel::Warning,
+                        src,
+                        message: "Absolute local path (not portable). Consider Collect Assets or Export Plate Bundle."
+                            .to_string(),
+                    });
+                } else {
+                    report.images_absolute_missing += 1;
+                    report.issues.push(PortabilityIssue {
+                        level: PortabilityIssueLevel::Error,
+                        src,
+                        message: "Missing absolute local file".to_string(),
+                    });
+                }
+                continue;
+            }
+
+            let Some(base_dir_canon) = base_dir_canon.as_ref() else {
+                report.images_relative_missing += 1;
+                report.issues.push(PortabilityIssue {
+                    level: PortabilityIssueLevel::Error,
+                    src,
+                    message: "Relative src but document has no base directory".to_string(),
+                });
+                continue;
+            };
+
+            let resolved = base_dir_canon.join(&path);
+            if resolved.exists() && resolved.is_file() {
+                report.images_relative_ok += 1;
+            } else {
+                report.images_relative_missing += 1;
+                report.issues.push(PortabilityIssue {
+                    level: PortabilityIssueLevel::Error,
+                    src,
+                    message: format!("Missing relative file at {}", resolved.to_string_lossy()),
+                });
+            }
+        }
+
+        report
+    }
+
     pub fn new(_window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle().tab_stop(true);
         let editor = Editor::with_richtext_plugins();
@@ -236,9 +875,18 @@ impl RichTextState {
             selection_anchor: None,
             viewport_bounds: Bounds::default(),
             layout_cache: HashMap::new(),
+            block_bounds_cache: HashMap::new(),
+            embedded_image_cache: HashMap::new(),
+            document_base_dir: None,
             text_block_order,
+            find_query: None,
+            find_matches: HashMap::new(),
+            find_active: None,
             ime_marked_range: None,
+            selected_block_path: None,
+            columns_resizing: None,
             did_auto_focus: false,
+            pending_notifications: Vec::new(),
         }
     }
 
@@ -254,11 +902,32 @@ impl RichTextState {
         self.editor.can_redo()
     }
 
+    pub fn has_selected_block(&self) -> bool {
+        self.selected_block_sibling_info().is_some()
+    }
+
+    pub fn can_move_selected_block_up(&self) -> bool {
+        self.selected_block_sibling_info()
+            .map(|(_, ix, _)| ix > 0)
+            .unwrap_or(false)
+    }
+
+    pub fn can_move_selected_block_down(&self) -> bool {
+        self.selected_block_sibling_info()
+            .map(|(_, ix, len)| ix + 1 < len)
+            .unwrap_or(false)
+    }
+
     pub fn plate_value(&self) -> PlateValue {
         PlateValue::from_document(self.editor.doc().clone())
     }
 
-    pub fn load_plate_value(&mut self, value: PlateValue, cx: &mut Context<Self>) {
+    pub fn load_plate_value(
+        &mut self,
+        value: PlateValue,
+        document_base_dir: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         let selection = Selection::collapsed(CorePoint::new(vec![0, 0], 0));
         self.editor = Editor::new(
             value.into_document(),
@@ -267,9 +936,368 @@ impl RichTextState {
         );
         self.scroll_handle.set_offset(point(px(0.), px(0.)));
         self.layout_cache.clear();
+        self.block_bounds_cache.clear();
+        self.embedded_image_cache.clear();
+        self.document_base_dir = document_base_dir;
+        self.selected_block_path = None;
         self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
+        self.find_active = None;
+        self.recompute_find_matches();
         self.ime_marked_range = None;
         cx.notify();
+    }
+
+    pub fn set_document_base_dir(
+        &mut self,
+        document_base_dir: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.document_base_dir = document_base_dir;
+        cx.notify();
+    }
+
+    pub fn set_find_query(&mut self, query: String, cx: &mut Context<Self>) {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            self.find_query = None;
+        } else {
+            self.find_query = Some(query);
+        }
+        self.find_active = None;
+        self.recompute_find_matches();
+        cx.notify();
+    }
+
+    fn recompute_find_matches(&mut self) {
+        self.find_matches.clear();
+        let Some(query) = self.find_query.as_ref().map(|s| s.as_str()) else {
+            self.find_active = None;
+            return;
+        };
+        if query.is_empty() {
+            self.find_active = None;
+            return;
+        }
+
+        for block_path in &self.text_block_order {
+            let Some(text) = self.text_block_text(block_path) else {
+                continue;
+            };
+            let text = text.as_ref();
+            if text.is_empty() {
+                continue;
+            }
+
+            let mut ranges: Vec<Range<usize>> = Vec::new();
+            let mut cursor = 0usize;
+            while cursor <= text.len() {
+                let Some(found) = text.get(cursor..).and_then(|s| s.find(query)) else {
+                    break;
+                };
+                let start = cursor + found;
+                let end = start + query.len();
+                if start >= end || end > text.len() {
+                    break;
+                }
+                ranges.push(start..end);
+                cursor = end;
+            }
+
+            if !ranges.is_empty() {
+                self.find_matches.insert(block_path.clone(), ranges);
+            }
+        }
+
+        if let Some(active) = self.find_active.as_ref() {
+            if self
+                .find_matches
+                .get(&active.block_path)
+                .and_then(|ranges| ranges.get(active.range_index))
+                .is_none()
+            {
+                self.find_active = None;
+            }
+        }
+    }
+
+    pub fn find_stats(&self) -> (usize, usize) {
+        let total = self.find_matches.values().map(|ranges| ranges.len()).sum();
+        let Some(active) = self.find_active.as_ref() else {
+            return (0, total);
+        };
+
+        let mut cursor = 0usize;
+        for block_path in &self.text_block_order {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if &active.block_path == block_path {
+                if active.range_index < ranges.len() {
+                    return (cursor + active.range_index + 1, total);
+                }
+                return (0, total);
+            }
+            cursor += ranges.len();
+        }
+
+        (0, total)
+    }
+
+    pub fn find_next(&mut self, cx: &mut Context<Self>) {
+        let has_query = self.find_query.as_deref().is_some_and(|q| !q.is_empty());
+        if !has_query || self.find_matches.is_empty() {
+            return;
+        }
+
+        let next = self
+            .find_active
+            .as_ref()
+            .and_then(|active| self.find_next_after_active(active))
+            .or_else(|| self.find_next_from_focus());
+
+        if let Some(next) = next {
+            self.jump_to_find_match(next, cx);
+        }
+    }
+
+    pub fn find_prev(&mut self, cx: &mut Context<Self>) {
+        let has_query = self.find_query.as_deref().is_some_and(|q| !q.is_empty());
+        if !has_query || self.find_matches.is_empty() {
+            return;
+        }
+
+        let prev = self
+            .find_active
+            .as_ref()
+            .and_then(|active| self.find_prev_before_active(active))
+            .or_else(|| self.find_prev_from_focus());
+
+        if let Some(prev) = prev {
+            self.jump_to_find_match(prev, cx);
+        }
+    }
+
+    fn jump_to_find_match(&mut self, target: FindActiveMatch, cx: &mut Context<Self>) {
+        let Some(range) = self
+            .find_matches
+            .get(&target.block_path)
+            .and_then(|ranges| ranges.get(target.range_index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(point) = self.point_for_block_offset(&target.block_path, range.start) else {
+            return;
+        };
+        self.find_active = Some(target);
+        self.set_selection_points(point.clone(), point, cx);
+    }
+
+    fn find_next_after_active(&self, active: &FindActiveMatch) -> Option<FindActiveMatch> {
+        let Some(block_pos) = self
+            .text_block_order
+            .iter()
+            .position(|path| path == &active.block_path)
+        else {
+            return None;
+        };
+        let ranges = self.find_matches.get(&active.block_path)?;
+        if active.range_index >= ranges.len() {
+            return None;
+        }
+        if active.range_index + 1 < ranges.len() {
+            return Some(FindActiveMatch {
+                block_path: active.block_path.clone(),
+                range_index: active.range_index + 1,
+            });
+        }
+
+        for block_path in self.text_block_order.iter().skip(block_pos + 1) {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: block_path.clone(),
+                    range_index: 0,
+                });
+            }
+        }
+
+        for block_path in &self.text_block_order {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: block_path.clone(),
+                    range_index: 0,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn find_prev_before_active(&self, active: &FindActiveMatch) -> Option<FindActiveMatch> {
+        let Some(block_pos) = self
+            .text_block_order
+            .iter()
+            .position(|path| path == &active.block_path)
+        else {
+            return None;
+        };
+        let ranges = self.find_matches.get(&active.block_path)?;
+        if active.range_index >= ranges.len() {
+            return None;
+        }
+        if active.range_index > 0 {
+            return Some(FindActiveMatch {
+                block_path: active.block_path.clone(),
+                range_index: active.range_index - 1,
+            });
+        }
+
+        for block_path in self.text_block_order.iter().take(block_pos).rev() {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: block_path.clone(),
+                    range_index: ranges.len() - 1,
+                });
+            }
+        }
+
+        for block_path in self.text_block_order.iter().rev() {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: block_path.clone(),
+                    range_index: ranges.len() - 1,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn find_next_from_focus(&self) -> Option<FindActiveMatch> {
+        let focus = &self.editor.selection().focus;
+        let (_, block_path) = focus.path.split_last()?;
+        let block_path: Vec<usize> = block_path.to_vec();
+        let focus_offset = self.row_offset_for_point(focus).unwrap_or(0);
+        let anchor_pos = self
+            .text_block_order
+            .iter()
+            .position(|path| path == &block_path)
+            .unwrap_or(0);
+
+        if let Some(ranges) = self.find_matches.get(&block_path) {
+            for (ix, range) in ranges.iter().enumerate() {
+                if range.start <= focus_offset && focus_offset < range.end {
+                    return Some(FindActiveMatch {
+                        block_path,
+                        range_index: ix,
+                    });
+                }
+            }
+            for (ix, range) in ranges.iter().enumerate() {
+                if range.start >= focus_offset {
+                    return Some(FindActiveMatch {
+                        block_path,
+                        range_index: ix,
+                    });
+                }
+            }
+        }
+
+        for next_block in self.text_block_order.iter().skip(anchor_pos + 1) {
+            let Some(ranges) = self.find_matches.get(next_block) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: next_block.clone(),
+                    range_index: 0,
+                });
+            }
+        }
+
+        for block_path in &self.text_block_order {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: block_path.clone(),
+                    range_index: 0,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn find_prev_from_focus(&self) -> Option<FindActiveMatch> {
+        let focus = &self.editor.selection().focus;
+        let (_, block_path) = focus.path.split_last()?;
+        let block_path: Vec<usize> = block_path.to_vec();
+        let focus_offset = self.row_offset_for_point(focus).unwrap_or(0);
+        let anchor_pos = self
+            .text_block_order
+            .iter()
+            .position(|path| path == &block_path)
+            .unwrap_or(0);
+
+        if let Some(ranges) = self.find_matches.get(&block_path) {
+            for (ix, range) in ranges.iter().enumerate() {
+                if range.start <= focus_offset && focus_offset < range.end {
+                    return Some(FindActiveMatch {
+                        block_path,
+                        range_index: ix,
+                    });
+                }
+            }
+
+            for (ix, range) in ranges.iter().enumerate().rev() {
+                if range.end <= focus_offset {
+                    return Some(FindActiveMatch {
+                        block_path,
+                        range_index: ix,
+                    });
+                }
+            }
+        }
+
+        for prev_block in self.text_block_order.iter().take(anchor_pos).rev() {
+            let Some(ranges) = self.find_matches.get(prev_block) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: prev_block.clone(),
+                    range_index: ranges.len() - 1,
+                });
+            }
+        }
+
+        for block_path in self.text_block_order.iter().rev() {
+            let Some(ranges) = self.find_matches.get(block_path) else {
+                continue;
+            };
+            if !ranges.is_empty() {
+                return Some(FindActiveMatch {
+                    block_path: block_path.clone(),
+                    range_index: ranges.len() - 1,
+                });
+            }
+        }
+
+        None
     }
 
     fn active_text_block_path(&self) -> Option<Vec<usize>> {
@@ -290,6 +1318,7 @@ impl RichTextState {
         self.editor.set_selection(Selection { anchor, focus });
         _ = self.scroll_cursor_into_view();
         self.ime_marked_range = None;
+        self.selected_block_path = None;
         cx.notify();
     }
 
@@ -390,6 +1419,7 @@ impl RichTextState {
         self.editor.set_selection(sel);
         _ = self.scroll_cursor_into_view();
         self.ime_marked_range = None;
+        self.selected_block_path = None;
         cx.notify();
     }
 
@@ -1424,10 +2454,17 @@ impl RichTextState {
     fn offset_for_point_in_block(
         &self,
         block_path: &[usize],
-        point: gpui::Point<Pixels>,
+        position: gpui::Point<Pixels>,
     ) -> Option<usize> {
         let cache = self.layout_cache.get(block_path)?;
-        let mut local = match cache.text_layout.index_for_position(point) {
+        let offset_x = RichTextLineElement::align_offset_x_for_position(
+            &cache.text_layout,
+            &cache.bounds,
+            position,
+            cache.text_align,
+        );
+        let position = gpui::point(position.x - offset_x, position.y);
+        let mut local = match cache.text_layout.index_for_position(position) {
             Ok(ix) | Err(ix) => ix,
         };
         local = local.min(cache.text.len());
@@ -1452,6 +2489,102 @@ impl RichTextState {
         None
     }
 
+    fn link_run_range_in_block(&self, block_path: &[usize], offset: usize) -> Option<Range<usize>> {
+        let el = element_at_path(self.editor.doc(), block_path)?;
+        if !is_text_block_kind(self.editor.registry(), &el.kind) {
+            return None;
+        }
+
+        #[derive(Clone)]
+        struct Seg {
+            start: usize,
+            len: usize,
+            url: Option<String>,
+        }
+
+        let mut segs: Vec<Seg> = Vec::new();
+        let mut global = 0usize;
+        for child in &el.children {
+            match child {
+                Node::Text(t) => {
+                    let len = t.text.len();
+                    segs.push(Seg {
+                        start: global,
+                        len,
+                        url: t.marks.link.clone(),
+                    });
+                    global += len;
+                }
+                Node::Void(v) => {
+                    let len = v.inline_text_len();
+                    segs.push(Seg {
+                        start: global,
+                        len,
+                        url: None,
+                    });
+                    global += len;
+                }
+                Node::Element(_) => {}
+            }
+        }
+
+        let candidates = [offset, offset.saturating_sub(1)];
+        for candidate in candidates {
+            for (i, seg) in segs.iter().enumerate() {
+                if seg.len == 0 {
+                    continue;
+                }
+                if candidate < seg.start || candidate >= seg.start + seg.len {
+                    continue;
+                }
+
+                let url = seg.url.clone()?;
+                let mut start = seg.start;
+                let mut end = seg.start + seg.len;
+
+                // Expand left: include adjacent segments with the same URL (even if other marks
+                // differ), so editing a link updates the whole link run.
+                let mut j = i;
+                while j > 0 {
+                    let prev = &segs[j - 1];
+                    if prev.len == 0 {
+                        j -= 1;
+                        continue;
+                    }
+                    if prev.url.as_deref() == Some(url.as_str()) && prev.start + prev.len == start {
+                        start = prev.start;
+                        j -= 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                // Expand right.
+                let mut j = i;
+                while j + 1 < segs.len() {
+                    let next = &segs[j + 1];
+                    if next.len == 0 {
+                        j += 1;
+                        continue;
+                    }
+                    if next.url.as_deref() == Some(url.as_str()) && end == next.start {
+                        end = next.start + next.len;
+                        j += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                if start < end {
+                    return Some(start..end);
+                }
+                return None;
+            }
+        }
+
+        None
+    }
+
     fn block_text_len_in_block(&self, block_path: &[usize]) -> usize {
         let Some(el) = element_at_path(self.editor.doc(), block_path) else {
             return 0;
@@ -1470,11 +2603,43 @@ impl RichTextState {
             .sum()
     }
 
+    fn text_align_for_block(&self, block_path: &[usize]) -> TextAlign {
+        let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+            return TextAlign::Left;
+        };
+        match el.attrs.get("align").and_then(|v| v.as_str()) {
+            Some("center") => TextAlign::Center,
+            Some("right") => TextAlign::Right,
+            _ => TextAlign::Left,
+        }
+    }
+
     fn text_block_path_for_point(&self, point: gpui::Point<Pixels>) -> Option<Vec<usize>> {
         for (path, cache) in &self.layout_cache {
             if cache.bounds.contains(&point) {
                 return Some(path.clone());
             }
+        }
+
+        let mut best_containing: Option<Vec<usize>> = None;
+        for (path, cache) in &self.block_bounds_cache {
+            if !cache.bounds.contains(&point) {
+                continue;
+            }
+            if !is_text_block_kind(self.editor.registry(), cache.kind.as_ref()) {
+                continue;
+            }
+
+            match &best_containing {
+                None => best_containing = Some(path.clone()),
+                Some(best_path) if path.len() > best_path.len() => {
+                    best_containing = Some(path.clone())
+                }
+                _ => {}
+            }
+        }
+        if best_containing.is_some() {
+            return best_containing;
         }
 
         let mut best: Option<(Pixels, Vec<usize>)> = None;
@@ -1495,30 +2660,317 @@ impl RichTextState {
         best.map(|(_, path)| path)
     }
 
-    fn push_tx(&mut self, tx: gpui_plate_core::Transaction, cx: &mut Context<Self>) {
-        if self.editor.apply(tx).is_ok() {
-            _ = self.scroll_cursor_into_view();
-            self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
+    fn void_block_path_for_point(&self, point: gpui::Point<Pixels>) -> Option<Vec<usize>> {
+        let mut best: Option<(usize, Vec<usize>)> = None;
+        for (path, cache) in &self.block_bounds_cache {
+            if !cache.bounds.contains(&point) {
+                continue;
+            }
+            let kind = cache.kind.as_ref();
+            if kind != "divider" && kind != "image" {
+                continue;
+            }
+            if !matches!(node_at_path(self.editor.doc(), path), Some(Node::Void(_))) {
+                continue;
+            }
+            let depth = path.len();
+            match &best {
+                None => best = Some((depth, path.clone())),
+                Some((best_depth, _)) if depth >= *best_depth => best = Some((depth, path.clone())),
+                _ => {}
+            }
+        }
+        best.map(|(_, path)| path)
+    }
+
+    fn columns_resize_target_for_point(
+        &self,
+        point: gpui::Point<Pixels>,
+    ) -> Option<(Vec<usize>, usize)> {
+        let mut best: Option<(usize, Vec<usize>, usize)> = None;
+
+        for (columns_path, cache) in &self.block_bounds_cache {
+            if cache.kind.as_ref() != "columns" {
+                continue;
+            }
+            if !cache.bounds.contains(&point) {
+                continue;
+            }
+
+            let Some(columns_el) = element_at_path(self.editor.doc(), columns_path) else {
+                continue;
+            };
+            if columns_el.kind != "columns" {
+                continue;
+            }
+
+            let col_count = columns_el.children.len();
+            if col_count < 2 {
+                continue;
+            }
+
+            for boundary_ix in 0..col_count.saturating_sub(1) {
+                let mut left_path = columns_path.clone();
+                left_path.push(boundary_ix);
+                let Some(left_bounds) = self.block_bounds_cache.get(&left_path).map(|c| c.bounds)
+                else {
+                    continue;
+                };
+
+                let mut right_path = columns_path.clone();
+                right_path.push(boundary_ix + 1);
+                let Some(right_bounds) = self.block_bounds_cache.get(&right_path).map(|c| c.bounds)
+                else {
+                    continue;
+                };
+
+                let left = left_bounds.right();
+                let right = right_bounds.left();
+                let mid = left + (right - left) * 0.5;
+                let half = px(6.);
+
+                let x_ok = point.x >= mid - half && point.x <= mid + half;
+                let y_ok = point.y >= cache.bounds.top() && point.y <= cache.bounds.bottom();
+                if !x_ok || !y_ok {
+                    continue;
+                }
+
+                let depth = columns_path.len();
+                match &best {
+                    None => best = Some((depth, columns_path.clone(), boundary_ix)),
+                    Some((best_depth, _, _)) if depth > *best_depth => {
+                        best = Some((depth, columns_path.clone(), boundary_ix))
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        best.map(|(_, path, ix)| (path, ix))
+    }
+
+    fn begin_columns_resize(
+        &mut self,
+        columns_path: Vec<usize>,
+        boundary_ix: usize,
+        start_mouse_x: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(columns_el) = element_at_path(self.editor.doc(), &columns_path) else {
+            return;
+        };
+        if columns_el.kind != "columns" {
+            return;
+        }
+
+        let col_count = columns_el.children.len();
+        if col_count < 2 || boundary_ix + 1 >= col_count {
+            return;
+        }
+
+        let mut start_widths: Vec<Pixels> = Vec::with_capacity(col_count);
+        for col_ix in 0..col_count {
+            let mut col_path = columns_path.clone();
+            col_path.push(col_ix);
+            let Some(bounds) = self.block_bounds_cache.get(&col_path).map(|c| c.bounds) else {
+                return;
+            };
+            start_widths.push(bounds.size.width);
+        }
+
+        let mut total_width = px(0.);
+        for width in &start_widths {
+            total_width += *width;
+        }
+        if total_width <= px(0.) {
+            return;
+        }
+
+        let start_fractions: Vec<f32> = start_widths.iter().map(|w| *w / total_width).collect();
+
+        self.columns_resizing = Some(ColumnsResizeState {
+            columns_path,
+            boundary_ix,
+            start_mouse_x,
+            total_width,
+            start_widths: start_widths.clone(),
+            start_fractions: start_fractions.clone(),
+            preview_fractions: start_fractions,
+        });
+        self.selecting = false;
+        self.selection_anchor = None;
+        cx.notify();
+    }
+
+    fn update_columns_resize_preview(&mut self, mouse_x: Pixels, cx: &mut Context<Self>) {
+        let Some(resize) = self.columns_resizing.as_mut() else {
+            return;
+        };
+        if resize.boundary_ix + 1 >= resize.start_widths.len() {
+            return;
+        }
+
+        let min_width = px(80.);
+        let left_start = resize.start_widths[resize.boundary_ix];
+        let right_start = resize.start_widths[resize.boundary_ix + 1];
+
+        let mut delta_f = (mouse_x - resize.start_mouse_x) / px(1.);
+        let max_increase_f = ((right_start - min_width) / px(1.)).max(0.0);
+        let max_decrease_f = ((left_start - min_width) / px(1.)).max(0.0);
+
+        if delta_f > max_increase_f {
+            delta_f = max_increase_f;
+        }
+        if delta_f < -max_decrease_f {
+            delta_f = -max_decrease_f;
+        }
+
+        let delta = px(delta_f);
+        let new_left = left_start + delta;
+        let new_right = right_start - delta;
+
+        let mut preview = resize.start_fractions.clone();
+        preview[resize.boundary_ix] = new_left / resize.total_width;
+        preview[resize.boundary_ix + 1] = new_right / resize.total_width;
+        resize.preview_fractions = preview;
+        cx.notify();
+    }
+
+    fn commit_columns_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(resize) = self.columns_resizing.take() else {
+            return;
+        };
+        let args = serde_json::json!({
+            "path": resize.columns_path,
+            "widths": resize.preview_fractions,
+        });
+        if !self.run_command_and_refresh("columns.set_widths", Some(args), cx) {
             cx.notify();
         }
     }
 
+    fn selectable_block_paths_for_point(&self, point: gpui::Point<Pixels>) -> Vec<Vec<usize>> {
+        let mut candidates: Vec<(u8, usize, Vec<usize>)> = Vec::new();
+        for (path, cache) in &self.block_bounds_cache {
+            if !cache.bounds.contains(&point) {
+                continue;
+            }
+
+            let node = match node_at_path(self.editor.doc(), path) {
+                Some(node) => node,
+                None => continue,
+            };
+
+            let (score, kind) = match node {
+                Node::Void(v) => (2u8, v.kind.as_str()),
+                Node::Element(el) => {
+                    let is_text = is_text_block_kind(self.editor.registry(), &el.kind);
+                    (u8::from(!is_text), el.kind.as_str())
+                }
+                Node::Text(_) => continue,
+            };
+
+            let score = if kind == "divider" || kind == "image" {
+                score
+            } else {
+                score.min(1)
+            };
+
+            candidates.push((score, path.len(), path.clone()));
+        }
+
+        candidates.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        candidates.into_iter().map(|(_, _, path)| path).collect()
+    }
+
+    fn refresh_after_doc_change(
+        &mut self,
+        selected_block_path_after: Option<Vec<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        _ = self.scroll_cursor_into_view();
+        self.layout_cache.clear();
+        self.block_bounds_cache.clear();
+        self.selected_block_path = selected_block_path_after;
+        self.columns_resizing = None;
+        self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
+        self.recompute_find_matches();
+        cx.notify();
+    }
+
+    fn push_tx_with_selected_block_path(
+        &mut self,
+        tx: gpui_plate_core::Transaction,
+        selected_block_path_after: Option<Vec<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let source = tx.meta.source.as_deref().unwrap_or("tx:apply").to_string();
+        match self.editor.apply(tx) {
+            Ok(()) => self.refresh_after_doc_change(selected_block_path_after, cx),
+            Err(err) => self.queue_notification(format!("Apply failed ({source}): {err:?}"), cx),
+        }
+    }
+
+    fn push_tx(&mut self, tx: gpui_plate_core::Transaction, cx: &mut Context<Self>) {
+        self.push_tx_with_selected_block_path(tx, None, cx);
+    }
+
     fn run_command_and_refresh(
         &mut self,
-        id: &'static str,
+        id: &str,
         args: Option<serde_json::Value>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.editor.run_command(id, args).is_ok() {
-            _ = self.scroll_cursor_into_view();
-            self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
-            cx.notify();
-            true
-        } else {
-            false
+        match self.editor.run_command(id, args) {
+            Ok(()) => {
+                self.refresh_after_doc_change(None, cx);
+                true
+            }
+            Err(err) => {
+                self.queue_notification(format!("Command failed ({id}): {}", err.message()), cx);
+                false
+            }
         }
+    }
+
+    pub fn command_list(&self) -> Vec<crate::CommandInfo> {
+        let mut out: Vec<crate::CommandInfo> = self
+            .editor
+            .registry()
+            .commands()
+            .iter()
+            .filter_map(|(id, spec)| {
+                if spec.hidden {
+                    return None;
+                }
+                Some(crate::CommandInfo {
+                    id: id.clone(),
+                    label: spec.label.clone(),
+                    description: spec.description.clone(),
+                    keywords: spec.keywords.clone(),
+                    args_example: spec.args_example.clone(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
+    pub fn command_run(
+        &mut self,
+        id: &str,
+        args: Option<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.editor
+            .run_command(id, args)
+            .map_err(|e| e.message().to_string())?;
+        self.refresh_after_doc_change(None, cx);
+        Ok(())
     }
 
     fn scroll_cursor_into_view(&mut self) -> bool {
@@ -1544,6 +2996,13 @@ impl RichTextState {
         }) else {
             return false;
         };
+        let offset_x = RichTextLineElement::align_offset_x_for_index(
+            &cache.text_layout,
+            &cache.bounds,
+            caret_ix,
+            cache.text_align,
+        );
+        let pos = point(pos.x + offset_x, pos.y);
 
         let line_height = cache.text_layout.line_height();
         let caret_bounds = Bounds::from_corners(pos, point(pos.x + px(1.5), pos.y + line_height));
@@ -1571,6 +3030,22 @@ impl RichTextState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(path) = self.selected_block_path.take() {
+            if matches!(
+                node_at_path(self.editor.doc(), &path),
+                Some(Node::Void(_)) | Some(Node::Element(_))
+            ) {
+                self.push_tx(
+                    gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode {
+                        path,
+                    }])
+                    .source("key:backspace:remove_selected_block"),
+                    cx,
+                );
+            }
+            return;
+        }
+
         if self.delete_selection_if_any(cx).is_some() {
             return;
         }
@@ -1640,6 +3115,22 @@ impl RichTextState {
     }
 
     pub(super) fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.selected_block_path.take() {
+            if matches!(
+                node_at_path(self.editor.doc(), &path),
+                Some(Node::Void(_)) | Some(Node::Element(_))
+            ) {
+                self.push_tx(
+                    gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode {
+                        path,
+                    }])
+                    .source("key:delete:remove_selected_block"),
+                    cx,
+                );
+            }
+            return;
+        }
+
         if self.delete_selection_if_any(cx).is_some() {
             return;
         }
@@ -1916,6 +3407,8 @@ impl RichTextState {
     pub(super) fn undo(&mut self, _: &Undo, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.undo() {
             self.layout_cache.clear();
+            self.block_bounds_cache.clear();
+            self.selected_block_path = None;
             self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
@@ -1924,6 +3417,8 @@ impl RichTextState {
     pub(super) fn redo(&mut self, _: &Redo, _window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.redo() {
             self.layout_cache.clear();
+            self.block_bounds_cache.clear();
+            self.selected_block_path = None;
             self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
             cx.notify();
         }
@@ -2035,18 +3530,142 @@ impl RichTextState {
 
     pub fn command_undo(&mut self, cx: &mut Context<Self>) {
         if self.editor.undo() {
-            self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
-            cx.notify();
+            self.refresh_after_doc_change(None, cx);
         }
     }
 
     pub fn command_redo(&mut self, cx: &mut Context<Self>) {
         if self.editor.redo() {
-            self.layout_cache.clear();
-            self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
-            cx.notify();
+            self.refresh_after_doc_change(None, cx);
         }
+    }
+
+    pub fn command_duplicate_selected_block(&mut self, cx: &mut Context<Self>) {
+        let Some((parent_path, ix, _len)) = self.selected_block_sibling_info() else {
+            return;
+        };
+        let Some(selected_path) = self.selected_block_path.clone() else {
+            return;
+        };
+        let Some(node) = node_at_path(self.editor.doc(), &selected_path) else {
+            return;
+        };
+        let node = match node {
+            Node::Element(el) => Node::Element(el.clone()),
+            Node::Void(v) => Node::Void(v.clone()),
+            Node::Text(_) => return,
+        };
+
+        let mut inserted_path = parent_path;
+        inserted_path.push(ix + 1);
+        let mut tx = gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::InsertNode {
+            path: inserted_path.clone(),
+            node: node.clone(),
+        }])
+        .source("command:block.duplicate");
+        if matches!(node, Node::Element(_)) {
+            tx = tx.selection_after(Selection::collapsed(CorePoint::new(
+                inserted_path.clone(),
+                0,
+            )));
+        }
+
+        self.push_tx_with_selected_block_path(tx, Some(inserted_path), cx);
+    }
+
+    pub fn command_move_selected_block_up(&mut self, cx: &mut Context<Self>) {
+        let Some((parent_path, ix, _len)) = self.selected_block_sibling_info() else {
+            return;
+        };
+        if ix == 0 {
+            return;
+        }
+        let Some(selected_path) = self.selected_block_path.clone() else {
+            return;
+        };
+        let Some(node) = node_at_path(self.editor.doc(), &selected_path) else {
+            return;
+        };
+        let node = match node {
+            Node::Element(el) => Node::Element(el.clone()),
+            Node::Void(v) => Node::Void(v.clone()),
+            Node::Text(_) => return,
+        };
+
+        let mut new_path = parent_path;
+        new_path.push(ix - 1);
+        let mut tx = gpui_plate_core::Transaction::new(vec![
+            gpui_plate_core::Op::RemoveNode {
+                path: selected_path,
+            },
+            gpui_plate_core::Op::InsertNode {
+                path: new_path.clone(),
+                node: node.clone(),
+            },
+        ])
+        .source("command:block.move_up");
+        if matches!(node, Node::Element(_)) {
+            tx = tx.selection_after(Selection::collapsed(CorePoint::new(new_path.clone(), 0)));
+        }
+
+        self.push_tx_with_selected_block_path(tx, Some(new_path), cx);
+    }
+
+    pub fn command_move_selected_block_down(&mut self, cx: &mut Context<Self>) {
+        let Some((parent_path, ix, len)) = self.selected_block_sibling_info() else {
+            return;
+        };
+        if ix + 1 >= len {
+            return;
+        }
+        let Some(selected_path) = self.selected_block_path.clone() else {
+            return;
+        };
+        let Some(node) = node_at_path(self.editor.doc(), &selected_path) else {
+            return;
+        };
+        let node = match node {
+            Node::Element(el) => Node::Element(el.clone()),
+            Node::Void(v) => Node::Void(v.clone()),
+            Node::Text(_) => return,
+        };
+
+        let mut new_path = parent_path;
+        new_path.push(ix + 1);
+        let mut tx = gpui_plate_core::Transaction::new(vec![
+            gpui_plate_core::Op::RemoveNode {
+                path: selected_path,
+            },
+            gpui_plate_core::Op::InsertNode {
+                path: new_path.clone(),
+                node: node.clone(),
+            },
+        ])
+        .source("command:block.move_down");
+        if matches!(node, Node::Element(_)) {
+            tx = tx.selection_after(Selection::collapsed(CorePoint::new(new_path.clone(), 0)));
+        }
+
+        self.push_tx_with_selected_block_path(tx, Some(new_path), cx);
+    }
+
+    pub fn command_delete_selected_block(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_path) = self.selected_block_path.clone() else {
+            return;
+        };
+        if !matches!(
+            node_at_path(self.editor.doc(), &selected_path),
+            Some(Node::Element(_)) | Some(Node::Void(_))
+        ) {
+            return;
+        }
+        self.push_tx(
+            gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode {
+                path: selected_path,
+            }])
+            .source("command:block.delete"),
+            cx,
+        );
     }
 
     pub fn command_insert_divider(&mut self, cx: &mut Context<Self>) {
@@ -2060,6 +3679,7 @@ impl RichTextState {
         cx: &mut Context<Self>,
     ) {
         _ = self.delete_selection_if_any(cx);
+        let src = self.normalize_image_src_for_document(&src);
         let args = if let Some(alt) = alt {
             serde_json::json!({ "src": src, "alt": alt })
         } else {
@@ -2068,10 +3688,252 @@ impl RichTextState {
         _ = self.run_command_and_refresh("image.insert", Some(args), cx);
     }
 
+    pub fn command_insert_images(&mut self, srcs: Vec<String>, cx: &mut Context<Self>) {
+        let srcs: Vec<String> = srcs
+            .into_iter()
+            .map(|src| self.normalize_image_src_for_document(&src))
+            .filter(|src| !src.is_empty())
+            .collect();
+        if srcs.is_empty() {
+            return;
+        }
+
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "srcs": srcs });
+        _ = self.run_command_and_refresh("image.insert_many", Some(args), cx);
+    }
+
+    pub fn command_embed_local_images(&mut self, cx: &mut Context<Self>) -> EmbedLocalImagesReport {
+        fn walk(nodes: &[Node], path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, String)>) {
+            for (ix, node) in nodes.iter().enumerate() {
+                path.push(ix);
+                match node {
+                    Node::Void(v) if v.kind == "image" => {
+                        if let Some(src) = v.attrs.get("src").and_then(|v| v.as_str()) {
+                            out.push((path.clone(), src.to_string()));
+                        }
+                    }
+                    Node::Element(el) => walk(&el.children, path, out),
+                    Node::Void(_) | Node::Text(_) => {}
+                }
+                path.pop();
+            }
+        }
+
+        let mut images: Vec<(Vec<usize>, String)> = Vec::new();
+        walk(&self.editor.doc().children, &mut Vec::new(), &mut images);
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        let mut report = EmbedLocalImagesReport::default();
+
+        for (path, src) in images {
+            let Some(local_path) =
+                Self::local_image_path_for_src(&src, self.document_base_dir.as_deref())
+            else {
+                report.skipped += 1;
+                continue;
+            };
+            let Some((mime, format)) = Self::mime_and_format_for_image_path(&local_path) else {
+                report.skipped += 1;
+                continue;
+            };
+
+            let bytes = match std::fs::read(&local_path) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    report.failed += 1;
+                    continue;
+                }
+            };
+
+            let data_url = format!(
+                "data:{mime};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            );
+
+            let mut set = Attrs::default();
+            set.insert(
+                "src".to_string(),
+                serde_json::Value::String(data_url.clone()),
+            );
+            let patch = gpui_plate_core::AttrPatch {
+                set,
+                remove: Vec::new(),
+            };
+            ops.push(gpui_plate_core::Op::SetNodeAttrs { path, patch });
+
+            self.embedded_image_cache
+                .insert(data_url, Arc::new(Image::from_bytes(format, bytes)));
+            report.embedded += 1;
+        }
+
+        if report.embedded > 0 {
+            self.push_tx(
+                gpui_plate_core::Transaction::new(ops).source("command:image.embed_local_images"),
+                cx,
+            );
+        }
+
+        report
+    }
+
+    pub fn command_collect_assets_into_assets_dir(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> CollectAssetsReport {
+        fn walk(nodes: &[Node], path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, String)>) {
+            for (ix, node) in nodes.iter().enumerate() {
+                path.push(ix);
+                match node {
+                    Node::Void(v) if v.kind == "image" => {
+                        if let Some(src) = v.attrs.get("src").and_then(|v| v.as_str()) {
+                            out.push((path.clone(), src.to_string()));
+                        }
+                    }
+                    Node::Element(el) => walk(&el.children, path, out),
+                    Node::Void(_) | Node::Text(_) => {}
+                }
+                path.pop();
+            }
+        }
+
+        let mut report = CollectAssetsReport::default();
+        let Some(document_base_dir) = self.document_base_dir.clone() else {
+            report.failed += 1;
+            return report;
+        };
+
+        let base_dir = if document_base_dir.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            document_base_dir
+        };
+        let base_dir = std::fs::canonicalize(&base_dir).unwrap_or(base_dir);
+        let assets_dir = base_dir.join("assets");
+        if std::fs::create_dir_all(&assets_dir).is_err() {
+            report.failed += 1;
+            return report;
+        }
+
+        let mut images: Vec<(Vec<usize>, String)> = Vec::new();
+        walk(&self.editor.doc().children, &mut Vec::new(), &mut images);
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        let mut touched_assets: HashSet<String> = HashSet::new();
+
+        for (path, src) in images {
+            let src = src.trim();
+            if src.is_empty() {
+                report.skipped += 1;
+                continue;
+            }
+            if src.starts_with("http://")
+                || src.starts_with("https://")
+                || src.starts_with("resource://")
+            {
+                report.skipped += 1;
+                continue;
+            }
+
+            let (bytes, ext, is_data_url) = if src.starts_with("data:") {
+                let Some((mime, bytes)) = Self::decode_data_url_bytes(src) else {
+                    report.failed += 1;
+                    continue;
+                };
+                let Some(ext) = Self::image_ext_for_mime(&mime).map(|s| s.to_string()) else {
+                    report.failed += 1;
+                    continue;
+                };
+                (bytes, ext, true)
+            } else {
+                let Some(local_path) = Self::local_image_path_for_src(src, Some(&base_dir)) else {
+                    report.skipped += 1;
+                    continue;
+                };
+                let ext = local_path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if ext.is_empty() {
+                    report.skipped += 1;
+                    continue;
+                }
+                let bytes = match std::fs::read(&local_path) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        report.failed += 1;
+                        continue;
+                    }
+                };
+                (bytes, ext, false)
+            };
+
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            let digest = hasher.finish();
+
+            let file_name = format!("{digest:016x}.{ext}");
+            let relative_path = format!("assets/{file_name}");
+            let dest_path = base_dir.join(&relative_path);
+            if dest_path.exists() && dest_path.is_dir() {
+                report.failed += 1;
+                continue;
+            }
+
+            if !dest_path.exists() && !touched_assets.contains(&relative_path) {
+                if let Some(parent) = dest_path.parent() {
+                    if std::fs::create_dir_all(parent).is_err() {
+                        report.failed += 1;
+                        continue;
+                    }
+                }
+                if std::fs::write(&dest_path, &bytes).is_ok() {
+                    report.assets_written += 1;
+                } else {
+                    report.failed += 1;
+                    continue;
+                }
+                touched_assets.insert(relative_path.clone());
+            }
+
+            if src != relative_path {
+                let mut set = Attrs::default();
+                set.insert("src".to_string(), serde_json::Value::String(relative_path));
+                let patch = gpui_plate_core::AttrPatch {
+                    set,
+                    remove: Vec::new(),
+                };
+                ops.push(gpui_plate_core::Op::SetNodeAttrs { path, patch });
+                report.rewritten += 1;
+                if is_data_url {
+                    report.rewritten_data_url += 1;
+                }
+            } else {
+                report.skipped += 1;
+            }
+        }
+
+        if !ops.is_empty() {
+            self.push_tx(
+                gpui_plate_core::Transaction::new(ops).source("command:image.collect_assets"),
+                cx,
+            );
+        }
+
+        report
+    }
+
     pub fn command_insert_mention(&mut self, label: String, cx: &mut Context<Self>) {
         _ = self.delete_selection_if_any(cx);
         let args = serde_json::json!({ "label": label });
         _ = self.run_command_and_refresh("mention.insert", Some(args), cx);
+    }
+
+    pub fn command_insert_emoji(&mut self, emoji: String, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "emoji": emoji });
+        _ = self.run_command_and_refresh("emoji.insert", Some(args), cx);
     }
 
     pub fn command_set_heading(&mut self, level: u64, cx: &mut Context<Self>) {
@@ -2081,6 +3943,29 @@ impl RichTextState {
 
     pub fn command_unset_heading(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("block.unset_heading", None, cx);
+    }
+
+    pub fn command_toggle_code_block(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("code_block.toggle", None, cx);
+    }
+
+    pub fn command_set_align(&mut self, align: BlockAlign, cx: &mut Context<Self>) {
+        let align = match align {
+            BlockAlign::Left => "left",
+            BlockAlign::Center => "center",
+            BlockAlign::Right => "right",
+        };
+        let args = serde_json::json!({ "align": align });
+        _ = self.run_command_and_refresh("block.set_align", Some(args), cx);
+    }
+
+    pub fn command_set_font_size(&mut self, size: u64, cx: &mut Context<Self>) {
+        let args = serde_json::json!({ "size": size });
+        _ = self.run_command_and_refresh("block.set_font_size", Some(args), cx);
+    }
+
+    pub fn command_unset_font_size(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("block.unset_font_size", None, cx);
     }
 
     pub fn command_toggle_blockquote(&mut self, cx: &mut Context<Self>) {
@@ -2167,8 +4052,16 @@ impl RichTextState {
         _ = self.run_command_and_refresh("table.insert", Some(args), cx);
     }
 
+    pub fn command_insert_table_row_above(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.insert_row_above", None, cx);
+    }
+
     pub fn command_insert_table_row_below(&mut self, cx: &mut Context<Self>) {
         _ = self.run_command_and_refresh("table.insert_row_below", None, cx);
+    }
+
+    pub fn command_insert_table_col_left(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.insert_col_left", None, cx);
     }
 
     pub fn command_insert_table_col_right(&mut self, cx: &mut Context<Self>) {
@@ -2183,9 +4076,26 @@ impl RichTextState {
         _ = self.run_command_and_refresh("table.delete_col", None, cx);
     }
 
+    pub fn command_delete_table(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("table.delete_table", None, cx);
+    }
+
+    pub fn command_insert_columns(&mut self, columns: usize, cx: &mut Context<Self>) {
+        _ = self.delete_selection_if_any(cx);
+        let args = serde_json::json!({ "columns": columns });
+        _ = self.run_command_and_refresh("columns.insert", Some(args), cx);
+    }
+
+    pub fn command_unwrap_columns(&mut self, cx: &mut Context<Self>) {
+        _ = self.run_command_and_refresh("columns.unwrap", None, cx);
+    }
+
     pub fn command_set_link(&mut self, url: String, cx: &mut Context<Self>) {
-        // UX: if there's no selection, apply link to the word under the caret so users get an
-        // immediate visual confirmation (instead of only affecting subsequent input).
+        // UX goals:
+        // - If selection exists: apply link to selection (core semantics).
+        // - If caret is in an existing link: edit the whole link run (not just one segment).
+        // - Otherwise: try to apply link to a nearby word; if nothing meaningful exists (empty/
+        //   whitespace), insert the URL as linked text so users see an immediate result.
         if self.editor.selection().is_collapsed() {
             if let Some(block_path) = self.active_text_block_path()
                 && let Some(text) = self.text_block_text(&block_path)
@@ -2195,8 +4105,15 @@ impl RichTextState {
                     .unwrap_or(0)
                     .min(text.len());
                 let text = text.as_str();
-                let mut range = Self::word_range(text, cursor);
 
+                if let Some(range) = self.link_run_range_in_block(&block_path, cursor) {
+                    self.set_selection_in_active_block(range.start, range.end, cx);
+                    let args = serde_json::json!({ "url": url });
+                    _ = self.run_command_and_refresh("marks.set_link", Some(args), cx);
+                    return;
+                }
+
+                let mut range = Self::word_range(text, cursor);
                 let mut selected = text.get(range.clone()).unwrap_or("");
                 if range.start >= range.end || selected.chars().all(|ch| ch.is_whitespace()) {
                     // If we landed on whitespace, try the next non-whitespace run to the right.
@@ -2233,7 +4150,24 @@ impl RichTextState {
 
                 if range.start < range.end && !selected.chars().all(|ch| ch.is_whitespace()) {
                     self.set_selection_in_active_block(range.start, range.end, cx);
+                    let args = serde_json::json!({ "url": url });
+                    _ = self.run_command_and_refresh("marks.set_link", Some(args), cx);
+                    return;
                 }
+
+                let mut marks = self.active_marks();
+                marks.link = Some(url.clone());
+                if let Some(tx) = self.tx_replace_range_in_block(
+                    &block_path,
+                    cursor..cursor,
+                    &url,
+                    &marks,
+                    None,
+                    "command:marks.insert_link",
+                ) {
+                    self.push_tx(tx, cx);
+                }
+                return;
             }
         }
 
@@ -2288,6 +4222,39 @@ impl RichTextState {
             .unwrap_or(false)
     }
 
+    pub fn is_columns_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("columns.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn is_code_block_active(&self) -> bool {
+        self.editor
+            .run_query::<bool>("code_block.is_active", None)
+            .unwrap_or(false)
+    }
+
+    pub fn block_align(&self) -> BlockAlign {
+        match self
+            .editor
+            .run_query::<Option<String>>("block.align", None)
+            .ok()
+            .flatten()
+            .as_deref()
+        {
+            Some("center") => BlockAlign::Center,
+            Some("right") => BlockAlign::Right,
+            _ => BlockAlign::Left,
+        }
+    }
+
+    pub fn block_font_size(&self) -> Option<u64> {
+        self.editor
+            .run_query::<Option<u64>>("block.font_size", None)
+            .ok()
+            .flatten()
+    }
+
     pub fn heading_level(&self) -> Option<u64> {
         self.editor
             .run_query::<Option<u64>>("block.heading_level", None)
@@ -2331,74 +4298,630 @@ impl RichTextState {
             .unwrap_or(false)
     }
 
-    pub fn command_copy(&mut self, cx: &mut Context<Self>) {
+    fn selected_block_sibling_info(&self) -> Option<(Vec<usize>, usize, usize)> {
+        let path = self.selected_block_path.as_ref()?;
+        let node = node_at_path(self.editor.doc(), path)?;
+        if !matches!(node, Node::Element(_) | Node::Void(_)) {
+            return None;
+        }
+
+        let (ix, parent_path) = path.split_last()?;
+        let parent_path = parent_path.to_vec();
+        let len = if parent_path.is_empty() {
+            self.editor.doc().children.len()
+        } else {
+            element_at_path(self.editor.doc(), &parent_path)?
+                .children
+                .len()
+        };
+        Some((parent_path, *ix, len))
+    }
+
+    fn plain_text_for_node(&self, node: &Node) -> String {
+        fn void_fallback(v: &gpui_plate_core::VoidNode) -> String {
+            match v.kind.as_str() {
+                "divider" => "---".to_string(),
+                "image" => {
+                    let src = v.attrs.get("src").and_then(|v| v.as_str()).unwrap_or("");
+                    let alt = v.attrs.get("alt").and_then(|v| v.as_str()).unwrap_or("");
+                    if src.is_empty() {
+                        "![image]()".to_string()
+                    } else {
+                        format!("![{alt}]({src})")
+                    }
+                }
+                _ => v.inline_text(),
+            }
+        }
+
+        fn collect(
+            node: &Node,
+            registry: &PluginRegistry,
+            out: &mut Vec<String>,
+            buf: &mut String,
+        ) {
+            match node {
+                Node::Text(t) => buf.push_str(&t.text),
+                Node::Void(v) => {
+                    if !buf.is_empty() {
+                        out.push(std::mem::take(buf));
+                    }
+                    out.push(void_fallback(v));
+                }
+                Node::Element(el) => {
+                    if is_text_block_kind(registry, &el.kind) {
+                        for child in &el.children {
+                            match child {
+                                Node::Text(t) => buf.push_str(&t.text),
+                                Node::Void(v) => buf.push_str(&v.inline_text()),
+                                Node::Element(_) => {}
+                            }
+                        }
+                        out.push(std::mem::take(buf));
+                    } else {
+                        for child in &el.children {
+                            collect(child, registry, out, buf);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut buf = String::new();
+        collect(node, self.editor.registry(), &mut lines, &mut buf);
+        if !buf.is_empty() {
+            lines.push(buf);
+        }
+        lines.join("\n")
+    }
+
+    fn copy_selected_block_to_clipboard(&self, cx: &mut Context<Self>) -> bool {
+        let Some(path) = self.selected_block_path.as_ref() else {
+            return false;
+        };
+        let Some(node) = node_at_path(self.editor.doc(), path) else {
+            return false;
+        };
+        let node = match node {
+            Node::Text(_) => return false,
+            Node::Void(v) => Node::Void(v.clone()),
+            Node::Element(el) => Node::Element(el.clone()),
+        };
+
+        let payload = PlateClipboardFragment::new(vec![node.clone()]);
+        let text = self.plain_text_for_node(&node);
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, payload));
+        true
+    }
+
+    fn copy_selected_range_to_clipboard(&self, cx: &mut Context<Self>) -> bool {
         let selection = self.editor.selection().clone();
         if selection.is_collapsed() {
-            return;
+            return false;
         }
 
-        let mut start = selection.anchor.clone();
-        let mut end = selection.focus.clone();
-        if start.path == end.path {
-            if end.offset < start.offset {
-                std::mem::swap(&mut start, &mut end);
-            }
-        } else if end.path < start.path {
-            std::mem::swap(&mut start, &mut end);
-        }
-
-        let start_offset = self.row_offset_for_point(&start).unwrap_or(0);
-        let end_offset = self.row_offset_for_point(&end).unwrap_or(0);
-
-        let Some(start_block) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
-            return;
-        };
-        let Some(end_block) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
-            return;
-        };
-
-        if start_block == end_block {
-            let text = self.text_block_text(&start_block).unwrap_or_default();
-            let start = start_offset.min(text.len());
-            let end = end_offset.min(text.len()).max(start);
-            let selected = text.as_str().get(start..end).unwrap_or("").to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(selected));
-            return;
-        }
+        let anchor_block: Vec<usize> = selection
+            .anchor
+            .path
+            .split_last()
+            .map(|(_, p)| p.to_vec())
+            .unwrap_or_default();
+        let focus_block: Vec<usize> = selection
+            .focus
+            .path
+            .split_last()
+            .map(|(_, p)| p.to_vec())
+            .unwrap_or_default();
 
         let blocks = text_block_paths(self.editor.doc(), self.editor.registry());
-        let Some(start_pos) = blocks.iter().position(|p| p == &start_block) else {
-            return;
+        let Some(anchor_pos) = blocks.iter().position(|p| p == &anchor_block) else {
+            return false;
         };
-        let Some(end_pos) = blocks.iter().position(|p| p == &end_block) else {
-            return;
-        };
-        let (start_pos, end_pos) = if start_pos <= end_pos {
-            (start_pos, end_pos)
-        } else {
-            (end_pos, start_pos)
+        let Some(focus_pos) = blocks.iter().position(|p| p == &focus_block) else {
+            return false;
         };
 
-        let mut out = String::new();
-        for (ix, block_path) in blocks.iter().enumerate().take(end_pos + 1).skip(start_pos) {
-            let text = self.text_block_text(block_path).unwrap_or_default();
-            if ix == start_pos {
-                let start = start_offset.min(text.len());
-                out.push_str(text.as_str().get(start..).unwrap_or(""));
-                out.push('\n');
-            } else if ix == end_pos {
-                let end = end_offset.min(text.len());
-                out.push_str(text.as_str().get(..end).unwrap_or(""));
+        let anchor_offset = self.row_offset_for_point(&selection.anchor).unwrap_or(0);
+        let focus_offset = self.row_offset_for_point(&selection.focus).unwrap_or(0);
+
+        let (start_pos, start_offset, end_pos, end_offset) = if anchor_pos == focus_pos {
+            if focus_offset < anchor_offset {
+                (focus_pos, focus_offset, anchor_pos, anchor_offset)
             } else {
-                out.push_str(text.as_str());
-                out.push('\n');
+                (anchor_pos, anchor_offset, focus_pos, focus_offset)
+            }
+        } else if focus_pos < anchor_pos {
+            (focus_pos, focus_offset, anchor_pos, anchor_offset)
+        } else {
+            (anchor_pos, anchor_offset, focus_pos, focus_offset)
+        };
+
+        let mut fragment_blocks: Vec<Node> = Vec::new();
+        let mut fallback_text = String::new();
+
+        for (pos, block_path) in blocks.iter().enumerate().take(end_pos + 1).skip(start_pos) {
+            let Some(el) = element_at_path(self.editor.doc(), block_path) else {
+                continue;
+            };
+            if !is_text_block_kind(self.editor.registry(), &el.kind) {
+                continue;
+            }
+
+            let len = self.block_text_len_in_block(block_path);
+            let (range_start, range_end) = if start_pos == end_pos {
+                (
+                    start_offset.min(len),
+                    end_offset.min(len).max(start_offset.min(len)),
+                )
+            } else if pos == start_pos {
+                (start_offset.min(len), len)
+            } else if pos == end_pos {
+                (0, end_offset.min(len))
+            } else {
+                (0, len)
+            };
+
+            let old_children = el.children.clone();
+            let selected_children = if range_end > range_start {
+                let (_left, rest) =
+                    Self::split_inline_children_at_offset(&old_children, range_start);
+                let (selected, _right) =
+                    Self::split_inline_children_at_offset(&rest, range_end - range_start);
+                Self::merge_adjacent_text_nodes(selected)
+            } else {
+                Vec::new()
+            };
+
+            fragment_blocks.push(Node::Element(ElementNode {
+                kind: el.kind.clone(),
+                attrs: el.attrs.clone(),
+                children: selected_children,
+            }));
+
+            let text = self.text_block_text(block_path).unwrap_or_default();
+            if start_pos == end_pos {
+                let start = range_start.min(text.len());
+                let end = range_end.min(text.len()).max(start);
+                fallback_text.push_str(text.as_str().get(start..end).unwrap_or(""));
+                break;
+            }
+
+            if pos == start_pos {
+                let start = range_start.min(text.len());
+                fallback_text.push_str(text.as_str().get(start..).unwrap_or(""));
+                fallback_text.push('\n');
+            } else if pos == end_pos {
+                let end = range_end.min(text.len());
+                fallback_text.push_str(text.as_str().get(..end).unwrap_or(""));
+            } else {
+                fallback_text.push_str(text.as_str());
+                fallback_text.push('\n');
             }
         }
 
-        cx.write_to_clipboard(ClipboardItem::new_string(out));
+        if fragment_blocks.is_empty() {
+            return false;
+        }
+
+        let payload = PlateClipboardFragment::new_range(fragment_blocks);
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
+            fallback_text,
+            payload,
+        ));
+        true
+    }
+
+    fn inline_len(nodes: &[Node]) -> usize {
+        nodes
+            .iter()
+            .map(|n| match n {
+                Node::Text(t) => t.text.len(),
+                Node::Void(v) => v.inline_text_len(),
+                Node::Element(_) => 0,
+            })
+            .sum()
+    }
+
+    fn inline_children_is_effectively_empty(children: &[Node]) -> bool {
+        children.iter().all(|n| match n {
+            Node::Text(t) => t.text.is_empty(),
+            Node::Void(_) | Node::Element(_) => false,
+        })
+    }
+
+    fn normalize_inline_children_for_insert(children: Vec<Node>, marks: &Marks) -> Vec<Node> {
+        let children = Self::merge_adjacent_text_nodes(children);
+        Self::ensure_has_text_leaf(children, marks)
+    }
+
+    fn paste_range_fragment_blocks_at_insertion_point(
+        &mut self,
+        fragment_blocks: Vec<ElementNode>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let insert_at = self
+            .delete_selection_if_any(cx)
+            .unwrap_or_else(|| self.editor.selection().focus.clone());
+        let Some(block_path) = insert_at.path.split_last().map(|(_, p)| p.to_vec()) else {
+            return false;
+        };
+
+        let Some(context_el) = element_at_path(self.editor.doc(), &block_path) else {
+            return false;
+        };
+        if !is_text_block_kind(self.editor.registry(), &context_el.kind) {
+            return false;
+        }
+
+        let offset = self.row_offset_for_point(&insert_at).unwrap_or(0);
+        let marks = self.active_marks();
+        let (prefix, suffix) = Self::split_inline_children_at_offset(&context_el.children, offset);
+
+        if fragment_blocks.is_empty() {
+            return false;
+        }
+
+        if fragment_blocks.len() == 1 && fragment_blocks[0].kind == context_el.kind {
+            let inserted_children = fragment_blocks[0].children.clone();
+            let caret_offset = Self::inline_len(&prefix) + Self::inline_len(&inserted_children);
+
+            let mut new_children = prefix;
+            new_children.extend(inserted_children);
+            new_children.extend(suffix);
+            let new_children = Self::normalize_inline_children_for_insert(new_children, &marks);
+
+            let caret_point =
+                Self::point_for_block_offset_in_children(&block_path, &new_children, caret_offset);
+
+            let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+            for child_ix in (0..context_el.children.len()).rev() {
+                let mut path = block_path.clone();
+                path.push(child_ix);
+                ops.push(gpui_plate_core::Op::RemoveNode { path });
+            }
+            for (child_ix, node) in new_children.into_iter().enumerate() {
+                let mut path = block_path.clone();
+                path.push(child_ix);
+                ops.push(gpui_plate_core::Op::InsertNode { path, node });
+            }
+
+            self.push_tx(
+                gpui_plate_core::Transaction::new(ops)
+                    .selection_after(Selection::collapsed(caret_point))
+                    .source("command:paste_range_fragment_inline"),
+                cx,
+            );
+            return true;
+        }
+
+        let Some((block_ix, parent_path)) = block_path.split_last() else {
+            return false;
+        };
+        let block_ix = *block_ix;
+        let parent_path = parent_path.to_vec();
+
+        let context_kind = context_el.kind.clone();
+        let context_attrs = context_el.attrs.clone();
+
+        let prefix_is_empty = Self::inline_children_is_effectively_empty(&prefix);
+        let suffix_is_empty = Self::inline_children_is_effectively_empty(&suffix);
+        let default_marks = Marks::default();
+
+        if fragment_blocks.len() == 1 {
+            let mut out_blocks: Vec<Node> = Vec::new();
+            let mut caret_rel_ix = 0usize;
+
+            if !prefix_is_empty {
+                let children = Self::normalize_inline_children_for_insert(prefix, &marks);
+                out_blocks.push(Node::Element(ElementNode {
+                    kind: context_kind.clone(),
+                    attrs: context_attrs.clone(),
+                    children,
+                }));
+                caret_rel_ix = 1;
+            }
+
+            let mut frag = fragment_blocks[0].clone();
+            frag.children =
+                Self::normalize_inline_children_for_insert(frag.children, &default_marks);
+            let caret_inline_offset = Self::inline_len(&frag.children);
+            out_blocks.push(Node::Element(frag));
+
+            if !suffix_is_empty {
+                let children = Self::normalize_inline_children_for_insert(suffix, &marks);
+                out_blocks.push(Node::Element(ElementNode {
+                    kind: context_kind.clone(),
+                    attrs: context_attrs.clone(),
+                    children,
+                }));
+            }
+
+            let caret_block_ix = block_ix + caret_rel_ix;
+            let mut caret_block_path = parent_path.clone();
+            caret_block_path.push(caret_block_ix);
+            let caret_block_children = match out_blocks.get(caret_rel_ix) {
+                Some(Node::Element(el)) => &el.children,
+                _ => return false,
+            };
+            let caret_point = Self::point_for_block_offset_in_children(
+                &caret_block_path,
+                caret_block_children,
+                caret_inline_offset,
+            );
+
+            let mut ops: Vec<gpui_plate_core::Op> = vec![gpui_plate_core::Op::RemoveNode {
+                path: block_path.clone(),
+            }];
+            for (i, node) in out_blocks.into_iter().enumerate() {
+                let mut path = parent_path.clone();
+                path.push(block_ix + i);
+                ops.push(gpui_plate_core::Op::InsertNode { path, node });
+            }
+
+            self.push_tx(
+                gpui_plate_core::Transaction::new(ops)
+                    .selection_after(Selection::collapsed(caret_point))
+                    .source("command:paste_range_fragment_block"),
+                cx,
+            );
+            return true;
+        }
+
+        let mut out_blocks: Vec<Node> = Vec::new();
+        let caret_rel_ix: usize;
+        let caret_inline_offset: usize;
+
+        let last_frag_ix = fragment_blocks.len() - 1;
+        let merge_first = fragment_blocks
+            .first()
+            .is_some_and(|el| el.kind == context_kind);
+        let merge_last = fragment_blocks
+            .last()
+            .is_some_and(|el| el.kind == context_kind);
+
+        // Prefix + first fragment block
+        if merge_first {
+            let first_children = fragment_blocks[0].children.clone();
+            let mut children = prefix;
+            children.extend(first_children);
+            let children = Self::normalize_inline_children_for_insert(children, &marks);
+            out_blocks.push(Node::Element(ElementNode {
+                kind: context_kind.clone(),
+                attrs: context_attrs.clone(),
+                children,
+            }));
+        } else {
+            if !prefix_is_empty {
+                let children = Self::normalize_inline_children_for_insert(prefix, &marks);
+                out_blocks.push(Node::Element(ElementNode {
+                    kind: context_kind.clone(),
+                    attrs: context_attrs.clone(),
+                    children,
+                }));
+            }
+
+            let mut first = fragment_blocks[0].clone();
+            first.children =
+                Self::normalize_inline_children_for_insert(first.children, &default_marks);
+            out_blocks.push(Node::Element(first));
+        }
+
+        // Middle fragment blocks (excluding first & last)
+        if fragment_blocks.len() > 2 {
+            for frag in fragment_blocks.iter().take(last_frag_ix).skip(1) {
+                let mut node = frag.clone();
+                node.children =
+                    Self::normalize_inline_children_for_insert(node.children, &default_marks);
+                out_blocks.push(Node::Element(node));
+            }
+        }
+
+        // Last fragment block + suffix
+        let last_children = fragment_blocks[last_frag_ix].children.clone();
+        if merge_last {
+            let caret_at = Self::inline_len(&last_children);
+            let mut children = last_children;
+            children.extend(suffix);
+            let children = Self::normalize_inline_children_for_insert(children, &marks);
+            caret_rel_ix = out_blocks.len();
+            caret_inline_offset = caret_at;
+            out_blocks.push(Node::Element(ElementNode {
+                kind: context_kind.clone(),
+                attrs: context_attrs.clone(),
+                children,
+            }));
+        } else {
+            let mut last = fragment_blocks[last_frag_ix].clone();
+            last.children =
+                Self::normalize_inline_children_for_insert(last.children, &default_marks);
+            caret_rel_ix = out_blocks.len();
+            caret_inline_offset = Self::inline_len(&last.children);
+            out_blocks.push(Node::Element(last));
+
+            if !suffix_is_empty {
+                let children = Self::normalize_inline_children_for_insert(suffix, &marks);
+                out_blocks.push(Node::Element(ElementNode {
+                    kind: context_kind.clone(),
+                    attrs: context_attrs.clone(),
+                    children,
+                }));
+            }
+        }
+
+        let mut ops: Vec<gpui_plate_core::Op> = vec![gpui_plate_core::Op::RemoveNode {
+            path: block_path.clone(),
+        }];
+        for (i, node) in out_blocks.iter().cloned().enumerate() {
+            let mut path = parent_path.clone();
+            path.push(block_ix + i);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+
+        let caret_block_ix = block_ix + caret_rel_ix;
+        let mut caret_block_path = parent_path.clone();
+        caret_block_path.push(caret_block_ix);
+        let caret_block_children = match out_blocks.get(caret_rel_ix) {
+            Some(Node::Element(el)) => &el.children,
+            _ => return false,
+        };
+        let caret_point = Self::point_for_block_offset_in_children(
+            &caret_block_path,
+            caret_block_children,
+            caret_inline_offset,
+        );
+
+        self.push_tx(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(Selection::collapsed(caret_point))
+                .source("command:paste_range_fragment_multiblock"),
+            cx,
+        );
+        true
+    }
+
+    fn paste_block_fragment_nodes(&mut self, nodes: Vec<Node>, cx: &mut Context<Self>) -> bool {
+        fn has_text_descendant(node: &Node) -> bool {
+            match node {
+                Node::Text(_) => true,
+                Node::Void(_) => false,
+                Node::Element(el) => el.children.iter().any(has_text_descendant),
+            }
+        }
+
+        let nodes: Vec<Node> = nodes
+            .into_iter()
+            .filter(|n| matches!(n, Node::Void(_) | Node::Element(_)))
+            .collect();
+        if nodes.is_empty() {
+            return false;
+        }
+        let nodes_len = nodes.len();
+
+        if let Some(selected_path) = self.selected_block_path.clone()
+            && let Some((selected_ix, parent_path)) = selected_path.split_last()
+        {
+            let selected_ix = *selected_ix;
+            let parent_path = parent_path.to_vec();
+
+            let after_sibling_has_text = {
+                let mut path = parent_path.clone();
+                path.push(selected_ix + 1);
+                node_at_path(self.editor.doc(), &path)
+                    .map(has_text_descendant)
+                    .unwrap_or(false)
+            };
+
+            let mut ops: Vec<gpui_plate_core::Op> = vec![gpui_plate_core::Op::RemoveNode {
+                path: selected_path,
+            }];
+
+            for (i, node) in nodes.into_iter().enumerate() {
+                let mut path = parent_path.clone();
+                path.push(selected_ix + i);
+                ops.push(gpui_plate_core::Op::InsertNode { path, node });
+            }
+
+            let after_index = selected_ix + nodes_len;
+            let selection_after = if after_sibling_has_text {
+                let mut path = parent_path.clone();
+                path.push(after_index);
+                Selection::collapsed(CorePoint::new(path, 0))
+            } else {
+                let mut paragraph_path = parent_path.clone();
+                paragraph_path.push(after_index);
+                ops.push(gpui_plate_core::Op::InsertNode {
+                    path: paragraph_path.clone(),
+                    node: Node::paragraph(""),
+                });
+                Selection::collapsed(CorePoint::new(paragraph_path, 0))
+            };
+
+            self.push_tx(
+                gpui_plate_core::Transaction::new(ops)
+                    .selection_after(selection_after)
+                    .source("command:paste_block_fragment"),
+                cx,
+            );
+            return true;
+        }
+
+        let insert_at = self
+            .delete_selection_if_any(cx)
+            .unwrap_or_else(|| self.editor.selection().focus.clone());
+        let Some((_, block_path)) = insert_at.path.split_last() else {
+            return false;
+        };
+        let Some((block_ix, parent_path)) = block_path.split_last() else {
+            return false;
+        };
+        let insert_ix = block_ix + 1;
+        let parent_path = parent_path.to_vec();
+
+        let after_sibling_has_text = {
+            let mut path = parent_path.clone();
+            path.push(insert_ix);
+            node_at_path(self.editor.doc(), &path)
+                .map(has_text_descendant)
+                .unwrap_or(false)
+        };
+
+        let mut ops: Vec<gpui_plate_core::Op> = Vec::new();
+        for (i, node) in nodes.into_iter().enumerate() {
+            let mut path = parent_path.clone();
+            path.push(insert_ix + i);
+            ops.push(gpui_plate_core::Op::InsertNode { path, node });
+        }
+
+        let after_index = insert_ix + nodes_len;
+        let selection_after = if after_sibling_has_text {
+            let mut path = parent_path.clone();
+            path.push(after_index);
+            Selection::collapsed(CorePoint::new(path, 0))
+        } else {
+            let mut paragraph_path = parent_path.clone();
+            paragraph_path.push(after_index);
+            ops.push(gpui_plate_core::Op::InsertNode {
+                path: paragraph_path.clone(),
+                node: Node::paragraph(""),
+            });
+            Selection::collapsed(CorePoint::new(paragraph_path, 0))
+        };
+
+        self.push_tx(
+            gpui_plate_core::Transaction::new(ops)
+                .selection_after(selection_after)
+                .source("command:paste_block_fragment"),
+            cx,
+        );
+        true
+    }
+
+    pub fn command_copy(&mut self, cx: &mut Context<Self>) {
+        if self.copy_selected_block_to_clipboard(cx) {
+            return;
+        }
+
+        _ = self.copy_selected_range_to_clipboard(cx);
     }
 
     pub fn command_cut(&mut self, cx: &mut Context<Self>) {
+        if self.copy_selected_block_to_clipboard(cx)
+            && let Some(path) = self.selected_block_path.clone()
+            && matches!(
+                node_at_path(self.editor.doc(), &path),
+                Some(Node::Void(_)) | Some(Node::Element(_))
+            )
+        {
+            self.selected_block_path = None;
+            self.push_tx(
+                gpui_plate_core::Transaction::new(vec![gpui_plate_core::Op::RemoveNode { path }])
+                    .source("command:cut_selected_block"),
+                cx,
+            );
+            return;
+        }
+
         self.command_copy(cx);
         _ = self.delete_selection_if_any(cx);
     }
@@ -2407,9 +4930,105 @@ impl RichTextState {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
+
+        if let Some(fragment) = PlateClipboardFragment::from_clipboard(&clipboard) {
+            match fragment.mode {
+                PlateClipboardFragmentMode::Range => {
+                    if self.selected_block_path.is_some() {
+                        if self.paste_block_fragment_nodes(fragment.nodes, cx) {
+                            return;
+                        }
+                    } else {
+                        let blocks: Vec<ElementNode> = fragment
+                            .nodes
+                            .into_iter()
+                            .filter_map(|node| match node {
+                                Node::Element(el) => Some(el),
+                                _ => None,
+                            })
+                            .collect();
+                        if !blocks.is_empty()
+                            && self.paste_range_fragment_blocks_at_insertion_point(blocks, cx)
+                        {
+                            return;
+                        }
+                    }
+                }
+                PlateClipboardFragmentMode::Block => {
+                    if self.paste_block_fragment_nodes(fragment.nodes, cx) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        let mut pasted_image_srcs: Vec<String> = Vec::new();
+        for entry in clipboard.entries() {
+            let ClipboardEntry::Image(image) = entry else {
+                continue;
+            };
+            let src = Self::data_url_for_image(image);
+            if src.is_empty() {
+                continue;
+            }
+            self.embedded_image_cache
+                .insert(src.clone(), Arc::new(image.clone()));
+            pasted_image_srcs.push(src);
+        }
+
+        if !pasted_image_srcs.is_empty() {
+            if self.selected_block_path.is_some() {
+                let nodes = pasted_image_srcs
+                    .iter()
+                    .cloned()
+                    .map(|src| Node::image(src, None))
+                    .collect();
+                if self.paste_block_fragment_nodes(nodes, cx) {
+                    return;
+                }
+            }
+
+            _ = self.delete_selection_if_any(cx);
+            let args = serde_json::json!({ "srcs": pasted_image_srcs });
+            if !self.run_command_and_refresh("image.insert_many", Some(args), cx) {
+                cx.notify();
+            }
+            return;
+        }
+
         let mut new_text = clipboard.text().unwrap_or_default();
         new_text = new_text.replace("\r\n", "\n").replace('\r', "\n");
         if new_text.is_empty() {
+            return;
+        }
+
+        let mut image_srcs: Vec<String> = Vec::new();
+        let mut ok = true;
+        for line in new_text.lines().map(str::trim).filter(|s| !s.is_empty()) {
+            let src = Self::normalize_image_src(line);
+            let path = Path::new(&src);
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let is_image = matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "tif" | "tiff"
+            );
+            if !(is_image && path.is_absolute() && path.exists()) {
+                ok = false;
+                break;
+            }
+            image_srcs.push(src);
+        }
+
+        if ok && !image_srcs.is_empty() {
+            _ = self.delete_selection_if_any(cx);
+            let args = serde_json::json!({ "srcs": image_srcs });
+            if !self.run_command_and_refresh("image.insert_many", Some(args), cx) {
+                cx.notify();
+            }
             return;
         }
 
@@ -2657,7 +5276,6 @@ pub struct RichTextLineElement {
     styled_text: StyledText,
     text: SharedString,
     segments: Vec<InlineTextSegment>,
-    base_text_style: Option<TextStyle>,
 }
 
 impl RichTextLineElement {
@@ -2668,13 +5286,7 @@ impl RichTextLineElement {
             styled_text: StyledText::new(SharedString::default()),
             text: SharedString::default(),
             segments: Vec::new(),
-            base_text_style: None,
         }
-    }
-
-    pub fn with_base_text_style(mut self, style: TextStyle) -> Self {
-        self.base_text_style = Some(style);
-        self
     }
 
     fn paint_selection_range(
@@ -2684,6 +5296,7 @@ impl RichTextLineElement {
         line_height: Pixels,
         window: &mut Window,
         selection_color: gpui::Hsla,
+        text_align: TextAlign,
     ) {
         let start_ix = range.start.min(layout.len());
         let end_ix = range.end.min(layout.len());
@@ -2731,12 +5344,18 @@ impl RichTextLineElement {
             let seg_origin_x = line_layout.unwrapped_layout.x_for_index(seg_start_ix);
             let start_x = line_layout.unwrapped_layout.x_for_index(a) - seg_origin_x;
             let end_x = line_layout.unwrapped_layout.x_for_index(b) - seg_origin_x;
+            let seg_width = line_layout.unwrapped_layout.x_for_index(seg_end) - seg_origin_x;
+            let offset_x = match text_align {
+                TextAlign::Left => px(0.),
+                TextAlign::Center => (bounds.size.width - seg_width) / 2.0,
+                TextAlign::Right => bounds.size.width - seg_width,
+            };
 
             let y = origin.y + line_height * seg_ix as f32;
             window.paint_quad(gpui::quad(
                 Bounds::from_corners(
-                    point(origin.x + start_x, y),
-                    point(origin.x + end_x, y + line_height),
+                    point(origin.x + offset_x + start_x, y),
+                    point(origin.x + offset_x + end_x, y + line_height),
                 ),
                 px(0.),
                 selection_color,
@@ -2746,6 +5365,113 @@ impl RichTextLineElement {
             ));
         }
     }
+
+    fn align_offset_x_for_position(
+        layout: &gpui::TextLayout,
+        bounds: &Bounds<Pixels>,
+        position: gpui::Point<Pixels>,
+        text_align: TextAlign,
+    ) -> Pixels {
+        if text_align == TextAlign::Left {
+            return px(0.);
+        }
+
+        let Some(line_layout) = layout.line_layout_for_index(0).or_else(|| {
+            layout
+                .line_layout_for_index(layout.len())
+                .or_else(|| layout.line_layout_for_index(layout.len().saturating_sub(1)))
+        }) else {
+            return px(0.);
+        };
+
+        let line_height = layout.line_height();
+        if line_height == px(0.) {
+            return px(0.);
+        }
+
+        let mut seg_ix = ((position.y - bounds.origin.y) / line_height) as usize;
+        seg_ix = seg_ix.min(line_layout.wrap_boundaries().len());
+
+        Self::align_offset_x_for_segment(&line_layout, bounds, seg_ix, text_align)
+    }
+
+    fn align_offset_x_for_index(
+        layout: &gpui::TextLayout,
+        bounds: &Bounds<Pixels>,
+        index: usize,
+        text_align: TextAlign,
+    ) -> Pixels {
+        if text_align == TextAlign::Left {
+            return px(0.);
+        }
+
+        let Some(line_layout) = layout.line_layout_for_index(0).or_else(|| {
+            layout
+                .line_layout_for_index(layout.len())
+                .or_else(|| layout.line_layout_for_index(layout.len().saturating_sub(1)))
+        }) else {
+            return px(0.);
+        };
+
+        let mut seg_ix = 0usize;
+        let index = index.min(line_layout.len());
+        for (boundary_ix, boundary) in line_layout.wrap_boundaries().iter().enumerate() {
+            let Some(run) = line_layout.unwrapped_layout.runs.get(boundary.run_ix) else {
+                continue;
+            };
+            let Some(glyph) = run.glyphs.get(boundary.glyph_ix) else {
+                continue;
+            };
+            if index < glyph.index {
+                break;
+            }
+            seg_ix = boundary_ix + 1;
+        }
+
+        Self::align_offset_x_for_segment(&line_layout, bounds, seg_ix, text_align)
+    }
+
+    fn align_offset_x_for_segment(
+        line_layout: &gpui::WrappedLineLayout,
+        bounds: &Bounds<Pixels>,
+        seg_ix: usize,
+        text_align: TextAlign,
+    ) -> Pixels {
+        if text_align == TextAlign::Left {
+            return px(0.);
+        }
+
+        let seg_ix = seg_ix.min(line_layout.wrap_boundaries().len());
+        let seg_start_ix = if seg_ix == 0 {
+            0
+        } else {
+            Self::wrap_boundary_index(line_layout, seg_ix.saturating_sub(1)).unwrap_or(0)
+        };
+        let seg_end_ix = if seg_ix < line_layout.wrap_boundaries().len() {
+            Self::wrap_boundary_index(line_layout, seg_ix).unwrap_or(line_layout.len())
+        } else {
+            line_layout.len()
+        };
+
+        let start_x = line_layout.unwrapped_layout.x_for_index(seg_start_ix);
+        let end_x = line_layout.unwrapped_layout.x_for_index(seg_end_ix);
+        let seg_width = end_x - start_x;
+
+        match text_align {
+            TextAlign::Left => px(0.),
+            TextAlign::Center => (bounds.size.width - seg_width) / 2.0,
+            TextAlign::Right => bounds.size.width - seg_width,
+        }
+    }
+
+    fn wrap_boundary_index(
+        line_layout: &gpui::WrappedLineLayout,
+        boundary_ix: usize,
+    ) -> Option<usize> {
+        let boundary = line_layout.wrap_boundaries().get(boundary_ix)?;
+        let run = line_layout.unwrapped_layout.runs.get(boundary.run_ix)?;
+        run.glyphs.get(boundary.glyph_ix).map(|g| g.index)
+    }
 }
 
 impl IntoElement for RichTextLineElement {
@@ -2753,6 +5479,116 @@ impl IntoElement for RichTextLineElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+pub struct RichTextBlockBoundsElement {
+    state: Entity<RichTextState>,
+    block_path: Vec<usize>,
+    kind: SharedString,
+    child: AnyElement,
+}
+
+impl RichTextBlockBoundsElement {
+    pub fn new(
+        state: Entity<RichTextState>,
+        block_path: Vec<usize>,
+        kind: SharedString,
+        child: AnyElement,
+    ) -> Self {
+        Self {
+            state,
+            block_path,
+            kind,
+            child,
+        }
+    }
+}
+
+impl IntoElement for RichTextBlockBoundsElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for RichTextBlockBoundsElement {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let layout_id = self.child.request_layout(window, cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let block_path = self.block_path.clone();
+        let kind = self.kind.clone();
+        self.state.update(cx, |state, _| {
+            state.block_bounds_cache.insert(
+                block_path,
+                BlockBoundsCache {
+                    bounds,
+                    kind: kind.clone(),
+                },
+            );
+        });
+
+        _ = self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+
+        let is_selected = self
+            .state
+            .read(cx)
+            .selected_block_path
+            .as_deref()
+            .is_some_and(|p| p == self.block_path.as_slice());
+        if is_selected {
+            let theme = cx.theme();
+            window.paint_quad(gpui::quad(
+                bounds,
+                theme.radius / 2.,
+                gpui::transparent_black(),
+                gpui::Edges::all(px(2.)),
+                theme.ring,
+                gpui::BorderStyle::default(),
+            ));
+        }
     }
 }
 
@@ -2846,10 +5682,7 @@ impl Element for RichTextLineElement {
         let mut runs = Vec::new();
 
         let theme = cx.theme();
-        let base_style = self
-            .base_text_style
-            .clone()
-            .unwrap_or_else(|| window.text_style());
+        let base_style = window.text_style();
         let apply_marks = |mut style: TextStyle,
                            marks: &Marks,
                            kind: &InlineTextSegmentKind,
@@ -2977,12 +5810,17 @@ impl Element for RichTextLineElement {
         let block_path = self.block_path.clone();
         let text = self.text.clone();
         let segments = self.segments.clone();
+        let text_align = {
+            let state = self.state.read(cx);
+            state.text_align_for_block(&block_path)
+        };
         self.state.update(cx, |state, _| {
             state.layout_cache.insert(
                 block_path,
                 LineLayoutCache {
                     bounds,
                     text_layout: text_layout.clone(),
+                    text_align,
                     text,
                     segments,
                 },
@@ -3008,16 +5846,49 @@ impl Element for RichTextLineElement {
         self.styled_text
             .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
-        // Paint selection/caret for this row.
+        let layout = self.styled_text.layout().clone();
+        let line_height = layout.line_height();
+        let text_align = window.text_style().text_align;
+        // Paint find highlights and selection/caret for this row.
         let (selection, is_focused) = {
             let state = self.state.read(cx);
+
+            if let Some(find_ranges) = state.find_matches.get(&self.block_path) {
+                let active_ix = state.find_active.as_ref().and_then(|active| {
+                    if active.block_path == self.block_path {
+                        Some(active.range_index)
+                    } else {
+                        None
+                    }
+                });
+                let mut base_color = cx.theme().warning;
+                base_color.a = (base_color.a * 0.35).clamp(0.0, 1.0);
+                let mut active_color = cx.theme().warning;
+                active_color.a = (active_color.a * 0.65).clamp(0.0, 1.0);
+
+                for (ix, range) in find_ranges.iter().enumerate() {
+                    let color = if active_ix == Some(ix) {
+                        active_color
+                    } else {
+                        base_color
+                    };
+                    Self::paint_selection_range(
+                        &layout,
+                        range.clone(),
+                        &bounds,
+                        line_height,
+                        window,
+                        color,
+                        text_align,
+                    );
+                }
+            }
+
             (
                 state.editor.selection().clone(),
                 state.focus_handle.is_focused(window),
             )
         };
-        let layout = self.styled_text.layout().clone();
-        let line_height = layout.line_height();
 
         if selection.is_collapsed() {
             if selection
@@ -3037,6 +5908,9 @@ impl Element for RichTextLineElement {
                     .position_for_index(caret_ix)
                     .or_else(|| layout.position_for_index(layout.len()))
                 {
+                    let offset_x =
+                        Self::align_offset_x_for_index(&layout, &bounds, caret_ix, text_align);
+                    let pos = point(pos.x + offset_x, pos.y);
                     window.paint_quad(gpui::quad(
                         Bounds::from_corners(pos, point(pos.x + px(1.5), pos.y + line_height)),
                         px(0.),
@@ -3102,6 +5976,7 @@ impl Element for RichTextLineElement {
             line_height,
             window,
             cx.theme().selection,
+            text_align,
         );
     }
 }
@@ -3195,6 +6070,94 @@ impl Element for RichTextInputHandlerElement {
                 }
                 if !hitbox.is_hovered(window) {
                     return;
+                }
+
+                // Dragging the columns resize handle enters "column resizing" mode.
+                if event.click_count == 1
+                    && !event.modifiers.shift
+                    && !event.modifiers.alt
+                    && !event.modifiers.secondary()
+                {
+                    let target = {
+                        let this = state.read(cx);
+                        this.columns_resize_target_for_point(event.position)
+                    };
+                    if let Some((columns_path, boundary_ix)) = target {
+                        let focus_handle = { state.read(cx).focus_handle.clone() };
+                        window.focus(&focus_handle);
+
+                        let start_x = event.position.x;
+                        state.update(cx, |this, cx| {
+                            this.begin_columns_resize(columns_path, boundary_ix, start_x, cx);
+                        });
+                        return;
+                    }
+                }
+
+                // Clicking a block-void node (image/divider) selects it (and does not enter
+                // "drag selecting" mode).
+                if event.click_count == 1 && !event.modifiers.shift && !event.modifiers.secondary()
+                {
+                    let void_path: Option<Vec<usize>> = {
+                        let this = state.read(cx);
+                        this.void_block_path_for_point(event.position)
+                    };
+                    if let Some(void_path) = void_path {
+                        let focus_handle = { state.read(cx).focus_handle.clone() };
+                        window.focus(&focus_handle);
+
+                        state.update(cx, |this, cx| {
+                            if this.selected_block_path.as_deref() == Some(void_path.as_slice()) {
+                                this.selected_block_path = None;
+                            } else {
+                                this.selected_block_path = Some(void_path);
+                            }
+                            this.selecting = false;
+                            this.selection_anchor = None;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+
+                // Alt-click selects a block under the pointer (and does not enter "drag selecting"
+                // mode). Repeated Alt-click cycles through nested blocks at the same location,
+                // from container → inner block → ... → none.
+                if event.click_count == 1
+                    && event.modifiers.alt
+                    && !event.modifiers.shift
+                    && !event.modifiers.secondary()
+                {
+                    let block_paths: Vec<Vec<usize>> = {
+                        let this = state.read(cx);
+                        this.selectable_block_paths_for_point(event.position)
+                    };
+                    if !block_paths.is_empty() {
+                        let focus_handle = { state.read(cx).focus_handle.clone() };
+                        window.focus(&focus_handle);
+
+                        state.update(cx, move |this, cx| {
+                            match &this.selected_block_path {
+                                None => {
+                                    this.selected_block_path = block_paths.first().cloned();
+                                }
+                                Some(selected) => {
+                                    if let Some(pos) =
+                                        block_paths.iter().position(|p| p == selected)
+                                    {
+                                        this.selected_block_path =
+                                            block_paths.get(pos + 1).cloned();
+                                    } else {
+                                        this.selected_block_path = block_paths.first().cloned();
+                                    }
+                                }
+                            }
+                            this.selecting = false;
+                            this.selection_anchor = None;
+                            cx.notify();
+                        });
+                        return;
+                    }
                 }
 
                 // Clicking the toggle chevron toggles the collapsed state without entering
@@ -3308,16 +6271,55 @@ impl Element for RichTextInputHandlerElement {
 
                 // Cmd/Ctrl-click opens a link instead of moving the caret.
                 if event.modifiers.secondary() && !event.modifiers.shift {
+                    let (image_src, document_base_dir) = {
+                        let this = state.read(cx);
+                        let image_src =
+                            if let Some(path) = this.void_block_path_for_point(event.position) {
+                                match node_at_path(this.editor.doc(), &path) {
+                                    Some(Node::Void(v)) if v.kind == "image" => v
+                                        .attrs
+                                        .get("src")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string()),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                        (image_src, this.document_base_dir.clone())
+                    };
+                    if let Some(src) = image_src {
+                        let src = src.trim();
+                        let open_target =
+                            if src.starts_with("http://") || src.starts_with("https://") {
+                                Some(src.to_string())
+                            } else if src.starts_with("file://") {
+                                Some(src.to_string())
+                            } else if let Some(path) = RichTextState::local_image_path_for_src(
+                                src,
+                                document_base_dir.as_deref(),
+                            ) {
+                                Some(format!("file://{}", path.to_string_lossy()))
+                            } else {
+                                None
+                            };
+
+                        if let Some(open_target) = open_target {
+                            cx.open_url(&open_target);
+                            return;
+                        }
+                    }
+
                     let url = {
                         let this = state.read(cx);
-                        let Some(block_path) = this.text_block_path_for_point(event.position)
-                        else {
-                            return;
-                        };
-                        let offset = this
-                            .offset_for_point_in_block(&block_path, event.position)
-                            .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
-                        this.link_at_offset(&block_path, offset)
+                        if let Some(block_path) = this.text_block_path_for_point(event.position) {
+                            let offset = this
+                                .offset_for_point_in_block(&block_path, event.position)
+                                .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                            this.link_at_offset(&block_path, offset)
+                        } else {
+                            None
+                        }
                     };
                     if let Some(url) = url {
                         cx.open_url(&url);
@@ -3397,6 +6399,10 @@ impl Element for RichTextInputHandlerElement {
                     return;
                 }
                 state.update(cx, |this, cx| {
+                    if this.columns_resizing.is_some() {
+                        this.update_columns_resize_preview(event.position.x, cx);
+                        return;
+                    }
                     if !this.selecting {
                         return;
                     }
@@ -3429,6 +6435,12 @@ impl Element for RichTextInputHandlerElement {
                     return;
                 }
                 state.update(cx, |this, cx| {
+                    if this.columns_resizing.is_some() {
+                        this.commit_columns_resize(cx);
+                        this.selecting = false;
+                        this.selection_anchor = None;
+                        return;
+                    }
                     this.selecting = false;
                     this.selection_anchor = None;
                     cx.notify();
@@ -3440,9 +6452,16 @@ impl Element for RichTextInputHandlerElement {
 
 impl Render for RichTextState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.pending_notifications.is_empty() {
+            for message in std::mem::take(&mut self.pending_notifications) {
+                window.push_notification(Notification::new().message(message).autohide(true), cx);
+            }
+        }
+
         let theme = cx.theme().clone();
         let state = cx.entity().clone();
         let registry = self.editor.registry();
+        let columns_resizing = self.columns_resizing.clone();
 
         if !self.did_auto_focus && !window.is_inspector_picking(cx) {
             window.focus(&self.focus_handle);
@@ -3452,10 +6471,21 @@ impl Render for RichTextState {
         fn render_text_block(
             el: &ElementNode,
             path: Vec<usize>,
-            window: &mut Window,
+            _window: &mut Window,
+            theme: &gpui_component::Theme,
             state: &Entity<RichTextState>,
         ) -> AnyElement {
-            let mut line = RichTextLineElement::new(state.clone(), path);
+            let line = RichTextLineElement::new(state.clone(), path);
+
+            let align = el.attrs.get("align").and_then(|v| v.as_str());
+            let font_size = el.attrs.get("font_size").and_then(|v| v.as_u64());
+            let mut text = div().w_full().min_w(px(0.));
+            match align {
+                Some("center") => text = text.text_center(),
+                Some("right") => text = text.text_right(),
+                _ => {}
+            }
+
             if el.kind == "heading" {
                 let level = el
                     .attrs
@@ -3463,29 +6493,51 @@ impl Render for RichTextState {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(1)
                     .clamp(1, 6);
-                let mut style = window.text_style();
-                let size = match level {
-                    1 => 28.0,
-                    2 => 22.0,
-                    3 => 18.0,
-                    4 => 16.0,
-                    5 => 14.0,
-                    _ => 13.0,
+                let default_size: u64 = match level {
+                    1 => 28,
+                    2 => 22,
+                    3 => 18,
+                    4 => 16,
+                    5 => 14,
+                    _ => 13,
                 };
-                style.font_size = px(size).into();
-                style.line_height = px(size * 1.25).into();
-                style.font_weight = FontWeight::SEMIBOLD;
-                line = line.with_base_text_style(style);
+                let size = font_size.unwrap_or(default_size) as f32;
+                text = text
+                    .text_size(px(size))
+                    .line_height(px(size * 1.25))
+                    .font_weight(FontWeight::SEMIBOLD);
+            } else if let Some(size) = font_size {
+                text = text.text_size(px(size as f32));
             }
+
+            if el.kind == "code_block" {
+                text = text.font_family(theme.mono_font_family.clone());
+            }
+
+            let text = text.child(line);
+
+            let block = if el.kind == "code_block" {
+                div()
+                    .w_full()
+                    .bg(theme.muted)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded(theme.radius)
+                    .p(px(8.))
+                    .child(text)
+                    .into_any_element()
+            } else {
+                text.into_any_element()
+            };
 
             let indent_level = el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0);
             if indent_level == 0 {
-                return line.into_any_element();
+                return block;
             }
 
             div()
                 .pl(px(16. * indent_level as f32))
-                .child(line)
+                .child(block)
                 .into_any_element()
         }
 
@@ -3516,6 +6568,17 @@ impl Render for RichTextState {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let indent = px(16. * level as f32);
+            let align = el.attrs.get("align").and_then(|v| v.as_str());
+            let font_size = el.attrs.get("font_size").and_then(|v| v.as_u64());
+            let mut content = div().flex_1().min_w(px(0.));
+            match align {
+                Some("center") => content = content.text_center(),
+                Some("right") => content = content.text_right(),
+                _ => {}
+            }
+            if let Some(size) = font_size {
+                content = content.text_size(px(size as f32));
+            }
             div()
                 .flex()
                 .flex_row()
@@ -3530,19 +6593,14 @@ impl Render for RichTextState {
                         .text_color(theme.muted_foreground)
                         .child(marker),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(RichTextLineElement::new(state.clone(), path)),
-                )
+                .child(content.child(RichTextLineElement::new(state.clone(), path)))
                 .into_any_element()
         }
 
         fn render_todo_item(
             el: &ElementNode,
             path: Vec<usize>,
-            window: &mut Window,
+            _window: &mut Window,
             theme: &gpui_component::Theme,
             state: &Entity<RichTextState>,
         ) -> AnyElement {
@@ -3552,6 +6610,7 @@ impl Render for RichTextState {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let indent_level = el.attrs.get("indent").and_then(|v| v.as_u64()).unwrap_or(0);
+            let font_size = el.attrs.get("font_size").and_then(|v| v.as_u64());
 
             let checkbox = div()
                 .w(px(18.))
@@ -3570,16 +6629,20 @@ impl Render for RichTextState {
                 })
                 .child(if checked { "✓" } else { "" });
 
-            let mut line = RichTextLineElement::new(state.clone(), path);
-            if checked {
-                let mut style = window.text_style();
-                style.color = theme.muted_foreground;
-                style.strikethrough = Some(StrikethroughStyle {
-                    thickness: px(1.),
-                    color: Some(theme.muted_foreground),
-                });
-                line = line.with_base_text_style(style);
+            let align = el.attrs.get("align").and_then(|v| v.as_str());
+            let mut content = div().flex_1().min_w(px(0.));
+            match align {
+                Some("center") => content = content.text_center(),
+                Some("right") => content = content.text_right(),
+                _ => {}
             }
+            if let Some(size) = font_size {
+                content = content.text_size(px(size as f32));
+            }
+            if checked {
+                content = content.text_color(theme.muted_foreground).line_through();
+            }
+            content = content.child(RichTextLineElement::new(state.clone(), path));
 
             div()
                 .flex()
@@ -3590,7 +6653,7 @@ impl Render for RichTextState {
                     this.pl(px(16. * indent_level as f32))
                 })
                 .child(checkbox)
-                .child(div().flex_1().min_w(px(0.)).child(line))
+                .child(content)
                 .into_any_element()
         }
 
@@ -3601,6 +6664,9 @@ impl Render for RichTextState {
             theme: &gpui_component::Theme,
             state: &Entity<RichTextState>,
             registry: &PluginRegistry,
+            columns_resizing: Option<&ColumnsResizeState>,
+            embedded_image_cache: &mut HashMap<String, Arc<Image>>,
+            document_base_dir: Option<&Path>,
         ) -> AnyElement {
             let collapsed = el
                 .attrs
@@ -3619,7 +6685,16 @@ impl Render for RichTextState {
             let mut title_path = path.clone();
             title_path.push(0);
 
-            let mut line = RichTextLineElement::new(state.clone(), title_path);
+            let line = RichTextLineElement::new(state.clone(), title_path);
+
+            let align = title_el.attrs.get("align").and_then(|v| v.as_str());
+            let font_size = title_el.attrs.get("font_size").and_then(|v| v.as_u64());
+            let mut title = div().flex_1().min_w(px(0.));
+            match align {
+                Some("center") => title = title.text_center(),
+                Some("right") => title = title.text_right(),
+                _ => {}
+            }
             if title_el.kind == "heading" {
                 let level = title_el
                     .attrs
@@ -3627,20 +6702,23 @@ impl Render for RichTextState {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(1)
                     .clamp(1, 6);
-                let mut style = window.text_style();
-                let size = match level {
-                    1 => 28.0,
-                    2 => 22.0,
-                    3 => 18.0,
-                    4 => 16.0,
-                    5 => 14.0,
-                    _ => 13.0,
+                let default_size: u64 = match level {
+                    1 => 28,
+                    2 => 22,
+                    3 => 18,
+                    4 => 16,
+                    5 => 14,
+                    _ => 13,
                 };
-                style.font_size = px(size).into();
-                style.line_height = px(size * 1.25).into();
-                style.font_weight = FontWeight::SEMIBOLD;
-                line = line.with_base_text_style(style);
+                let size = font_size.unwrap_or(default_size) as f32;
+                title = title
+                    .text_size(px(size))
+                    .line_height(px(size * 1.25))
+                    .font_weight(FontWeight::SEMIBOLD);
+            } else if let Some(size) = font_size {
+                title = title.text_size(px(size as f32));
             }
+            let title = title.child(line);
 
             let indent_level = title_el
                 .attrs
@@ -3669,7 +6747,7 @@ impl Render for RichTextState {
                         .text_color(theme.muted_foreground)
                         .child(chevron),
                 )
-                .child(div().flex_1().min_w(px(0.)).child(line))
+                .child(title)
                 .into_any_element();
 
             if collapsed {
@@ -3686,7 +6764,15 @@ impl Render for RichTextState {
                 let mut child_path = path.clone();
                 child_path.push(ix);
                 content.push(render_block(
-                    child, child_path, window, theme, state, registry,
+                    child,
+                    child_path,
+                    window,
+                    theme,
+                    state,
+                    registry,
+                    columns_resizing,
+                    embedded_image_cache,
+                    document_base_dir,
                 ));
             }
 
@@ -3705,6 +6791,142 @@ impl Render for RichTextState {
                 .into_any_element()
         }
 
+        fn render_columns(
+            el: &ElementNode,
+            path: Vec<usize>,
+            window: &mut Window,
+            theme: &gpui_component::Theme,
+            state: &Entity<RichTextState>,
+            registry: &PluginRegistry,
+            columns_resizing: Option<&ColumnsResizeState>,
+            embedded_image_cache: &mut HashMap<String, Arc<Image>>,
+            document_base_dir: Option<&Path>,
+        ) -> AnyElement {
+            let col_count = el.children.len();
+            if col_count < 2 {
+                return div()
+                    .text_color(theme.muted_foreground)
+                    .italic()
+                    .child(format!("<invalid columns at {:?}>", path))
+                    .into_any_element();
+            }
+
+            let mut widths: Vec<f32> =
+                if columns_resizing.is_some_and(|r| r.columns_path.as_slice() == path.as_slice()) {
+                    columns_resizing
+                        .map(|r| r.preview_fractions.clone())
+                        .unwrap_or_default()
+                } else {
+                    el.attrs
+                        .get("widths")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_f64())
+                                .map(|v| v as f32)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+            if widths.len() != col_count {
+                widths = vec![1.0 / col_count as f32; col_count];
+            }
+
+            let mut row: Vec<AnyElement> = Vec::new();
+            for col_ix in 0..col_count {
+                let width = widths
+                    .get(col_ix)
+                    .copied()
+                    .unwrap_or(1.0 / col_count as f32)
+                    .clamp(0.05, 0.95);
+
+                let mut col_path = path.clone();
+                col_path.push(col_ix);
+
+                let blocks: Vec<AnyElement> = match el.children.get(col_ix) {
+                    Some(Node::Element(col_el)) if col_el.kind == "column" => col_el
+                        .children
+                        .iter()
+                        .enumerate()
+                        .map(|(block_ix, block_node)| {
+                            let mut block_path = col_path.clone();
+                            block_path.push(block_ix);
+                            render_block(
+                                block_node,
+                                block_path,
+                                window,
+                                theme,
+                                state,
+                                registry,
+                                columns_resizing,
+                                embedded_image_cache,
+                                document_base_dir,
+                            )
+                        })
+                        .collect(),
+                    Some(other) => vec![
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .italic()
+                            .child(format!(
+                                "<invalid column child {:?}: {:?}>",
+                                col_path,
+                                match other {
+                                    Node::Element(el) => el.kind.as_str(),
+                                    Node::Void(v) => v.kind.as_str(),
+                                    Node::Text(_) => "text",
+                                }
+                            ))
+                            .into_any_element(),
+                    ],
+                    None => Vec::new(),
+                };
+
+                let content = div().flex().flex_col().gap(px(6.)).children(blocks);
+
+                row.push(
+                    RichTextBlockBoundsElement::new(
+                        state.clone(),
+                        col_path,
+                        SharedString::from("column"),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_none()
+                            .flex_shrink()
+                            .flex_basis(relative(width))
+                            .min_w(px(0.))
+                            .p(px(8.))
+                            .child(content.into_any_element())
+                            .into_any_element(),
+                    )
+                    .into_any_element(),
+                );
+
+                if col_ix + 1 < col_count {
+                    row.push(
+                        div()
+                            .w(px(12.))
+                            .flex_none()
+                            .cursor_col_resize()
+                            .hover(|this| this.bg(theme.muted))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(div().w(px(2.)).h_full().bg(theme.border).mx_auto())
+                            .into_any_element(),
+                    );
+                }
+            }
+
+            div()
+                .flex()
+                .flex_row()
+                .border_1()
+                .border_color(theme.border)
+                .rounded(theme.radius / 2.)
+                .children(row)
+                .into_any_element()
+        }
+
         fn render_block(
             node: &Node,
             path: Vec<usize>,
@@ -3712,27 +6934,63 @@ impl Render for RichTextState {
             theme: &gpui_component::Theme,
             state: &Entity<RichTextState>,
             registry: &PluginRegistry,
+            columns_resizing: Option<&ColumnsResizeState>,
+            embedded_image_cache: &mut HashMap<String, Arc<Image>>,
+            document_base_dir: Option<&Path>,
         ) -> AnyElement {
-            match node {
+            let kind: SharedString = match node {
+                Node::Element(el) => el.kind.clone().into(),
+                Node::Void(v) => v.kind.clone().into(),
+                Node::Text(_) => "text".into(),
+            };
+
+            let inner = match node {
                 Node::Element(el) if el.kind == "todo_item" => {
-                    render_todo_item(el, path, window, theme, state)
+                    render_todo_item(el, path.clone(), window, theme, state)
                 }
                 Node::Element(el) if el.kind == "list_item" => {
-                    render_list_item(el, path, theme, state)
+                    render_list_item(el, path.clone(), theme, state)
                 }
                 Node::Element(el) if is_text_block_kind(registry, &el.kind) => {
-                    render_text_block(el, path, window, state)
+                    render_text_block(el, path.clone(), window, theme, state)
                 }
-                Node::Element(el) if el.kind == "toggle" => {
-                    render_toggle(el, path, window, theme, state, registry)
-                }
+                Node::Element(el) if el.kind == "toggle" => render_toggle(
+                    el,
+                    path.clone(),
+                    window,
+                    theme,
+                    state,
+                    registry,
+                    columns_resizing,
+                    embedded_image_cache,
+                    document_base_dir,
+                ),
+                Node::Element(el) if el.kind == "columns" => render_columns(
+                    el,
+                    path.clone(),
+                    window,
+                    theme,
+                    state,
+                    registry,
+                    columns_resizing,
+                    embedded_image_cache,
+                    document_base_dir,
+                ),
                 Node::Element(el) if el.kind == "blockquote" => {
                     let mut children: Vec<AnyElement> = Vec::new();
                     for (ix, child) in el.children.iter().enumerate() {
                         let mut child_path = path.clone();
                         child_path.push(ix);
                         children.push(render_block(
-                            child, child_path, window, theme, state, registry,
+                            child,
+                            child_path,
+                            window,
+                            theme,
+                            state,
+                            registry,
+                            columns_resizing,
+                            embedded_image_cache,
+                            document_base_dir,
                         ));
                     }
 
@@ -3775,7 +7033,15 @@ impl Render for RichTextState {
                                 block_path.push(cell_ix);
                                 block_path.push(block_ix);
                                 cell_blocks.push(render_block(
-                                    block_node, block_path, window, theme, state, registry,
+                                    block_node,
+                                    block_path,
+                                    window,
+                                    theme,
+                                    state,
+                                    registry,
+                                    columns_resizing,
+                                    embedded_image_cache,
+                                    document_base_dir,
                                 ));
                             }
 
@@ -3810,10 +7076,22 @@ impl Render for RichTextState {
                         .into_any_element()
                 }
                 Node::Void(v) if v.kind == "image" => {
-                    let src = v.attrs.get("src").and_then(|v| v.as_str()).unwrap_or("");
+                    let src = v
+                        .attrs
+                        .get("src")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
                     let alt = v.attrs.get("alt").and_then(|v| v.as_str()).unwrap_or("");
+                    let is_data_url = src.starts_with("data:");
                     let caption = if alt.is_empty() {
-                        src.to_string()
+                        if is_data_url {
+                            "Embedded image".to_string()
+                        } else {
+                            src.to_string()
+                        }
+                    } else if is_data_url {
+                        alt.to_string()
                     } else {
                         format!("{alt} · {src}")
                     };
@@ -3832,7 +7110,47 @@ impl Render for RichTextState {
                                 .items_center()
                                 .justify_center()
                                 .text_color(theme.muted_foreground)
-                                .child("Image"),
+                                .child(if src.is_empty() {
+                                    div().child("Image").into_any_element()
+                                } else {
+                                    let source = if let Some(embedded) =
+                                        RichTextState::get_or_decode_data_url_image(
+                                            embedded_image_cache,
+                                            src,
+                                        ) {
+                                        img(embedded)
+                                    } else if let Some(local_path) =
+                                        RichTextState::local_image_path_for_src(
+                                            src,
+                                            document_base_dir,
+                                        )
+                                    {
+                                        img(local_path)
+                                    } else {
+                                        img(src.to_string())
+                                    };
+                                    source
+                                        .w_full()
+                                        .h_full()
+                                        .object_fit(ObjectFit::Contain)
+                                        .with_loading(|| {
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child("Loading…")
+                                                .into_any_element()
+                                        })
+                                        .with_fallback(|| {
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child("Image")
+                                                .into_any_element()
+                                        })
+                                        .into_any_element()
+                                }),
                         )
                         .child(
                             div()
@@ -3860,17 +7178,25 @@ impl Render for RichTextState {
                         }
                     ))
                     .into_any_element(),
-            }
+            };
+
+            RichTextBlockBoundsElement::new(state.clone(), path, kind, inner).into_any_element()
         }
 
-        let blocks: Vec<AnyElement> = self
-            .editor
-            .doc()
-            .children
-            .iter()
-            .enumerate()
-            .map(|(ix, node)| render_block(node, vec![ix], window, &theme, &state, registry))
-            .collect();
+        let mut blocks: Vec<AnyElement> = Vec::new();
+        for (ix, node) in self.editor.doc().children.iter().enumerate() {
+            blocks.push(render_block(
+                node,
+                vec![ix],
+                window,
+                &theme,
+                &state,
+                registry,
+                columns_resizing.as_ref(),
+                &mut self.embedded_image_cache,
+                self.document_base_dir.as_deref(),
+            ));
+        }
 
         div()
             .id(("richtext-next", cx.entity_id()))
@@ -3907,6 +7233,54 @@ impl Render for RichTextState {
                     .on_action(window.listener_for(&state, RichTextState::toggle_code))
                     .on_action(window.listener_for(&state, RichTextState::toggle_bulleted_list))
                     .on_action(window.listener_for(&state, RichTextState::toggle_ordered_list))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                        window.focus(&this.focus_handle);
+
+                        let drop_pos = window.mouse_position();
+                        if let Some(block_path) = this.text_block_path_for_point(drop_pos) {
+                            let offset = this
+                                .offset_for_point_in_block(&block_path, drop_pos)
+                                .unwrap_or_else(|| this.block_text_len_in_block(&block_path));
+                            let focus = this
+                                .point_for_block_offset(&block_path, offset)
+                                .unwrap_or_else(|| {
+                                    let mut path = block_path.clone();
+                                    path.push(0);
+                                    CorePoint::new(path, 0)
+                                });
+                            this.set_selection_points(focus.clone(), focus, cx);
+                        }
+
+                        let mut srcs: Vec<String> = Vec::new();
+                        for path in paths.paths() {
+                            let ext = path
+                                .extension()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_lowercase();
+                            let is_image = matches!(
+                                ext.as_str(),
+                                "png"
+                                    | "jpg"
+                                    | "jpeg"
+                                    | "gif"
+                                    | "webp"
+                                    | "bmp"
+                                    | "svg"
+                                    | "tif"
+                                    | "tiff"
+                            );
+                            if !is_image {
+                                continue;
+                            }
+                            srcs.push(path.to_string_lossy().to_string());
+                        }
+
+                        if srcs.is_empty() {
+                            return;
+                        }
+                        this.command_insert_images(srcs, cx);
+                    }))
             })
             .child(
                 div()

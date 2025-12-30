@@ -90,6 +90,13 @@ impl VoidNode {
                     format!("@{label}")
                 }
             }
+            "emoji" => self
+                .attrs
+                .get("emoji")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("😀")
+                .to_string(),
             _ => "□".to_string(),
         }
     }
@@ -104,6 +111,13 @@ impl VoidNode {
                     .unwrap_or("mention");
                 label.len() + (!label.starts_with('@') as usize)
             }
+            "emoji" => self
+                .attrs
+                .get("emoji")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("😀")
+                .len(),
             _ => 1,
         }
     }

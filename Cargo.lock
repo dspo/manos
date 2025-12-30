@@ -2275,6 +2275,7 @@ dependencies = [
 name = "gpui-manos-plate"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "gpui",
  "gpui-component",
  "gpui-plate-core",

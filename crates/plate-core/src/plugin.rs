@@ -44,11 +44,63 @@ impl QueryError {
 pub struct CommandSpec {
     pub id: String,
     pub label: String,
+    pub description: Option<String>,
+    pub keywords: Vec<String>,
+    pub args_example: Option<serde_json::Value>,
+    pub hidden: bool,
     pub handler: std::sync::Arc<
         dyn Fn(&mut crate::core::Editor, Option<serde_json::Value>) -> Result<(), CommandError>
             + Send
             + Sync,
     >,
+}
+
+impl CommandSpec {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        handler: impl Fn(
+            &mut crate::core::Editor,
+            Option<serde_json::Value>,
+        ) -> Result<(), CommandError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            keywords: Vec::new(),
+            args_example: None,
+            hidden: false,
+            handler: std::sync::Arc::new(handler),
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn keywords<I, S>(mut self, keywords: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.keywords = keywords.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn args_example(mut self, args_example: serde_json::Value) -> Self {
+        self.args_example = Some(args_example);
+        self
+    }
+
+    pub fn hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -158,13 +210,18 @@ impl PluginRegistry {
             Box::new(MarksCommandsPlugin),
             Box::new(AutoformatPlugin),
             Box::new(HeadingPlugin),
+            Box::new(CodeBlockPlugin),
             Box::new(BlockquotePlugin),
             Box::new(TogglePlugin),
+            Box::new(ColumnsPlugin),
             Box::new(TodoPlugin),
             Box::new(IndentPlugin),
+            Box::new(AlignPlugin),
+            Box::new(FontSizePlugin),
             Box::new(ListPlugin),
             Box::new(TablePlugin),
             Box::new(MentionPlugin),
+            Box::new(EmojiPlugin),
             Box::new(ImagePlugin),
         ];
         Self::new(plugins).expect("richtext registry must be valid")
@@ -602,10 +659,8 @@ impl PlatePlugin for CoreCommandsPlugin {
     }
 
     fn commands(&self) -> Vec<CommandSpec> {
-        vec![CommandSpec {
-            id: "core.insert_divider".to_string(),
-            label: "Insert divider".to_string(),
-            handler: std::sync::Arc::new(|editor, _args| {
+        vec![
+            CommandSpec::new("core.insert_divider", "Insert divider", |editor, _args| {
                 let focus = editor.selection().focus.clone();
                 let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
 
@@ -649,8 +704,10 @@ impl PlatePlugin for CoreCommandsPlugin {
                 editor
                     .apply(tx)
                     .map_err(|e| CommandError::new(format!("Failed to insert divider: {e:?}")))
-            }),
-        }]
+            })
+            .description("Insert a divider block and a trailing paragraph.")
+            .keywords(["divider", "separator", "hr", "horizontal rule"]),
+        ]
     }
 }
 
@@ -663,36 +720,32 @@ impl PlatePlugin for MarksCommandsPlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "marks.toggle_bold".to_string(),
-                label: "Toggle bold".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    toggle_bold(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to toggle bold: {e:?}"))
-                            })
+            CommandSpec::new("marks.toggle_bold", "Toggle bold", |editor, _args| {
+                toggle_bold(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to toggle bold: {e:?}")))
+                    })
+            })
+            .description("Toggle bold on the current selection or caret.")
+            .keywords(["bold", "strong", "mark"]),
+            CommandSpec::new("marks.toggle_italic", "Toggle italic", |editor, _args| {
+                toggle_italic(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to toggle italic: {e:?}"))
                         })
-                }),
-            },
-            CommandSpec {
-                id: "marks.toggle_italic".to_string(),
-                label: "Toggle italic".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    toggle_italic(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to toggle italic: {e:?}"))
-                            })
-                        })
-                }),
-            },
-            CommandSpec {
-                id: "marks.toggle_underline".to_string(),
-                label: "Toggle underline".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                    })
+            })
+            .description("Toggle italic on the current selection or caret.")
+            .keywords(["italic", "emphasis", "mark"]),
+            CommandSpec::new(
+                "marks.toggle_underline",
+                "Toggle underline",
+                |editor, _args| {
                     toggle_underline(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -700,12 +753,14 @@ impl PlatePlugin for MarksCommandsPlugin {
                                 CommandError::new(format!("Failed to toggle underline: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "marks.toggle_strikethrough".to_string(),
-                label: "Toggle strikethrough".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                },
+            )
+            .description("Toggle underline on the current selection or caret.")
+            .keywords(["underline", "mark"]),
+            CommandSpec::new(
+                "marks.toggle_strikethrough",
+                "Toggle strikethrough",
+                |editor, _args| {
                     toggle_strikethrough(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -713,76 +768,72 @@ impl PlatePlugin for MarksCommandsPlugin {
                                 CommandError::new(format!("Failed to toggle strikethrough: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "marks.toggle_code".to_string(),
-                label: "Toggle code".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    toggle_code(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to toggle code: {e:?}"))
-                            })
+                },
+            )
+            .description("Toggle strikethrough on the current selection or caret.")
+            .keywords(["strikethrough", "strike", "mark"]),
+            CommandSpec::new("marks.toggle_code", "Toggle code", |editor, _args| {
+                toggle_code(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to toggle code: {e:?}")))
+                    })
+            })
+            .description("Toggle code mark on the current selection or caret.")
+            .keywords(["code", "monospace", "mark"]),
+            CommandSpec::new("marks.set_link", "Set link", |editor, args| {
+                let url = args
+                    .as_ref()
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CommandError::new("Missing args.url"))?
+                    .to_string();
+                set_link(editor, url)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to set link: {e:?}")))
+                    })
+            })
+            .description("Set link mark on the current selection or caret.")
+            .keywords(["link", "url", "hyperlink"])
+            .args_example(serde_json::json!({ "url": "https://example.com" })),
+            CommandSpec::new("marks.unset_link", "Unset link", |editor, _args| {
+                unset_link(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to unset link: {e:?}")))
+                    })
+            })
+            .description("Remove link mark from the current selection or caret.")
+            .keywords(["link", "unlink", "url", "hyperlink"]),
+            CommandSpec::new("marks.set_text_color", "Set text color", |editor, args| {
+                let color = args
+                    .as_ref()
+                    .and_then(|v| v.get("color"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CommandError::new("Missing args.color"))?
+                    .to_string();
+                set_text_color(editor, color)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to set text color: {e:?}"))
                         })
-                }),
-            },
-            CommandSpec {
-                id: "marks.set_link".to_string(),
-                label: "Set link".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
-                    let url = args
-                        .as_ref()
-                        .and_then(|v| v.get("url"))
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::new("Missing args.url"))?
-                        .to_string();
-                    set_link(editor, url)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to set link: {e:?}"))
-                            })
-                        })
-                }),
-            },
-            CommandSpec {
-                id: "marks.unset_link".to_string(),
-                label: "Unset link".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    unset_link(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to unset link: {e:?}"))
-                            })
-                        })
-                }),
-            },
-            CommandSpec {
-                id: "marks.set_text_color".to_string(),
-                label: "Set text color".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
-                    let color = args
-                        .as_ref()
-                        .and_then(|v| v.get("color"))
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::new("Missing args.color"))?
-                        .to_string();
-                    set_text_color(editor, color)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to set text color: {e:?}"))
-                            })
-                        })
-                }),
-            },
-            CommandSpec {
-                id: "marks.unset_text_color".to_string(),
-                label: "Unset text color".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                    })
+            })
+            .description("Set text color mark (expects args.color as a hex string).")
+            .keywords(["color", "text color", "foreground", "fg"])
+            .args_example(serde_json::json!({ "color": "#ff0000" })),
+            CommandSpec::new(
+                "marks.unset_text_color",
+                "Unset text color",
+                |editor, _args| {
                     unset_text_color(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -790,12 +841,14 @@ impl PlatePlugin for MarksCommandsPlugin {
                                 CommandError::new(format!("Failed to unset text color: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "marks.set_highlight_color".to_string(),
-                label: "Set highlight color".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
+                },
+            )
+            .description("Remove text color mark from the current selection or caret.")
+            .keywords(["color", "text color", "foreground", "fg", "reset"]),
+            CommandSpec::new(
+                "marks.set_highlight_color",
+                "Set highlight color",
+                |editor, args| {
                     let color = args
                         .as_ref()
                         .and_then(|v| v.get("color"))
@@ -809,12 +862,15 @@ impl PlatePlugin for MarksCommandsPlugin {
                                 CommandError::new(format!("Failed to set highlight color: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "marks.unset_highlight_color".to_string(),
-                label: "Unset highlight color".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                },
+            )
+            .description("Set highlight color mark (expects args.color as a hex string).")
+            .keywords(["highlight", "background", "bg", "color"])
+            .args_example(serde_json::json!({ "color": "#fff59d" })),
+            CommandSpec::new(
+                "marks.unset_highlight_color",
+                "Unset highlight color",
+                |editor, _args| {
                     unset_highlight_color(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -822,8 +878,10 @@ impl PlatePlugin for MarksCommandsPlugin {
                                 CommandError::new(format!("Failed to unset highlight color: {e:?}"))
                             })
                         })
-                }),
-            },
+                },
+            )
+            .description("Remove highlight color mark from the current selection or caret.")
+            .keywords(["highlight", "background", "bg", "color", "reset"]),
         ]
     }
 
@@ -1176,44 +1234,41 @@ impl PlatePlugin for HeadingPlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "block.set_heading".to_string(),
-                label: "Set heading".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
-                    let level = args
-                        .as_ref()
-                        .and_then(|v| v.get("level"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1)
-                        .clamp(1, 6);
-                    set_heading(editor, level)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            if tx.ops.is_empty() {
-                                return Ok(());
-                            }
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to set heading: {e:?}"))
-                            })
+            CommandSpec::new("block.set_heading", "Set heading", |editor, args| {
+                let level = args
+                    .as_ref()
+                    .and_then(|v| v.get("level"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .clamp(1, 6);
+                set_heading(editor, level)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to set heading: {e:?}")))
+                    })
+            })
+            .description("Convert the active text block(s) into a heading.")
+            .keywords(["heading", "title", "h1", "h2", "h3", "h4", "h5", "h6"])
+            .args_example(serde_json::json!({ "level": 2 })),
+            CommandSpec::new("block.unset_heading", "Unset heading", |editor, _args| {
+                unset_heading(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to unset heading: {e:?}"))
                         })
-                }),
-            },
-            CommandSpec {
-                id: "block.unset_heading".to_string(),
-                label: "Unset heading".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    unset_heading(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            if tx.ops.is_empty() {
-                                return Ok(());
-                            }
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to unset heading: {e:?}"))
-                            })
-                        })
-                }),
-            },
+                    })
+            })
+            .description("Convert heading back to a paragraph.")
+            .keywords(["heading", "paragraph", "title", "reset"]),
         ]
     }
 
@@ -1299,6 +1354,49 @@ impl NormalizePass for NormalizeHeadingLevels {
     }
 }
 
+struct CodeBlockPlugin;
+
+impl PlatePlugin for CodeBlockPlugin {
+    fn id(&self) -> &'static str {
+        "code_block"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "code_block".to_string(),
+            role: NodeRole::Block,
+            is_void: false,
+            children: ChildConstraint::InlineOnly,
+        }]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec::new("code_block.toggle", "Toggle code block", |editor, _args| {
+                toggle_code_block(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to toggle code block: {e:?}"))
+                        })
+                    })
+            })
+            .description("Toggle code block for the active text block(s).")
+            .keywords(["code block", "code", "pre", "monospace"]),
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "code_block.is_active".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| Ok(active_is_code_block(editor))),
+        }]
+    }
+}
+
 struct BlockquotePlugin;
 
 impl PlatePlugin for BlockquotePlugin {
@@ -1321,10 +1419,10 @@ impl PlatePlugin for BlockquotePlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "blockquote.wrap_selection".to_string(),
-                label: "Wrap selection in blockquote".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+            CommandSpec::new(
+                "blockquote.wrap_selection",
+                "Wrap selection in blockquote",
+                |editor, _args| {
                     wrap_selection_in_blockquote(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -1335,24 +1433,24 @@ impl PlatePlugin for BlockquotePlugin {
                                 CommandError::new(format!("Failed to wrap blockquote: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "blockquote.unwrap".to_string(),
-                label: "Unwrap blockquote".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    unwrap_nearest_blockquote(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            if tx.ops.is_empty() {
-                                return Ok(());
-                            }
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to unwrap blockquote: {e:?}"))
-                            })
+                },
+            )
+            .description("Wrap selected blocks in a blockquote container.")
+            .keywords(["blockquote", "quote", "wrap"]),
+            CommandSpec::new("blockquote.unwrap", "Unwrap blockquote", |editor, _args| {
+                unwrap_nearest_blockquote(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to unwrap blockquote: {e:?}"))
                         })
-                }),
-            },
+                    })
+            })
+            .description("Unwrap the nearest blockquote container.")
+            .keywords(["blockquote", "quote", "unwrap"]),
         ]
     }
 
@@ -1443,10 +1541,10 @@ impl PlatePlugin for TogglePlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "toggle.wrap_selection".to_string(),
-                label: "Wrap selection in toggle".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+            CommandSpec::new(
+                "toggle.wrap_selection",
+                "Wrap selection in toggle",
+                |editor, _args| {
                     wrap_selection_in_toggle(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -1457,28 +1555,28 @@ impl PlatePlugin for TogglePlugin {
                                 CommandError::new(format!("Failed to wrap toggle: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "toggle.unwrap".to_string(),
-                label: "Unwrap toggle".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    unwrap_nearest_toggle(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            if tx.ops.is_empty() {
-                                return Ok(());
-                            }
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to unwrap toggle: {e:?}"))
-                            })
+                },
+            )
+            .description("Wrap selected blocks in a collapsible toggle container.")
+            .keywords(["toggle", "collapsible", "wrap"]),
+            CommandSpec::new("toggle.unwrap", "Unwrap toggle", |editor, _args| {
+                unwrap_nearest_toggle(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to unwrap toggle: {e:?}"))
                         })
-                }),
-            },
-            CommandSpec {
-                id: "toggle.toggle_collapsed".to_string(),
-                label: "Toggle collapsed".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
+                    })
+            })
+            .description("Unwrap the nearest toggle container.")
+            .keywords(["toggle", "collapsible", "unwrap"]),
+            CommandSpec::new(
+                "toggle.toggle_collapsed",
+                "Toggle collapsed",
+                |editor, args| {
                     toggle_toggle_collapsed(editor, args.as_ref())
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -1489,8 +1587,10 @@ impl PlatePlugin for TogglePlugin {
                                 CommandError::new(format!("Failed to toggle collapsed: {e:?}"))
                             })
                         })
-                }),
-            },
+                },
+            )
+            .description("Toggle the collapsed state of the nearest toggle container.")
+            .keywords(["toggle", "collapse", "expand"]),
         ]
     }
 
@@ -1605,6 +1705,260 @@ impl NormalizePass for NormalizeToggleStructure {
     }
 }
 
+struct ColumnsPlugin;
+
+impl PlatePlugin for ColumnsPlugin {
+    fn id(&self) -> &'static str {
+        "columns"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![
+            NodeSpec {
+                kind: "columns".to_string(),
+                role: NodeRole::Block,
+                is_void: false,
+                children: ChildConstraint::BlockOnly,
+            },
+            NodeSpec {
+                kind: "column".to_string(),
+                role: NodeRole::Block,
+                is_void: false,
+                children: ChildConstraint::BlockOnly,
+            },
+        ]
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeColumnsStructure)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec::new("columns.insert", "Insert columns", |editor, args| {
+                let cols = args
+                    .as_ref()
+                    .and_then(|v| v.get("columns"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2)
+                    .clamp(2, 6) as usize;
+
+                insert_columns(editor, cols)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to insert columns: {e:?}"))
+                        })
+                    })
+            })
+            .description("Insert a multi-column layout container.")
+            .keywords(["columns", "layout", "grid", "multi-column"])
+            .args_example(serde_json::json!({ "columns": 2 })),
+            CommandSpec::new("columns.unwrap", "Unwrap columns", |editor, _args| {
+                unwrap_nearest_columns(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to unwrap columns: {e:?}"))
+                        })
+                    })
+            })
+            .description("Unwrap the nearest columns container.")
+            .keywords(["columns", "layout", "unwrap"]),
+            CommandSpec::new(
+                "columns.set_widths",
+                "Set columns widths",
+                |editor, args| {
+                    let args = args
+                        .as_ref()
+                        .ok_or_else(|| CommandError::new("Missing args"))?;
+
+                    let path = args
+                        .get("path")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| CommandError::new("Missing args.path"))?
+                        .iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as usize))
+                        .collect::<Vec<usize>>();
+                    if path.is_empty() {
+                        return Err(CommandError::new("Invalid args.path"));
+                    }
+
+                    let widths = args
+                        .get("widths")
+                        .and_then(|v| v.as_array())
+                        .ok_or_else(|| CommandError::new("Missing args.widths"))?
+                        .iter()
+                        .filter_map(|v| v.as_f64())
+                        .collect::<Vec<f64>>();
+                    if widths.len() < 2 {
+                        return Err(CommandError::new("Invalid args.widths"));
+                    }
+
+                    set_columns_widths(editor, &path, widths)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to set columns widths: {e:?}"))
+                            })
+                        })
+                },
+            )
+            .hidden(true),
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "columns.is_active".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| {
+                let is_active =
+                    ancestor_element_path(editor.doc(), &editor.selection().focus.path, "columns")
+                        .is_some();
+                Ok(Value::Bool(is_active))
+            }),
+        }]
+    }
+}
+
+struct NormalizeColumnsStructure;
+
+impl NormalizePass for NormalizeColumnsStructure {
+    fn id(&self) -> &'static str {
+        "columns.normalize_structure"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_container(
+            children: &[Node],
+            parent_path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                if el.kind == "columns" {
+                    let mut columns_path = parent_path.clone();
+                    columns_path.push(ix);
+
+                    let target_cols = el.children.len().max(2);
+
+                    // Ensure the wrapper structure: columns -> column -> blocks.
+                    for (child_ix, child) in el.children.iter().enumerate() {
+                        let is_column = matches!(child, Node::Element(col) if col.kind == "column");
+                        if is_column {
+                            continue;
+                        }
+
+                        let mut child_path = columns_path.clone();
+                        child_path.push(child_ix);
+
+                        ops.push(Op::RemoveNode {
+                            path: child_path.clone(),
+                        });
+                        ops.push(Op::InsertNode {
+                            path: child_path,
+                            node: Node::Element(ElementNode {
+                                kind: "column".to_string(),
+                                attrs: Attrs::default(),
+                                children: vec![child.clone()],
+                            }),
+                        });
+                    }
+
+                    if el.children.len() < 2 {
+                        for insert_ix in el.children.len()..2 {
+                            let mut insert_path = columns_path.clone();
+                            insert_path.push(insert_ix);
+                            ops.push(Op::InsertNode {
+                                path: insert_path,
+                                node: column_node(vec![Node::paragraph("")]),
+                            });
+                        }
+                    }
+
+                    for (col_ix, col_node) in el.children.iter().enumerate() {
+                        let Node::Element(col_el) = col_node else {
+                            continue;
+                        };
+                        if col_el.kind != "column" {
+                            continue;
+                        }
+                        if col_el.children.is_empty() {
+                            let mut insert_path = columns_path.clone();
+                            insert_path.push(col_ix);
+                            insert_path.push(0);
+                            ops.push(Op::InsertNode {
+                                path: insert_path,
+                                node: Node::paragraph(""),
+                            });
+                        }
+                    }
+
+                    if !columns_widths_valid(el, target_cols) {
+                        let widths = equal_widths(target_cols);
+                        let mut set = Attrs::default();
+                        set.insert(
+                            "widths".to_string(),
+                            Value::Array(
+                                widths
+                                    .into_iter()
+                                    .map(|w| {
+                                        Value::Number(
+                                            serde_json::Number::from_f64(w)
+                                                .unwrap_or_else(|| serde_json::Number::from(0)),
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                        ops.push(Op::SetNodeAttrs {
+                            path: columns_path,
+                            patch: crate::core::AttrPatch {
+                                set,
+                                remove: Vec::new(),
+                            },
+                        });
+                    }
+                }
+            }
+
+            for (ix, node) in children.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                let spec_children = registry
+                    .node_specs
+                    .get(&el.kind)
+                    .map(|s| s.children.clone())
+                    .unwrap_or(ChildConstraint::Any);
+                if spec_children == ChildConstraint::InlineOnly || el.children.is_empty() {
+                    continue;
+                }
+
+                parent_path.push(ix);
+                normalize_container(&el.children, parent_path, registry, ops);
+                parent_path.pop();
+            }
+        }
+
+        normalize_container(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
 struct TodoPlugin;
 
 impl PlatePlugin for TodoPlugin {
@@ -1627,26 +1981,24 @@ impl PlatePlugin for TodoPlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "todo.toggle".to_string(),
-                label: "Toggle todo item".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    toggle_todo(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            if tx.ops.is_empty() {
-                                return Ok(());
-                            }
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to toggle todo: {e:?}"))
-                            })
-                        })
-                }),
-            },
-            CommandSpec {
-                id: "todo.toggle_checked".to_string(),
-                label: "Toggle todo checked".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
+            CommandSpec::new("todo.toggle", "Toggle todo item", |editor, _args| {
+                toggle_todo(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to toggle todo: {e:?}")))
+                    })
+            })
+            .description("Toggle todo item block type for the active text block(s).")
+            .keywords(["todo", "task", "checkbox"]),
+            CommandSpec::new(
+                "todo.toggle_checked",
+                "Toggle todo checked",
+                |editor, args| {
                     toggle_todo_checked(editor, args.as_ref())
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -1657,8 +2009,10 @@ impl PlatePlugin for TodoPlugin {
                                 CommandError::new(format!("Failed to toggle todo checked: {e:?}"))
                             })
                         })
-                }),
-            },
+                },
+            )
+            .description("Toggle checked state for the nearest todo item.")
+            .keywords(["todo", "task", "checkbox", "checked"]),
         ]
     }
 
@@ -1743,6 +2097,8 @@ impl NormalizePass for NormalizeTodoCheckedAttr {
 }
 
 const MAX_INDENT_LEVEL: u64 = 8;
+const MIN_FONT_SIZE: u64 = 8;
+const MAX_FONT_SIZE: u64 = 72;
 
 struct IndentPlugin;
 
@@ -1757,10 +2113,10 @@ impl PlatePlugin for IndentPlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "block.indent_increase".to_string(),
-                label: "Increase indent".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+            CommandSpec::new(
+                "block.indent_increase",
+                "Increase indent",
+                |editor, _args| {
                     adjust_indent(editor, IndentDirection::Increase)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -1771,12 +2127,14 @@ impl PlatePlugin for IndentPlugin {
                                 CommandError::new(format!("Failed to increase indent: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "block.indent_decrease".to_string(),
-                label: "Decrease indent".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                },
+            )
+            .description("Increase indent level for the active block(s).")
+            .keywords(["indent", "tab", "increase"]),
+            CommandSpec::new(
+                "block.indent_decrease",
+                "Decrease indent",
+                |editor, _args| {
                     adjust_indent(editor, IndentDirection::Decrease)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -1787,8 +2145,10 @@ impl PlatePlugin for IndentPlugin {
                                 CommandError::new(format!("Failed to decrease indent: {e:?}"))
                             })
                         })
-                }),
-            },
+                },
+            )
+            .description("Decrease indent level for the active block(s).")
+            .keywords(["indent", "outdent", "decrease"]),
         ]
     }
 
@@ -1888,6 +2248,263 @@ impl NormalizePass for NormalizeIndentAttrs {
     }
 }
 
+struct AlignPlugin;
+
+impl PlatePlugin for AlignPlugin {
+    fn id(&self) -> &'static str {
+        "align"
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeAlignAttrs)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec::new("block.set_align", "Set block alignment", |editor, args| {
+                let align = args
+                    .as_ref()
+                    .and_then(|v| v.get("align"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| CommandError::new("Missing args.align"))?
+                    .to_string();
+
+                set_block_align(editor, align)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to set alignment: {e:?}"))
+                        })
+                    })
+            })
+            .description("Set text alignment for the active block(s).")
+            .keywords(["align", "alignment", "left", "center", "right"])
+            .args_example(serde_json::json!({ "align": "center" })),
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "block.align".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| Ok(active_block_align(editor))),
+        }]
+    }
+}
+
+struct NormalizeAlignAttrs;
+
+impl NormalizePass for NormalizeAlignAttrs {
+    fn id(&self) -> &'static str {
+        "block.normalize_align_attrs"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_align(
+            el: &ElementNode,
+            path: &[usize],
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            let Some(value) = el.attrs.get("align") else {
+                return;
+            };
+
+            let should_remove = match value.as_str() {
+                Some("center") | Some("right") => !element_is_text_block(el, registry),
+                Some("left") => true,
+                _ => true,
+            };
+
+            if should_remove {
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec!["align".to_string()],
+                    },
+                });
+            }
+        }
+
+        fn walk(
+            nodes: &[Node],
+            path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in nodes.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                path.push(ix);
+                normalize_align(el, path, registry, ops);
+
+                if !element_is_text_block(el, registry) {
+                    walk(&el.children, path, registry, ops);
+                }
+
+                path.pop();
+            }
+        }
+
+        walk(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
+struct FontSizePlugin;
+
+impl PlatePlugin for FontSizePlugin {
+    fn id(&self) -> &'static str {
+        "font_size"
+    }
+
+    fn normalize_passes(&self) -> Vec<Box<dyn NormalizePass>> {
+        vec![Box::new(NormalizeFontSizeAttrs)]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec::new("block.set_font_size", "Set font size", |editor, args| {
+                let size = args
+                    .as_ref()
+                    .and_then(|v| v.get("size"))
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| CommandError::new("Missing args.size"))?
+                    .clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+
+                set_block_font_size(editor, Some(size))
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        if tx.ops.is_empty() {
+                            return Ok(());
+                        }
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to set font size: {e:?}"))
+                        })
+                    })
+            })
+            .description("Set explicit font size for the active block(s).")
+            .keywords(["font size", "text size", "typography"])
+            .args_example(serde_json::json!({ "size": 16 })),
+            CommandSpec::new(
+                "block.unset_font_size",
+                "Unset font size",
+                |editor, _args| {
+                    set_block_font_size(editor, None)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            if tx.ops.is_empty() {
+                                return Ok(());
+                            }
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to unset font size: {e:?}"))
+                            })
+                        })
+                },
+            )
+            .description("Remove explicit font size from the active block(s).")
+            .keywords(["font size", "text size", "typography", "reset"]),
+        ]
+    }
+
+    fn queries(&self) -> Vec<QuerySpec> {
+        vec![QuerySpec {
+            id: "block.font_size".to_string(),
+            handler: std::sync::Arc::new(|editor, _args| Ok(active_block_font_size(editor))),
+        }]
+    }
+}
+
+struct NormalizeFontSizeAttrs;
+
+impl NormalizePass for NormalizeFontSizeAttrs {
+    fn id(&self) -> &'static str {
+        "block.normalize_font_size_attrs"
+    }
+
+    fn run(&self, doc: &Document, registry: &PluginRegistry) -> Vec<Op> {
+        let mut ops = Vec::new();
+
+        fn normalize_font_size(
+            el: &ElementNode,
+            path: &[usize],
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            let Some(value) = el.attrs.get("font_size") else {
+                return;
+            };
+
+            let Some(size) = value.as_u64() else {
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec!["font_size".to_string()],
+                    },
+                });
+                return;
+            };
+
+            if !element_is_text_block(el, registry) {
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec!["font_size".to_string()],
+                    },
+                });
+                return;
+            }
+
+            let clamped = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+            if clamped != size {
+                let mut set = Attrs::default();
+                set.insert("font_size".to_string(), Value::Number(clamped.into()));
+                ops.push(Op::SetNodeAttrs {
+                    path: path.to_vec(),
+                    patch: crate::core::AttrPatch {
+                        set,
+                        remove: Vec::new(),
+                    },
+                });
+            }
+        }
+
+        fn walk(
+            nodes: &[Node],
+            path: &mut Vec<usize>,
+            registry: &PluginRegistry,
+            ops: &mut Vec<Op>,
+        ) {
+            for (ix, node) in nodes.iter().enumerate() {
+                let Node::Element(el) = node else {
+                    continue;
+                };
+
+                path.push(ix);
+                normalize_font_size(el, path, registry, ops);
+
+                if !element_is_text_block(el, registry) {
+                    walk(&el.children, path, registry, ops);
+                }
+
+                path.pop();
+            }
+        }
+
+        walk(&doc.children, &mut Vec::new(), registry, &mut ops);
+        ops
+    }
+}
+
 struct ListPlugin;
 
 impl PlatePlugin for ListPlugin {
@@ -1910,27 +2527,25 @@ impl PlatePlugin for ListPlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "list.toggle_bulleted".to_string(),
-                label: "Toggle bulleted list".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    toggle_list(editor, "bulleted").map_err(CommandError::new)
-                }),
-            },
-            CommandSpec {
-                id: "list.toggle_ordered".to_string(),
-                label: "Toggle ordered list".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    toggle_list(editor, "ordered").map_err(CommandError::new)
-                }),
-            },
-            CommandSpec {
-                id: "list.unwrap".to_string(),
-                label: "Unwrap list item".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    unwrap_list_item(editor).map_err(CommandError::new)
-                }),
-            },
+            CommandSpec::new(
+                "list.toggle_bulleted",
+                "Toggle bulleted list",
+                |editor, _args| toggle_list(editor, "bulleted").map_err(CommandError::new),
+            )
+            .description("Toggle bulleted list for the active block(s).")
+            .keywords(["list", "bulleted", "unordered", "ul"]),
+            CommandSpec::new(
+                "list.toggle_ordered",
+                "Toggle ordered list",
+                |editor, _args| toggle_list(editor, "ordered").map_err(CommandError::new),
+            )
+            .description("Toggle ordered list for the active block(s).")
+            .keywords(["list", "ordered", "numbered", "ol"]),
+            CommandSpec::new("list.unwrap", "Unwrap list item", |editor, _args| {
+                unwrap_list_item(editor).map_err(CommandError::new)
+            })
+            .description("Convert list item(s) back to paragraphs.")
+            .keywords(["list", "unwrap", "paragraph"]),
         ]
     }
 
@@ -1978,10 +2593,8 @@ impl PlatePlugin for MentionPlugin {
     }
 
     fn commands(&self) -> Vec<CommandSpec> {
-        vec![CommandSpec {
-            id: "mention.insert".to_string(),
-            label: "Insert mention".to_string(),
-            handler: std::sync::Arc::new(|editor, args| {
+        vec![
+            CommandSpec::new("mention.insert", "Insert mention", |editor, args| {
                 let label = args
                     .as_ref()
                     .and_then(|v| v.get("label"))
@@ -1996,8 +2609,54 @@ impl PlatePlugin for MentionPlugin {
                             CommandError::new(format!("Failed to insert mention: {e:?}"))
                         })
                     })
-            }),
+            })
+            .description("Insert an inline mention node at the caret/selection.")
+            .keywords(["mention", "@", "inline", "void"])
+            .args_example(serde_json::json!({ "label": "@alice" })),
+        ]
+    }
+}
+
+struct EmojiPlugin;
+
+impl PlatePlugin for EmojiPlugin {
+    fn id(&self) -> &'static str {
+        "emoji"
+    }
+
+    fn node_specs(&self) -> Vec<NodeSpec> {
+        vec![NodeSpec {
+            kind: "emoji".to_string(),
+            role: NodeRole::Inline,
+            is_void: true,
+            children: ChildConstraint::None,
         }]
+    }
+
+    fn commands(&self) -> Vec<CommandSpec> {
+        vec![
+            CommandSpec::new("emoji.insert", "Insert emoji", |editor, args| {
+                let emoji = args
+                    .as_ref()
+                    .and_then(|v| v.get("emoji"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("😀")
+                    .to_string();
+
+                insert_emoji(editor, emoji)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to insert emoji: {e:?}"))
+                        })
+                    })
+            })
+            .description("Insert an inline emoji node at the caret/selection.")
+            .keywords(["emoji", "emote", "inline", "void"])
+            .args_example(serde_json::json!({ "emoji": "😀" })),
+        ]
     }
 }
 
@@ -2018,10 +2677,8 @@ impl PlatePlugin for ImagePlugin {
     }
 
     fn commands(&self) -> Vec<CommandSpec> {
-        vec![CommandSpec {
-            id: "image.insert".to_string(),
-            label: "Insert image".to_string(),
-            handler: std::sync::Arc::new(|editor, args| {
+        vec![
+            CommandSpec::new("image.insert", "Insert image", |editor, args| {
                 let src = args
                     .as_ref()
                     .and_then(|v| v.get("src"))
@@ -2043,8 +2700,48 @@ impl PlatePlugin for ImagePlugin {
                             CommandError::new(format!("Failed to insert image: {e:?}"))
                         })
                     })
-            }),
-        }]
+            })
+            .description("Insert a block image node (void).")
+            .keywords(["image", "img", "media", "void"])
+            .args_example(
+                serde_json::json!({ "src": "https://example.com/image.png", "alt": "Alt text" }),
+            ),
+            CommandSpec::new("image.insert_many", "Insert images", |editor, args| {
+                let srcs = args
+                    .as_ref()
+                    .and_then(|v| v.get("srcs"))
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| CommandError::new("Missing args.srcs (array)"))?;
+
+                let mut items: Vec<(String, Option<String>)> = Vec::new();
+                for src in srcs {
+                    let Some(src) = src.as_str().map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
+                    items.push((src.to_string(), None));
+                }
+
+                if items.is_empty() {
+                    return Err(CommandError::new("No valid srcs"));
+                }
+
+                insert_images(editor, items)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to insert images: {e:?}"))
+                        })
+                    })
+            })
+            .description("Insert multiple block image nodes (void).")
+            .keywords(["image", "img", "media", "void", "multiple"])
+            .args_example(serde_json::json!({
+                "srcs": [
+                    "https://example.com/a.png",
+                    "https://example.com/b.png"
+                ]
+            })),
+        ]
     }
 }
 
@@ -2084,36 +2781,50 @@ impl PlatePlugin for TablePlugin {
 
     fn commands(&self) -> Vec<CommandSpec> {
         vec![
-            CommandSpec {
-                id: "table.insert".to_string(),
-                label: "Insert table".to_string(),
-                handler: std::sync::Arc::new(|editor, args| {
-                    let rows = args
-                        .as_ref()
-                        .and_then(|v| v.get("rows"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(2)
-                        .clamp(1, 32) as usize;
-                    let cols = args
-                        .as_ref()
-                        .and_then(|v| v.get("cols"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(2)
-                        .clamp(1, 32) as usize;
+            CommandSpec::new("table.insert", "Insert table", |editor, args| {
+                let rows = args
+                    .as_ref()
+                    .and_then(|v| v.get("rows"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2)
+                    .clamp(1, 32) as usize;
+                let cols = args
+                    .as_ref()
+                    .and_then(|v| v.get("cols"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2)
+                    .clamp(1, 32) as usize;
 
-                    insert_table(editor, rows, cols)
+                insert_table(editor, rows, cols)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to insert table: {e:?}"))
+                        })
+                    })
+            })
+            .description("Insert a table at the current selection.")
+            .keywords(["table", "grid"])
+            .args_example(serde_json::json!({ "rows": 2, "cols": 3 })),
+            CommandSpec::new(
+                "table.insert_row_above",
+                "Insert row above",
+                |editor, _args| {
+                    insert_table_row_above(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
                             editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to insert table: {e:?}"))
+                                CommandError::new(format!("Failed to insert row above: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "table.insert_row_below".to_string(),
-                label: "Insert row below".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                },
+            )
+            .description("Insert a new row above the current row.")
+            .keywords(["table", "row", "insert"]),
+            CommandSpec::new(
+                "table.insert_row_below",
+                "Insert row below",
+                |editor, _args| {
                     insert_table_row_below(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -2121,12 +2832,29 @@ impl PlatePlugin for TablePlugin {
                                 CommandError::new(format!("Failed to insert row below: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "table.insert_col_right".to_string(),
-                label: "Insert column right".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
+                },
+            )
+            .description("Insert a new row below the current row.")
+            .keywords(["table", "row", "insert"]),
+            CommandSpec::new(
+                "table.insert_col_left",
+                "Insert column left",
+                |editor, _args| {
+                    insert_table_col_left(editor)
+                        .map_err(CommandError::new)
+                        .and_then(|tx| {
+                            editor.apply(tx).map_err(|e| {
+                                CommandError::new(format!("Failed to insert column left: {e:?}"))
+                            })
+                        })
+                },
+            )
+            .description("Insert a new column to the left of the current column.")
+            .keywords(["table", "column", "insert"]),
+            CommandSpec::new(
+                "table.insert_col_right",
+                "Insert column right",
+                |editor, _args| {
                     insert_table_col_right(editor)
                         .map_err(CommandError::new)
                         .and_then(|tx| {
@@ -2134,34 +2862,43 @@ impl PlatePlugin for TablePlugin {
                                 CommandError::new(format!("Failed to insert column right: {e:?}"))
                             })
                         })
-                }),
-            },
-            CommandSpec {
-                id: "table.delete_row".to_string(),
-                label: "Delete row".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    delete_table_row(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to delete row: {e:?}"))
-                            })
+                },
+            )
+            .description("Insert a new column to the right of the current column.")
+            .keywords(["table", "column", "insert"]),
+            CommandSpec::new("table.delete_row", "Delete row", |editor, _args| {
+                delete_table_row(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor
+                            .apply(tx)
+                            .map_err(|e| CommandError::new(format!("Failed to delete row: {e:?}")))
+                    })
+            })
+            .description("Delete the current table row.")
+            .keywords(["table", "row", "delete", "remove"]),
+            CommandSpec::new("table.delete_col", "Delete column", |editor, _args| {
+                delete_table_col(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to delete column: {e:?}"))
                         })
-                }),
-            },
-            CommandSpec {
-                id: "table.delete_col".to_string(),
-                label: "Delete column".to_string(),
-                handler: std::sync::Arc::new(|editor, _args| {
-                    delete_table_col(editor)
-                        .map_err(CommandError::new)
-                        .and_then(|tx| {
-                            editor.apply(tx).map_err(|e| {
-                                CommandError::new(format!("Failed to delete column: {e:?}"))
-                            })
+                    })
+            })
+            .description("Delete the current table column.")
+            .keywords(["table", "column", "delete", "remove"]),
+            CommandSpec::new("table.delete_table", "Delete table", |editor, _args| {
+                delete_table(editor)
+                    .map_err(CommandError::new)
+                    .and_then(|tx| {
+                        editor.apply(tx).map_err(|e| {
+                            CommandError::new(format!("Failed to delete table: {e:?}"))
                         })
-                }),
-            },
+                    })
+            })
+            .description("Delete the current table and replace it with a paragraph.")
+            .keywords(["table", "delete", "remove"]),
         ]
     }
 
@@ -2412,6 +3149,17 @@ fn active_heading_level(editor: &crate::core::Editor) -> Value {
     Value::Number(serde_json::Number::from(level))
 }
 
+fn active_is_code_block(editor: &crate::core::Editor) -> Value {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return Value::Bool(false);
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return Value::Bool(false);
+    };
+    Value::Bool(el.kind == "code_block")
+}
+
 fn active_indent_level(editor: &crate::core::Editor) -> Value {
     let focus = &editor.selection().focus;
     let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
@@ -2432,6 +3180,45 @@ fn active_indent_level(editor: &crate::core::Editor) -> Value {
     .min(MAX_INDENT_LEVEL);
 
     Value::Number(serde_json::Number::from(level))
+}
+
+fn active_block_align(editor: &crate::core::Editor) -> Value {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return Value::Null;
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return Value::Null;
+    };
+    if !element_is_text_block(&el, editor.registry()) {
+        return Value::Null;
+    }
+
+    match el.attrs.get("align").and_then(|v| v.as_str()) {
+        Some("center") => Value::String("center".to_string()),
+        Some("right") => Value::String("right".to_string()),
+        _ => Value::Null,
+    }
+}
+
+fn active_block_font_size(editor: &crate::core::Editor) -> Value {
+    let focus = &editor.selection().focus;
+    let Some(block_path) = focus.path.split_last().map(|(_, p)| p) else {
+        return Value::Null;
+    };
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return Value::Null;
+    };
+    if !element_is_text_block(&el, editor.registry()) {
+        return Value::Null;
+    }
+
+    match el.attrs.get("font_size").and_then(|v| v.as_u64()) {
+        Some(size) => Value::Number(serde_json::Number::from(
+            size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE),
+        )),
+        None => Value::Null,
+    }
 }
 
 fn set_heading(editor: &mut crate::core::Editor, level: u64) -> Result<Transaction, String> {
@@ -2531,6 +3318,207 @@ fn unset_heading(editor: &mut crate::core::Editor) -> Result<Transaction, String
     ])
     .selection_after(selection_after)
     .source("command:block.unset_heading"))
+}
+
+fn set_block_align(editor: &mut crate::core::Editor, align: String) -> Result<Transaction, String> {
+    let align = match align.as_str() {
+        "left" | "center" | "right" => align,
+        _ => return Err("Invalid align value".into()),
+    };
+
+    let sel = editor.selection().clone();
+    let selection_after = sel.clone();
+    let (start, end) = ordered_selection_points(&sel);
+    let Some(start_block_path) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection start is not in a text block".into());
+    };
+    let Some(end_block_path) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection end is not in a text block".into());
+    };
+
+    let blocks = text_blocks_in_order(editor.doc(), editor.registry());
+    let start_index = blocks
+        .iter()
+        .position(|b| b.path == start_block_path)
+        .ok_or_else(|| "Selection start is not in a text block".to_string())?;
+    let end_index = blocks
+        .iter()
+        .position(|b| b.path == end_block_path)
+        .ok_or_else(|| "Selection end is not in a text block".to_string())?;
+
+    let (a, b) = if start_index <= end_index {
+        (start_index, end_index)
+    } else {
+        (end_index, start_index)
+    };
+
+    let mut ops: Vec<Op> = Vec::new();
+    for block in blocks.iter().take(b + 1).skip(a) {
+        let el = block.el;
+
+        if align == "left" {
+            if el.attrs.get("align").is_some() {
+                ops.push(Op::SetNodeAttrs {
+                    path: block.path.clone(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec!["align".to_string()],
+                    },
+                });
+            }
+            continue;
+        }
+
+        if el.attrs.get("align").and_then(|v| v.as_str()) == Some(align.as_str()) {
+            continue;
+        }
+
+        let mut set = Attrs::default();
+        set.insert("align".to_string(), Value::String(align.clone()));
+        ops.push(Op::SetNodeAttrs {
+            path: block.path.clone(),
+            patch: crate::core::AttrPatch {
+                set,
+                remove: Vec::new(),
+            },
+        });
+    }
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:block.set_align"))
+}
+
+fn set_block_font_size(
+    editor: &mut crate::core::Editor,
+    size: Option<u64>,
+) -> Result<Transaction, String> {
+    let size = size.map(|v| v.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE));
+
+    let sel = editor.selection().clone();
+    let selection_after = sel.clone();
+    let (start, end) = ordered_selection_points(&sel);
+    let Some(start_block_path) = start.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection start is not in a text block".into());
+    };
+    let Some(end_block_path) = end.path.split_last().map(|(_, p)| p.to_vec()) else {
+        return Err("Selection end is not in a text block".into());
+    };
+
+    let blocks = text_blocks_in_order(editor.doc(), editor.registry());
+    let start_index = blocks
+        .iter()
+        .position(|b| b.path == start_block_path)
+        .ok_or_else(|| "Selection start is not in a text block".to_string())?;
+    let end_index = blocks
+        .iter()
+        .position(|b| b.path == end_block_path)
+        .ok_or_else(|| "Selection end is not in a text block".to_string())?;
+
+    let (a, b) = if start_index <= end_index {
+        (start_index, end_index)
+    } else {
+        (end_index, start_index)
+    };
+
+    let mut ops: Vec<Op> = Vec::new();
+    for block in blocks.iter().take(b + 1).skip(a) {
+        let el = block.el;
+
+        match size {
+            None => {
+                if el.attrs.get("font_size").is_none() {
+                    continue;
+                }
+                ops.push(Op::SetNodeAttrs {
+                    path: block.path.clone(),
+                    patch: crate::core::AttrPatch {
+                        set: Attrs::default(),
+                        remove: vec!["font_size".to_string()],
+                    },
+                });
+            }
+            Some(size) => {
+                if el.attrs.get("font_size").and_then(|v| v.as_u64()) == Some(size) {
+                    continue;
+                }
+                let mut set = Attrs::default();
+                set.insert("font_size".to_string(), Value::Number(size.into()));
+                ops.push(Op::SetNodeAttrs {
+                    path: block.path.clone(),
+                    patch: crate::core::AttrPatch {
+                        set,
+                        remove: Vec::new(),
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source(match size {
+            Some(_) => "command:block.set_font_size",
+            None => "command:block.unset_font_size",
+        }))
+}
+
+fn toggle_code_block(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let focus = editor.selection().focus.clone();
+    let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
+    if block_path.is_empty() {
+        return Err("No active block".into());
+    }
+    let Some(node) = node_at_path(editor.doc(), block_path).cloned() else {
+        return Err("No active block".into());
+    };
+    let selection_after = editor.selection().clone();
+
+    let Node::Element(el) = node else {
+        return Err("Active block is not a text block".into());
+    };
+    if !element_is_text_block(&el, editor.registry()) {
+        return Err("Active block is not a text block".into());
+    }
+
+    let (next_kind, mut attrs) = if el.kind == "code_block" {
+        ("paragraph", el.attrs.clone())
+    } else {
+        ("code_block", el.attrs.clone())
+    };
+
+    if next_kind == "code_block" {
+        attrs.remove("level");
+        attrs.remove("checked");
+        attrs.remove("list_index");
+
+        if let Some(level) = attrs.remove("list_level") {
+            if !attrs.contains_key("indent") {
+                attrs.insert("indent".to_string(), level);
+            }
+        }
+        attrs.remove("list_type");
+    } else {
+        attrs.remove("language");
+    }
+
+    let next = Node::Element(ElementNode {
+        kind: next_kind.to_string(),
+        attrs,
+        children: el.children,
+    });
+
+    Ok(Transaction::new(vec![
+        Op::RemoveNode {
+            path: block_path.to_vec(),
+        },
+        Op::InsertNode {
+            path: block_path.to_vec(),
+            node: next,
+        },
+    ])
+    .selection_after(selection_after)
+    .source("command:code_block.toggle"))
 }
 
 fn is_in_blockquote(editor: &crate::core::Editor) -> bool {
@@ -3491,6 +4479,247 @@ fn ancestor_element_path(doc: &Document, path: &[usize], kind: &str) -> Option<P
     None
 }
 
+fn equal_widths(cols: usize) -> Vec<f64> {
+    let cols = cols.max(2);
+    let w = 1.0 / cols as f64;
+    vec![w; cols]
+}
+
+fn columns_widths_valid(columns: &ElementNode, expected_len: usize) -> bool {
+    if expected_len < 2 {
+        return false;
+    }
+    let Some(widths) = columns.attrs.get("widths").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    if widths.len() != expected_len {
+        return false;
+    }
+
+    let mut sum = 0.0f64;
+    for v in widths {
+        let Some(w) = v.as_f64() else {
+            return false;
+        };
+        if !w.is_finite() || w <= 0.0 {
+            return false;
+        }
+        sum += w;
+    }
+
+    (sum - 1.0).abs() <= 0.01
+}
+
+fn column_node(children: Vec<Node>) -> Node {
+    Node::Element(ElementNode {
+        kind: "column".to_string(),
+        attrs: Attrs::default(),
+        children,
+    })
+}
+
+fn columns_node(cols: usize) -> Node {
+    let cols = cols.clamp(2, 6);
+    let widths = equal_widths(cols);
+    let widths_json: Vec<Value> = widths
+        .iter()
+        .filter_map(|w| serde_json::Number::from_f64(*w).map(Value::Number))
+        .collect();
+
+    let mut attrs = Attrs::default();
+    attrs.insert("widths".to_string(), Value::Array(widths_json));
+
+    Node::Element(ElementNode {
+        kind: "columns".to_string(),
+        attrs,
+        children: (0..cols)
+            .map(|_| column_node(vec![Node::paragraph("")]))
+            .collect(),
+    })
+}
+
+fn insert_columns(editor: &crate::core::Editor, cols: usize) -> Result<Transaction, String> {
+    let cols = cols.clamp(2, 6);
+    let focus = editor.selection().focus.clone();
+    let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
+
+    let (parent_path, insert_at) = if block_path.is_empty() {
+        (Vec::new(), editor.doc().children.len())
+    } else {
+        let (block_ix, parent) = block_path.split_last().unwrap();
+        (parent.to_vec(), block_ix + 1)
+    };
+
+    let columns_path = {
+        let mut path = parent_path.clone();
+        path.push(insert_at);
+        path
+    };
+    let paragraph_path = {
+        let mut path = parent_path.clone();
+        path.push(insert_at + 1);
+        path
+    };
+
+    let mut selection_path = columns_path.clone();
+    selection_path.extend([0, 0, 0]);
+
+    Ok(Transaction::new(vec![
+        Op::InsertNode {
+            path: columns_path,
+            node: columns_node(cols),
+        },
+        Op::InsertNode {
+            path: paragraph_path,
+            node: Node::paragraph(""),
+        },
+    ])
+    .selection_after(Selection::collapsed(Point::new(selection_path, 0)))
+    .source("command:columns.insert"))
+}
+
+fn unwrap_nearest_columns(editor: &mut crate::core::Editor) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    let Some(columns_path) = ancestor_element_path(editor.doc(), &sel.focus.path, "columns") else {
+        return Ok(Transaction::new(Vec::new()).source("command:columns.unwrap"));
+    };
+    let (columns_ix, parent_path) = columns_path
+        .split_last()
+        .ok_or_else(|| "Invalid columns path".to_string())?;
+    let columns_ix = *columns_ix;
+    let parent_path = parent_path.to_vec();
+
+    let Some(Node::Element(columns_el)) = node_at_path(editor.doc(), &columns_path).cloned() else {
+        return Err("Columns node not found".into());
+    };
+    if columns_el.kind != "columns" {
+        return Ok(Transaction::new(Vec::new()).source("command:columns.unwrap"));
+    }
+
+    let mut flat_blocks: Vec<Node> = Vec::new();
+    let mut counts: Vec<usize> = Vec::new();
+
+    for child in columns_el.children.into_iter() {
+        match child {
+            Node::Element(col_el) if col_el.kind == "column" => {
+                let count = col_el.children.len().max(1);
+                counts.push(count);
+                if col_el.children.is_empty() {
+                    flat_blocks.push(Node::paragraph(""));
+                } else {
+                    flat_blocks.extend(col_el.children);
+                }
+            }
+            other => {
+                counts.push(1);
+                flat_blocks.push(other);
+            }
+        }
+    }
+
+    if flat_blocks.is_empty() {
+        counts = vec![1];
+        flat_blocks.push(Node::paragraph(""));
+    }
+
+    let mut ops: Vec<Op> = Vec::new();
+    ops.push(Op::RemoveNode {
+        path: columns_path.clone(),
+    });
+    for (i, node) in flat_blocks.into_iter().enumerate() {
+        let mut path = parent_path.clone();
+        path.push(columns_ix + i);
+        ops.push(Op::InsertNode { path, node });
+    }
+
+    let remap_point = |point: &Point| -> Point {
+        if point.path.len() < columns_path.len() + 2 {
+            return point.clone();
+        }
+        if !point.path.starts_with(&columns_path) {
+            return point.clone();
+        }
+        let col_ix = point.path[columns_path.len()];
+        let block_ix = point.path[columns_path.len() + 1];
+
+        let mut flat_ix = 0usize;
+        for i in 0..col_ix.min(counts.len()) {
+            flat_ix += counts.get(i).copied().unwrap_or(0);
+        }
+
+        let within = counts.get(col_ix).copied().unwrap_or(1);
+        flat_ix += block_ix.min(within.saturating_sub(1));
+
+        let mut new_path = parent_path.clone();
+        new_path.push(columns_ix + flat_ix);
+        new_path.extend_from_slice(&point.path[columns_path.len() + 2..]);
+        Point {
+            path: new_path,
+            offset: point.offset,
+        }
+    };
+
+    let selection_after = Selection {
+        anchor: remap_point(&sel.anchor),
+        focus: remap_point(&sel.focus),
+    };
+
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:columns.unwrap"))
+}
+
+fn set_columns_widths(
+    editor: &crate::core::Editor,
+    columns_path: &[usize],
+    widths: Vec<f64>,
+) -> Result<Transaction, String> {
+    let Some(Node::Element(columns_el)) = node_at_path(editor.doc(), columns_path) else {
+        return Err("Columns node not found".into());
+    };
+    if columns_el.kind != "columns" {
+        return Err("Target is not columns".into());
+    }
+
+    let col_count = columns_el.children.len().max(2);
+    if widths.len() != col_count {
+        return Err(format!(
+            "Width count mismatch: got {}, expected {col_count}",
+            widths.len()
+        ));
+    }
+
+    let mut widths = widths
+        .into_iter()
+        .map(|w| w.max(0.05))
+        .collect::<Vec<f64>>();
+    let sum: f64 = widths.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err("Invalid widths sum".into());
+    }
+    for w in &mut widths {
+        *w /= sum;
+    }
+
+    let widths_json = widths
+        .into_iter()
+        .filter_map(|w| serde_json::Number::from_f64(w).map(Value::Number))
+        .collect::<Vec<Value>>();
+
+    let mut set = Attrs::default();
+    set.insert("widths".to_string(), Value::Array(widths_json));
+    let patch = crate::core::AttrPatch {
+        set,
+        remove: Vec::new(),
+    };
+
+    Ok(Transaction::new(vec![Op::SetNodeAttrs {
+        path: columns_path.to_vec(),
+        patch,
+    }])
+    .source("command:columns.set_widths"))
+}
+
 fn insert_table(
     editor: &crate::core::Editor,
     rows: usize,
@@ -3534,6 +4763,40 @@ fn insert_table(
     .source("command:table.insert"))
 }
 
+fn insert_table_row_above(editor: &crate::core::Editor) -> Result<Transaction, String> {
+    let focus_path = &editor.selection().focus.path;
+    let row_path =
+        ancestor_element_path(editor.doc(), focus_path, "table_row").ok_or("Not in a table")?;
+    let cell_path = ancestor_element_path(editor.doc(), focus_path, "table_cell");
+    let (row_ix, table_path) = row_path
+        .split_last()
+        .ok_or_else(|| "Invalid table row path".to_string())?;
+
+    let Some(Node::Element(row)) = node_at_path(editor.doc(), &row_path) else {
+        return Err("Invalid table row".into());
+    };
+    let cols = row.children.len().max(1);
+    let target_col_ix = cell_path
+        .as_ref()
+        .and_then(|p| p.split_last().map(|(ix, _)| *ix))
+        .unwrap_or(0)
+        .min(cols.saturating_sub(1));
+
+    let mut insert_path = table_path.to_vec();
+    insert_path.push(*row_ix);
+
+    let mut selection_path = insert_path.clone();
+    selection_path.push(target_col_ix);
+    selection_path.extend([0, 0]);
+
+    Ok(Transaction::new(vec![Op::InsertNode {
+        path: insert_path,
+        node: table_row_node(cols),
+    }])
+    .selection_after(Selection::collapsed(Point::new(selection_path, 0)))
+    .source("command:table.insert_row_above"))
+}
+
 fn insert_table_row_below(editor: &crate::core::Editor) -> Result<Transaction, String> {
     let focus_path = &editor.selection().focus.path;
     let row_path =
@@ -3559,6 +4822,60 @@ fn insert_table_row_below(editor: &crate::core::Editor) -> Result<Transaction, S
     }])
     .selection_after(Selection::collapsed(Point::new(selection_path, 0)))
     .source("command:table.insert_row_below"))
+}
+
+fn insert_table_col_left(editor: &crate::core::Editor) -> Result<Transaction, String> {
+    let focus_path = &editor.selection().focus.path;
+    let cell_path =
+        ancestor_element_path(editor.doc(), focus_path, "table_cell").ok_or("Not in a table")?;
+    let (cell_ix, row_path) = cell_path
+        .split_last()
+        .ok_or_else(|| "Invalid table cell path".to_string())?;
+    let cell_ix = *cell_ix;
+    let (row_ix, table_path) = row_path
+        .split_last()
+        .ok_or_else(|| "Invalid table row path".to_string())?;
+
+    let Some(Node::Element(table)) = node_at_path(editor.doc(), table_path) else {
+        return Err("Invalid table".into());
+    };
+    if table.kind != "table" {
+        return Err("Invalid table".into());
+    }
+
+    let insert_ix_in_current_row = {
+        let Some(Node::Element(row)) = node_at_path(editor.doc(), row_path) else {
+            return Err("Invalid table row".into());
+        };
+        cell_ix.min(row.children.len())
+    };
+
+    let mut ops: Vec<Op> = Vec::new();
+    for (r_ix, row_node) in table.children.iter().enumerate() {
+        let Node::Element(row) = row_node else {
+            continue;
+        };
+        if row.kind != "table_row" {
+            continue;
+        }
+        let insert_ix = cell_ix.min(row.children.len());
+        let mut insert_path = table_path.to_vec();
+        insert_path.push(r_ix);
+        insert_path.push(insert_ix);
+        ops.push(Op::InsertNode {
+            path: insert_path,
+            node: table_cell_node(),
+        });
+    }
+
+    let mut selection_path = table_path.to_vec();
+    selection_path.push(*row_ix);
+    selection_path.push(insert_ix_in_current_row);
+    selection_path.extend([0, 0]);
+
+    Ok(Transaction::new(ops)
+        .selection_after(Selection::collapsed(Point::new(selection_path, 0)))
+        .source("command:table.insert_col_left"))
 }
 
 fn insert_table_col_right(editor: &crate::core::Editor) -> Result<Transaction, String> {
@@ -3612,6 +4929,27 @@ fn insert_table_col_right(editor: &crate::core::Editor) -> Result<Transaction, S
     Ok(Transaction::new(ops)
         .selection_after(Selection::collapsed(Point::new(selection_path, 0)))
         .source("command:table.insert_col_right"))
+}
+
+fn delete_table(editor: &crate::core::Editor) -> Result<Transaction, String> {
+    let focus_path = &editor.selection().focus.path;
+    let table_path =
+        ancestor_element_path(editor.doc(), focus_path, "table").ok_or("Not in a table")?;
+
+    let mut paragraph_text_path = table_path.clone();
+    paragraph_text_path.push(0);
+
+    Ok(Transaction::new(vec![
+        Op::RemoveNode {
+            path: table_path.clone(),
+        },
+        Op::InsertNode {
+            path: table_path,
+            node: Node::paragraph(""),
+        },
+    ])
+    .selection_after(Selection::collapsed(Point::new(paragraph_text_path, 0)))
+    .source("command:table.delete_table"))
 }
 
 fn delete_table_row(editor: &crate::core::Editor) -> Result<Transaction, String> {
@@ -4421,6 +5759,79 @@ fn toggle_mark_at_caret(
     Ok((ops, selection_after))
 }
 
+fn insert_emoji(editor: &crate::core::Editor, emoji: String) -> Result<Transaction, String> {
+    let sel = editor.selection().clone();
+    if !sel.is_collapsed() {
+        return Err("Selection must be collapsed".into());
+    }
+
+    let focus = sel.focus;
+    if focus.path.is_empty() {
+        return Err("Selection is not in a text node".into());
+    }
+    let (child_ix, block_path) = focus
+        .path
+        .split_last()
+        .ok_or_else(|| "Selection is not in a text node".to_string())?;
+
+    let Some(Node::Element(el)) = node_at_path(editor.doc(), block_path) else {
+        return Err("Selection is not in a text block".into());
+    };
+    let Some(Node::Text(text)) = el.children.get(*child_ix) else {
+        return Err("Selection is not in a text node".into());
+    };
+
+    let cursor = clamp_to_char_boundary(&text.text, focus.offset);
+    let left = text.text.get(..cursor).unwrap_or("").to_string();
+    let right = text.text.get(cursor..).unwrap_or("").to_string();
+    let marks = text.marks.clone();
+
+    let mut replacement: Vec<Node> = Vec::new();
+    let base_child_ix = *child_ix;
+    let mut emoji_ix = base_child_ix;
+
+    if !left.is_empty() {
+        replacement.push(Node::Text(TextNode {
+            text: left,
+            marks: marks.clone(),
+        }));
+        emoji_ix += 1;
+    }
+
+    let mut attrs = Attrs::default();
+    attrs.insert("emoji".to_string(), Value::String(emoji));
+    replacement.push(Node::Void(crate::core::VoidNode {
+        kind: "emoji".to_string(),
+        attrs,
+    }));
+
+    if right.is_empty() {
+        replacement.push(Node::Text(TextNode {
+            text: String::new(),
+            marks: marks.clone(),
+        }));
+    } else {
+        replacement.push(Node::Text(TextNode { text: right, marks }));
+    }
+
+    let mut ops: Vec<Op> = Vec::new();
+    ops.push(Op::RemoveNode {
+        path: focus.path.clone(),
+    });
+    for (i, node) in replacement.into_iter().enumerate() {
+        let mut path = block_path.to_vec();
+        path.push(base_child_ix + i);
+        ops.push(Op::InsertNode { path, node });
+    }
+
+    let mut selection_path = block_path.to_vec();
+    selection_path.push(emoji_ix + 1);
+    let selection_after = Selection::collapsed(Point::new(selection_path, 0));
+    Ok(Transaction::new(ops)
+        .selection_after(selection_after)
+        .source("command:emoji.insert"))
+}
+
 fn insert_mention(editor: &crate::core::Editor, label: String) -> Result<Transaction, String> {
     let sel = editor.selection().clone();
     if !sel.is_collapsed() {
@@ -4537,6 +5948,48 @@ fn insert_image(
     ])
     .selection_after(Selection::collapsed(Point::new(paragraph_text_path, 0)))
     .source("command:image.insert"))
+}
+
+fn insert_images(
+    editor: &crate::core::Editor,
+    images: Vec<(String, Option<String>)>,
+) -> Result<Transaction, String> {
+    if images.is_empty() {
+        return Err("No images to insert".into());
+    }
+
+    let focus = editor.selection().focus.clone();
+    let block_path = focus.path.split_last().map(|(_, p)| p).unwrap_or(&[]);
+
+    let (parent_path, insert_at) = if block_path.is_empty() {
+        (Vec::new(), editor.doc().children.len())
+    } else {
+        let (block_ix, parent) = block_path.split_last().unwrap();
+        (parent.to_vec(), block_ix + 1)
+    };
+
+    let mut ops: Vec<Op> = Vec::new();
+    for (i, (src, alt)) in images.into_iter().enumerate() {
+        let mut path = parent_path.clone();
+        path.push(insert_at + i);
+        ops.push(Op::InsertNode {
+            path,
+            node: Node::image(src, alt),
+        });
+    }
+
+    let mut paragraph_element_path = parent_path.clone();
+    paragraph_element_path.push(insert_at + ops.len());
+    let mut paragraph_text_path = paragraph_element_path.clone();
+    paragraph_text_path.push(0);
+    ops.push(Op::InsertNode {
+        path: paragraph_element_path,
+        node: Node::paragraph(""),
+    });
+
+    Ok(Transaction::new(ops)
+        .selection_after(Selection::collapsed(Point::new(paragraph_text_path, 0)))
+        .source("command:image.insert_many"))
 }
 
 fn apply_mark_range(

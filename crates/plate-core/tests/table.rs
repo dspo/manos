@@ -92,6 +92,52 @@ fn table_row_and_col_commands_keep_table_rectangular() {
 }
 
 #[test]
+fn table_pro_commands_support_row_above_col_left_and_delete_table() {
+    let mut editor = Editor::with_richtext_plugins();
+    editor
+        .run_command(
+            "table.insert",
+            Some(serde_json::json!({ "rows": 2, "cols": 2 })),
+        )
+        .unwrap();
+
+    editor.run_command("table.insert_row_above", None).unwrap();
+    let table = match editor.doc().children.get(1).unwrap() {
+        Node::Element(el) => el,
+        _ => unreachable!(),
+    };
+    assert_eq!(table.kind, "table");
+    assert_eq!(table.children.len(), 3);
+    for row in &table.children {
+        let Node::Element(row) = row else {
+            panic!("Expected row");
+        };
+        assert_eq!(row.kind, "table_row");
+        assert_eq!(row.children.len(), 2);
+    }
+
+    editor.run_command("table.insert_col_left", None).unwrap();
+    let table = match editor.doc().children.get(1).unwrap() {
+        Node::Element(el) => el,
+        _ => unreachable!(),
+    };
+    assert_eq!(table.kind, "table");
+    for row in &table.children {
+        let Node::Element(row) = row else {
+            panic!("Expected row");
+        };
+        assert_eq!(row.children.len(), 3);
+    }
+
+    editor.run_command("table.delete_table", None).unwrap();
+    assert!(matches!(
+        editor.doc().children.get(1),
+        Some(Node::Element(el)) if el.kind == "paragraph"
+    ));
+    assert_eq!(editor.selection().focus.path, vec![1, 0]);
+}
+
+#[test]
 fn table_normalize_fills_missing_structure() {
     let doc = Document {
         children: vec![Node::Element(ElementNode {
