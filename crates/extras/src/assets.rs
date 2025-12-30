@@ -15,6 +15,10 @@ impl ExtrasAssetSource {
 
 const ASSETS: &[(&str, &[u8])] = &[
     (
+        "icons/archive.svg",
+        include_bytes!("../assets/icons/archive.svg"),
+    ),
+    (
         "icons/align-center.svg",
         include_bytes!("../assets/icons/align-center.svg"),
     ),
@@ -31,12 +35,24 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/align-right.svg"),
     ),
     (
+        "icons/arrow-down.svg",
+        include_bytes!("../assets/icons/arrow-down.svg"),
+    ),
+    (
         "icons/arrow-down-to-line.svg",
         include_bytes!("../assets/icons/arrow-down-to-line.svg"),
     ),
     (
+        "icons/arrow-up.svg",
+        include_bytes!("../assets/icons/arrow-up.svg"),
+    ),
+    (
         "icons/arrow-up-to-line.svg",
         include_bytes!("../assets/icons/arrow-up-to-line.svg"),
+    ),
+    (
+        "icons/arrow-left-right.svg",
+        include_bytes!("../assets/icons/arrow-left-right.svg"),
     ),
     (
         "icons/audio-lines.svg",
@@ -52,6 +68,39 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/chevron-down.svg"),
     ),
     (
+        "icons/chevron-right.svg",
+        include_bytes!("../assets/icons/chevron-right.svg"),
+    ),
+    (
+        "icons/chevron-up.svg",
+        include_bytes!("../assets/icons/chevron-up.svg"),
+    ),
+    (
+        "icons/chevrons-up-down.svg",
+        include_bytes!("../assets/icons/chevrons-up-down.svg"),
+    ),
+    (
+        "icons/chevrons-down-up.svg",
+        include_bytes!("../assets/icons/chevrons-down-up.svg"),
+    ),
+    (
+        "icons/check.svg",
+        include_bytes!("../assets/icons/check.svg"),
+    ),
+    (
+        "icons/close.svg",
+        include_bytes!("../assets/icons/close.svg"),
+    ),
+    (
+        "icons/columns-2.svg",
+        include_bytes!("../assets/icons/columns-2.svg"),
+    ),
+    ("icons/copy.svg", include_bytes!("../assets/icons/copy.svg")),
+    (
+        "icons/download.svg",
+        include_bytes!("../assets/icons/download.svg"),
+    ),
+    (
         "icons/code-xml.svg",
         include_bytes!("../assets/icons/code-xml.svg"),
     ),
@@ -63,6 +112,7 @@ const ASSETS: &[(&str, &[u8])] = &[
         "icons/file-up.svg",
         include_bytes!("../assets/icons/file-up.svg"),
     ),
+    ("icons/file.svg", include_bytes!("../assets/icons/file.svg")),
     ("icons/film.svg", include_bytes!("../assets/icons/film.svg")),
     (
         "icons/highlighter.svg",
@@ -73,9 +123,58 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/github.svg"),
     ),
     (
+        "icons/git-compare.svg",
+        include_bytes!("../assets/icons/git-compare.svg"),
+    ),
+    (
+        "icons/gallery-horizontal.svg",
+        include_bytes!("../assets/icons/gallery-horizontal.svg"),
+    ),
+    (
+        "icons/gallery-vertical-end.svg",
+        include_bytes!("../assets/icons/gallery-vertical-end.svg"),
+    ),
+    (
+        "icons/layers.svg",
+        include_bytes!("../assets/icons/layers.svg"),
+    ),
+    (
+        "icons/layers-plus.svg",
+        include_bytes!("../assets/icons/layers-plus.svg"),
+    ),
+    (
+        "icons/layers-2.svg",
+        include_bytes!("../assets/icons/layers-2.svg"),
+    ),
+    (
+        "icons/send-to-back.svg",
+        include_bytes!("../assets/icons/send-to-back.svg"),
+    ),
+    (
+        "icons/circle-pile.svg",
+        include_bytes!("../assets/icons/circle-pile.svg"),
+    ),
+    (
+        "icons/folder-closed.svg",
+        include_bytes!("../assets/icons/folder-closed.svg"),
+    ),
+    (
+        "icons/folder.svg",
+        include_bytes!("../assets/icons/folder.svg"),
+    ),
+    (
+        "icons/folder-open.svg",
+        include_bytes!("../assets/icons/folder-open.svg"),
+    ),
+    (
+        "icons/folder-sync.svg",
+        include_bytes!("../assets/icons/folder-sync.svg"),
+    ),
+    (
         "icons/image.svg",
         include_bytes!("../assets/icons/image.svg"),
     ),
+    ("icons/info.svg", include_bytes!("../assets/icons/info.svg")),
     (
         "icons/indent-decrease.svg",
         include_bytes!("../assets/icons/indent-decrease.svg"),
@@ -98,6 +197,10 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/list-collapse.svg"),
     ),
     (
+        "icons/layout-dashboard.svg",
+        include_bytes!("../assets/icons/layout-dashboard.svg"),
+    ),
+    (
         "icons/list-ordered.svg",
         include_bytes!("../assets/icons/list-ordered.svg"),
     ),
@@ -118,6 +221,14 @@ const ASSETS: &[(&str, &[u8])] = &[
         "icons/paint-bucket.svg",
         include_bytes!("../assets/icons/paint-bucket.svg"),
     ),
+    (
+        "icons/panel-bottom.svg",
+        include_bytes!("../assets/icons/panel-bottom.svg"),
+    ),
+    (
+        "icons/panel-bottom-open.svg",
+        include_bytes!("../assets/icons/panel-bottom-open.svg"),
+    ),
     ("icons/pen.svg", include_bytes!("../assets/icons/pen.svg")),
     (
         "icons/pen-line.svg",
@@ -125,8 +236,20 @@ const ASSETS: &[(&str, &[u8])] = &[
     ),
     ("icons/plus.svg", include_bytes!("../assets/icons/plus.svg")),
     (
+        "icons/replace.svg",
+        include_bytes!("../assets/icons/replace.svg"),
+    ),
+    (
+        "icons/refresh-cw.svg",
+        include_bytes!("../assets/icons/refresh-cw.svg"),
+    ),
+    (
         "icons/redo-2.svg",
         include_bytes!("../assets/icons/redo-2.svg"),
+    ),
+    (
+        "icons/search.svg",
+        include_bytes!("../assets/icons/search.svg"),
     ),
     (
         "icons/square-library.svg",
