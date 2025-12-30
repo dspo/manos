@@ -1,6 +1,6 @@
 # DnD Tree：在 GPUI 中实现可拖拽重排的树形组件（从原理到代码）
 
-本文基于本仓库新增的 `gpui-dnd-tree` crate，讲解如何在 **GPUI / gpui-component** 的生态里实现一个支持：
+本文基于本仓库的 `gpui-manos-dnd` crate（`DndTree` 组件），讲解如何在 **GPUI / gpui-component** 的生态里实现一个支持：
 
 - 同级重排（兄弟节点上下换位）
 - 跨层级移动（从深层拖到浅层/从浅层拖到深层）
@@ -12,7 +12,7 @@
 
 - 运行 story：`cargo run`
 - 运行独立示例：`cargo run --example dnd_tree`
-- 跑单元测试：`cargo test -p gpui-dnd-tree`
+- 跑单元测试：`cargo test -p gpui-manos-dnd`
 
 ---
 
@@ -48,7 +48,7 @@
 2. 每行根据 `depth` 增加 `padding-left`（视觉缩进）
 3. 用 `uniform_list` 做虚拟列表（只渲染可见区，性能稳定）
 
-`gpui-dnd-tree` 延续这一思路：渲染层仍然是 List，只是在交互层补齐 DnD + 树结构重排。
+`DndTree` 延续这一思路：渲染层仍然是 List，只是在交互层补齐 DnD + 树结构重排。
 
 ---
 
@@ -62,7 +62,7 @@
 - drag 开始时，GPUI 会把 `value` 存到 `cx.active_drag`
 - 同时调用你的 closure，创建拖拽“影子”（ghost），用于显示拖拽中的浮层
 
-本组件用一个轻量的 `DragGhost` 来显示当前拖拽节点的 label（见 `crates/dnd_tree/src/tree.rs`）。实现上刻意不依赖 `cursor_offset`，保持行为与 Zed 的 tab drag preview 一致：ghost 由 GPUI 跟随鼠标移动，组件只负责渲染内容。
+本组件用一个轻量的 `DragGhost` 来显示当前拖拽节点的 label（见 `crates/dnd/src/tree.rs`）。实现上刻意不依赖 `cursor_offset`，保持行为与 Zed 的 tab drag preview 一致：ghost 由 GPUI 跟随鼠标移动，组件只负责渲染内容。
 
 ### 2.2 拖拽过程：`on_drag_move::<T>(...)`
 
@@ -81,7 +81,7 @@
 
 - 你把 `on_drop` 绑在外层容器上，但外层 hitbox 很可能被子元素覆盖/遮挡（例如 `uniform_list` 或行），导致收不到 drop
 
-因此 `gpui-dnd-tree` 采用更稳的策略：
+因此 `DndTree` 采用更稳的策略：
 
 - `uniform_list` 上绑定 `on_drop::<DndTreeDrag>`：覆盖列表空白区域
 - 每一行也绑定 `on_drop::<DndTreeDrag>`：覆盖“落到某行”的 drop
@@ -92,7 +92,7 @@
 
 ## 3. 数据结构：树结构与可见行列表并存
 
-文件：`crates/dnd_tree/src/tree.rs`
+文件：`crates/dnd/src/tree.rs`
 
 ### 3.1 `DndTreeItem`：树节点（共享展开态）
 
@@ -140,7 +140,7 @@
 
 ## 4. 渲染结构：`uniform_list` + 行 wrapper
 
-文件：`crates/dnd_tree/src/tree.rs`
+文件：`crates/dnd/src/tree.rs`
 
 整体结构是：
 
@@ -186,7 +186,7 @@ line_x = indent_offset + desired_depth * indent_width
 
 ### 5.2 用“行上下半区”推导 before/after
 
-为了让投放更直观（与多数 Web DnD Tree 一致），`gpui-dnd-tree` 在命中某行时会按 **行的上下半区** 推导 before/after：
+为了让投放更直观（与多数 Web DnD Tree 一致），`DndTree` 在命中某行时会按 **行的上下半区** 推导 before/after：
 
 - 列表容器绑定 `on_drag_move`：根据 `y + scroll offset` 推导 `hovered_ix`
 - 再计算 `y_in_row = y_in_content - hovered_ix * item_height`
@@ -200,7 +200,7 @@ line_x = indent_offset + desired_depth * indent_width
 
 ### 5.3 “投放为子节点”不是独立模式
 
-`gpui-dnd-tree` 采用 **List 模拟 Tree** 的统一模型：DnD 预览与落地只由两个变量决定：
+`DndTree` 采用 **List 模拟 Tree** 的统一模型：DnD 预览与落地只由两个变量决定：
 
 - `gap_index`：插入点（行与行之间的缝）
 - `depth`：拖拽节点 drop 后的层级（也就是缩进层级）
@@ -249,7 +249,7 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 
 ## 6. Drop 落地：Remove + ComputeDestination + Insert + Rebuild
 
-文件：`crates/dnd_tree/src/tree.rs`（`DndTreeState::on_drop`）
+文件：`crates/dnd/src/tree.rs`（`DndTreeState::on_drop`）
 
 核心步骤：
 
@@ -296,7 +296,7 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 - 每个 tab 本身就是 drop target：`.drag_over::<DraggedTab>(...)` 提示插入位置、`.on_drop(...)` 直接根据目标 index 重排
 - 视觉提示用“背景 + 边框”而不是改变布局（避免 jitter）
 
-`gpui-dnd-tree` 的对应实践是：
+`DndTree` 的对应实践是：
 
 - drop 监听绑定到 `uniform_list` 与行（避免 hitbox 被遮挡时丢 drop）
 - 插入线用 absolute overlay（不改变行高）

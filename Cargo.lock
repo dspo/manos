@@ -2634,38 +2634,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-dnd-list"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui-component",
-]
-
-[[package]]
-name = "gpui-dnd-tree"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui-component",
-]
-
-[[package]]
-name = "gpui-dnd-vlist"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui-component",
-]
-
-[[package]]
-name = "gpui-dnd-vtree"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui-component",
-]
-
-[[package]]
 name = "gpui-macros"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2692,16 +2660,21 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-component",
- "gpui-dnd-list",
- "gpui-dnd-tree",
- "gpui-dnd-vlist",
- "gpui-dnd-vtree",
  "gpui-manos-components",
+ "gpui-manos-dnd",
  "gpui-manos-plate",
  "gpui-manos-webview",
  "http",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "gpui-manos-dnd"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
 ]
 
 [[package]]

@@ -1,14 +1,18 @@
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, CursorStyle, ElementId, Entity, EntityId, FocusHandle,
-    InteractiveElement as _, IntoElement, ListSizingBehavior, Modifiers, ParentElement as _,
-    Pixels, Render, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, uniform_list,
+    div, prelude::FluentBuilder as _, px, uniform_list, App, AppContext as _, Context, CursorStyle,
+    ElementId, Entity, EntityId, FocusHandle, InteractiveElement as _, IntoElement,
+    ListSizingBehavior, Modifiers, ParentElement as _, Pixels, Render, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, UniformListScrollHandle, Window,
 };
 use gpui_component::list::ListItem;
 use gpui_component::scroll::{Scrollbar, ScrollbarState};
 use gpui_component::{ActiveTheme as _, StyledExt as _};
+
+use crate::common::{
+    reorder_to_index_for_drop_after_last, reorder_to_index_for_drop_on_row, DragGhost,
+};
 
 const CONTEXT: &str = "DndList";
 
@@ -56,33 +60,6 @@ struct DndListDrag {
     item_id: SharedString,
     label: SharedString,
     ix: usize,
-}
-
-struct DragGhost {
-    label: SharedString,
-}
-
-impl DragGhost {
-    fn new(label: SharedString) -> Self {
-        Self { label }
-    }
-}
-
-impl Render for DragGhost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(8.))
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_md()
-            .text_color(theme.popover_foreground)
-            .text_sm()
-            .child(self.label.clone())
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,20 +240,7 @@ impl<T: 'static> DndListState<T> {
         if item_count == 0 {
             return;
         }
-
-        let gap_index = if target_ix < from_ix {
-            target_ix
-        } else if target_ix > from_ix {
-            target_ix.saturating_add(1)
-        } else {
-            from_ix
-        };
-
-        let mut to_ix = gap_index;
-        if to_ix > from_ix {
-            to_ix = to_ix.saturating_sub(1);
-        }
-        to_ix = to_ix.min(item_count.saturating_sub(1));
+        let to_ix = reorder_to_index_for_drop_on_row(from_ix, target_ix, item_count);
 
         let reorder = DndListReorder {
             item_id: drag.item_id.clone(),
@@ -325,13 +289,7 @@ impl<T: 'static> DndListState<T> {
         if item_count == 0 {
             return;
         }
-
-        let gap_index = item_count;
-        let mut to_ix = gap_index;
-        if to_ix > from_ix {
-            to_ix = to_ix.saturating_sub(1);
-        }
-        to_ix = to_ix.min(item_count.saturating_sub(1));
+        let to_ix = reorder_to_index_for_drop_after_last(from_ix, item_count);
 
         let reorder = DndListReorder {
             item_id: drag.item_id.clone(),

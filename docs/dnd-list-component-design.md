@@ -286,15 +286,13 @@ There is a large battery of drag-related tests for pinned/unpinned moves and spl
 
 ## 9. 本仓库落地情况（v1）
 
-本设计文档已在本仓库落地为两个可复用组件 crate，并提供 story/example 验收入口。
+本设计文档已在本仓库落地为一个可复用组件 crate，并提供 story/example 验收入口。
 
 ### 9.1 Crates 与示例入口
 
-- **DnD List**：`crates/dnd_list`（crate 名：`gpui-dnd-list`）
-  - 示例：`cargo run --example dnd_list`
-  - story 页面：`crates/story/src/dnd_list.rs`
-- **DnD Tree**：`crates/dnd_tree`（crate 名：`gpui-dnd-tree`，基于“list + depth 缩进”实现）
-  - 示例：`cargo run --example dnd_tree`
+- **DnD Components**：`crates/dnd`（crate 名：`gpui-manos-dnd`）
+  - 示例：`cargo run --example dnd_list` / `cargo run --example dnd_tree` / `cargo run --example dnd_vlist` / `cargo run --example dnd_vtree`
+  - story 页面：`crates/story/src/dnd_list.rs` / `crates/story/src/dnd_tree.rs` / `crates/story/src/dnd_vlist.rs` / `crates/story/src/dnd_vtree.rs`
   - 说明文档：`docs/dnd-tree.md`
 
 ### 9.2 关键设计点与实际 API 的对应关系
@@ -306,10 +304,10 @@ There is a large battery of drag-related tests for pinned/unpinned moves and spl
   - `DndListState::on_reorder(|reorder, items| ...)`（并可用 `can_drop(...)` 做规则拦截）
   - `DndTreeState` 当前为内部落地（直接改树结构并重建 entries）；若业务侧需要受控模式，可在此基础上再封装回调式 API
 - **Drop Indicator**
-  - `gpui-dnd-list`：采用 `drag_over` 时对目标行加背景 + 上/下边框（更贴近 Zed 的 tab reorder 语义）
-  - `gpui-dnd-tree`：采用 absolute overlay 插入线，并支持 `indicator_style/indent_offset/indent_width` 配置（见 `docs/dnd-tree.md`）
+  - `DndList`：采用 `drag_over` 时对目标行加背景 + 上/下边框（更贴近 Zed 的 tab reorder 语义）
+  - `DndTree`：采用 absolute overlay 插入线，并支持 `indicator_style/indent_offset/indent_width` 配置（见 `docs/dnd-tree.md`）
 
 ### 9.3 已知差异 / 待增强项
 
-- `gpui-dnd-tree` 的插入线目前仅支持实线（颜色/粗细/端点可配），暂不支持虚线/点线（可扩展为自定义 renderer）。
+- `DndTree` 的插入线目前仅支持实线（颜色/粗细/端点可配），暂不支持虚线/点线（可扩展为自定义 renderer）。
 - 自动滚动、hover 延时自动展开等属于增强体验能力，当前未内置（见 `docs/dnd-tree.md` 第 9 节）。

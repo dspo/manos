@@ -3,7 +3,9 @@ use gpui::*;
 use gpui_component::ActiveTheme as _;
 use gpui_component::list::ListItem;
 use gpui_component::{Icon, Sizable as _, h_flex, v_flex};
-use gpui_dnd_tree::{DndTreeIndicatorCap, DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree};
+use gpui_manos_dnd::{
+    DndTreeEntry, DndTreeIndicatorCap, DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree,
+};
 
 pub struct DndTreeExample {
     tree: Entity<DndTreeState>,
@@ -115,7 +117,7 @@ impl Render for DndTreeExample {
 
 fn render_tree_row(
     ix: usize,
-    entry: &gpui_dnd_tree::DndTreeEntry,
+    entry: &DndTreeEntry,
     row_state: DndTreeRowState,
     cx: &mut App,
 ) -> ListItem {
