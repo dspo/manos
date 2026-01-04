@@ -8,7 +8,7 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::list::ListItem;
-use gpui_component::scroll::{Scrollbar, ScrollbarState};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, StyledExt as _};
 
 const CONTEXT: &str = "DndTree";
@@ -244,7 +244,6 @@ pub struct DndTreeState {
     indent_width: Pixels,
     indent_offset: Pixels,
     indicator_style: DndTreeIndicatorStyle,
-    scrollbar_state: ScrollbarState,
     scroll_handle: UniformListScrollHandle,
     drag_handle_width: Option<Pixels>,
     selected_ix: Option<usize>,
@@ -265,7 +264,6 @@ impl DndTreeState {
             indent_width: px(16.),
             indent_offset: px(12.),
             indicator_style: DndTreeIndicatorStyle::default(),
-            scrollbar_state: ScrollbarState::default(),
             scroll_handle: UniformListScrollHandle::default(),
             drag_handle_width: None,
             selected_ix: None,
@@ -1224,11 +1222,8 @@ impl Render for DndTreeState {
                     .top_0()
                     .right_0()
                     .bottom_0()
-                    .w(px(12.))
-                    .child(Scrollbar::uniform_scroll(
-                        &self.scrollbar_state,
-                        &self.scroll_handle,
-                    )),
+                    .w(px(16.))
+                    .child(Scrollbar::vertical(&self.scroll_handle)),
             )
             .when_some(line, |this, line| this.child(line))
     }

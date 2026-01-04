@@ -7,7 +7,7 @@ use gpui::{
     Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::list::ListItem;
-use gpui_component::scroll::{Scrollbar, ScrollbarState};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{ActiveTheme as _, StyledExt as _};
 
 const CONTEXT: &str = "DndList";
@@ -123,7 +123,6 @@ impl<T> Default for DndListStateCallbacks<T> {
 pub struct DndListState<T> {
     focus_handle: FocusHandle,
     items: Vec<DndListItem<T>>,
-    scrollbar_state: ScrollbarState,
     scroll_handle: UniformListScrollHandle,
     drag_handle_width: Option<Pixels>,
     selected_ix: Option<usize>,
@@ -139,7 +138,6 @@ impl<T: 'static> DndListState<T> {
         Self {
             focus_handle: cx.focus_handle(),
             items: Vec::new(),
-            scrollbar_state: ScrollbarState::default(),
             scroll_handle: UniformListScrollHandle::default(),
             drag_handle_width: Some(px(32.)),
             selected_ix: None,
@@ -491,11 +489,8 @@ impl<T: 'static> Render for DndListState<T> {
                     .top_0()
                     .right_0()
                     .bottom_0()
-                    .w(px(12.))
-                    .child(Scrollbar::uniform_scroll(
-                        &self.scrollbar_state,
-                        &self.scroll_handle,
-                    )),
+                    .w(px(16.))
+                    .child(Scrollbar::vertical(&self.scroll_handle)),
             )
     }
 }

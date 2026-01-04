@@ -73,99 +73,6 @@ impl GitViewerApp {
         }
     }
 
-    pub(super) fn refresh_current_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.git_available {
-            window.push_notification(
-                Notification::new().message("未检测到 git 命令，无法刷新当前文件"),
-                cx,
-            );
-            return;
-        }
-
-        if self.loading {
-            return;
-        }
-
-        let open_path = self
-            .diff_view
-            .as_ref()
-            .and_then(|view| view.path.clone())
-            .or_else(|| {
-                self.conflict_view
-                    .as_ref()
-                    .and_then(|view| view.path.clone())
-            });
-        let Some(open_path) = open_path else {
-            window.push_notification(Notification::new().message("未打开文件"), cx);
-            return;
-        };
-
-        if self.conflict_view.is_some() {
-            let entry = self
-                .files
-                .iter()
-                .find(|entry| entry.path == open_path)
-                .cloned()
-                .unwrap_or(FileEntry {
-                    path: open_path,
-                    status: "UU".to_string(),
-                    orig_path: None,
-                });
-            self.open_conflict_file(entry, window, cx);
-            return;
-        }
-
-        let Some(diff_view) = self.diff_view.as_ref() else {
-            return;
-        };
-        let compare_target = diff_view.compare_target.clone();
-
-        if diff_view.path.is_none() {
-            window.push_notification(
-                Notification::new().message("当前 diff 为 demo，无法刷新文件 diff"),
-                cx,
-            );
-            return;
-        }
-
-        let cache_key =
-            DiffCacheKey::new(open_path.clone(), compare_target.clone(), self.diff_options);
-        let _ = self.diff_cache.take(&cache_key);
-        self.diff_prefetch_inflight.remove(&cache_key);
-        if self.current_diff_cache_key.as_ref() == Some(&cache_key) {
-            self.current_diff_cache_key = None;
-        }
-
-        let fallback_status = diff_view.status.clone().unwrap_or_default();
-        let fallback_orig = diff_view.orig_path.clone();
-        let entry = self
-            .files
-            .iter()
-            .find(|entry| entry.path == open_path)
-            .cloned()
-            .unwrap_or(FileEntry {
-                path: open_path.clone(),
-                status: fallback_status,
-                orig_path: fallback_orig,
-            });
-
-        match compare_target.clone() {
-            CompareTarget::Refs { left, right } => {
-                self.open_file_diff_with_refs(
-                    open_path,
-                    diff_view.status.clone(),
-                    left,
-                    right,
-                    window,
-                    cx,
-                );
-            }
-            _ => {
-                self.open_file_diff_with_target(entry, compare_target, window, cx);
-            }
-        }
-    }
-
     fn set_changes_tree_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
         fn walk(item: &TreeItem, expanded: bool) {
             if !item.is_folder() {
@@ -387,6 +294,205 @@ impl GitViewerApp {
         });
     }
 
+    fn reveal_in_file_manager(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match reveal_path_in_file_manager(&path) {
+            Ok(()) => {}
+            Err(err) => window.push_notification(
+                Notification::new().message(format!("打开文件管理器失败：{err:#}")),
+                cx,
+            ),
+        }
+    }
+
+    fn stage_path(&mut self, entry: FileEntry, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法 Stage"),
+                cx,
+            );
+            return;
+        }
+        if self.loading {
+            return;
+        }
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path = entry.path.clone();
+        window.push_notification(
+            Notification::new().message(format!("git add -- {path}")),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let result = window
+                .background_executor()
+                .spawn(async move { run_git(repo_root.as_path(), ["add", "--", &path]) })
+                .await;
+
+            window
+                .update(|window, cx| {
+                    if let Err(err) = result {
+                        window.push_notification(
+                            Notification::new().message(format!("Stage 失败：{err:#}")),
+                            cx,
+                        );
+                    }
+                    this.update(cx, |this, cx| {
+                        this.refresh_git_status(window, cx);
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn unstage_path(&mut self, entry: FileEntry, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法 Unstage"),
+                cx,
+            );
+            return;
+        }
+        if self.loading {
+            return;
+        }
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        let path = entry.path.clone();
+        window.push_notification(
+            Notification::new().message(format!("git restore --staged -- {path}")),
+            cx,
+        );
+
+        cx.spawn_in(window, async move |_, window| {
+            let result =
+                window
+                    .background_executor()
+                    .spawn(async move {
+                        run_git(repo_root.as_path(), ["restore", "--staged", "--", &path])
+                    })
+                    .await;
+
+            window
+                .update(|window, cx| {
+                    if let Err(err) = result {
+                        window.push_notification(
+                            Notification::new().message(format!("Unstage 失败：{err:#}")),
+                            cx,
+                        );
+                    }
+                    this.update(cx, |this, cx| {
+                        this.refresh_git_status(window, cx);
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn rollback_path(
+        &mut self,
+        path: String,
+        status: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.rollback_paths(
+            vec![FileEntry {
+                path,
+                status,
+                orig_path: None,
+            }],
+            window,
+            cx,
+        );
+    }
+
+    fn rollback_paths(
+        &mut self,
+        entries: Vec<FileEntry>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.git_available {
+            window.push_notification(
+                Notification::new().message("未检测到 git 命令，无法回滚文件"),
+                cx,
+            );
+            return;
+        }
+        if self.loading {
+            return;
+        }
+
+        let this = cx.entity();
+        let repo_root = self.repo_root.clone();
+        window.push_notification(Notification::new().message("正在回滚…"), cx);
+
+        cx.spawn_in(window, async move |_, window| {
+            let result = window
+                .background_executor()
+                .spawn(async move {
+                    let mut messages = Vec::new();
+                    for entry in &entries {
+                        let message = rollback_path_on_disk(
+                            repo_root.as_path(),
+                            entry.path.as_str(),
+                            entry.status.as_str(),
+                        )
+                        .with_context(|| format!("回滚失败：{}", entry.path))?;
+                        messages.push(message);
+                    }
+                    Ok::<Vec<String>, anyhow::Error>(messages)
+                })
+                .await;
+
+            window
+                .update(|window, cx| {
+                    match result {
+                        Ok(messages) => {
+                            if let Some(last) = messages.last() {
+                                window.push_notification(
+                                    Notification::new().message(last.clone()),
+                                    cx,
+                                );
+                            } else {
+                                window
+                                    .push_notification(Notification::new().message("回滚完成"), cx);
+                            }
+                        }
+                        Err(err) => window.push_notification(
+                            Notification::new().message(format!("回滚失败：{err:#}")),
+                            cx,
+                        ),
+                    }
+
+                    this.update(cx, |this, cx| {
+                        this.refresh_git_status(window, cx);
+                        cx.notify();
+                    });
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
     fn shelve_silently(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.git_available {
             window.push_notification(
@@ -560,15 +666,7 @@ impl GitViewerApp {
     }
 
     fn rebuild_changes_tree(&mut self, files: &[FileEntry], cx: &mut Context<Self>) {
-        let selected_path = self
-            .diff_view
-            .as_ref()
-            .and_then(|view| view.path.clone())
-            .or_else(|| {
-                self.conflict_view
-                    .as_ref()
-                    .and_then(|view| view.path.clone())
-            });
+        let selected_path = self.opened_file.as_ref().map(|entry| entry.path.clone());
 
         let (root_items, meta) = build_changes_tree_items(
             files,
@@ -599,15 +697,7 @@ impl GitViewerApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let selected_path = self
-            .diff_view
-            .as_ref()
-            .and_then(|view| view.path.clone())
-            .or_else(|| {
-                self.conflict_view
-                    .as_ref()
-                    .and_then(|view| view.path.clone())
-            });
+        let selected_path = self.opened_file.as_ref().map(|entry| entry.path.clone());
 
         let Some(row) = self.changes_tree_rows.get(index).cloned() else {
             return div().h(px(24.)).into_any_element();
@@ -952,7 +1042,7 @@ impl GitViewerApp {
                         let entry_for_open = entry_for_open_menu.clone();
                         let menu = menu
                             .item(
-                                PopupMenuItem::new("打开 Diff")
+                                PopupMenuItem::new("打开")
                                     .icon(Icon::new(IconName::File).xsmall())
                                     .on_click(move |_, window, cx| {
                                         app_for_open.update(cx, |this, cx| {
@@ -1261,7 +1351,6 @@ impl GitViewerApp {
             window
                 .update(|window, cx| {
                     this.update(cx, |this, cx| {
-                        this.clear_diff_cache();
                         this.committing = false;
                         if commit_result.is_ok() {
                             this.commit_amend = false;
@@ -1273,6 +1362,21 @@ impl GitViewerApp {
 
                         if let Ok(entries) = &status_result {
                             this.files = entries.clone();
+                        }
+
+                        let open_path = this.opened_file.as_ref().map(|entry| entry.path.clone());
+                        if let Some(open_path) = open_path {
+                            if let Some(entry) = this
+                                .files
+                                .iter()
+                                .find(|entry| entry.path == open_path)
+                                .cloned()
+                            {
+                                this.opened_file = Some(entry);
+                                this.screen = AppScreen::FileView;
+                            } else {
+                                this.close_file_view();
+                            }
                         }
                         this.invalidate_changes_tree();
                         cx.notify();
@@ -1371,7 +1475,6 @@ impl GitViewerApp {
             return;
         }
 
-        self.clear_diff_cache();
         self.loading = true;
         cx.notify();
 
@@ -1411,40 +1514,18 @@ impl GitViewerApp {
                         this.selected_for_commit
                             .retain(|path| valid_paths.contains(path));
 
-                        let open_path = this
-                            .diff_view
-                            .as_ref()
-                            .and_then(|view| view.path.clone())
-                            .or_else(|| {
-                                this.conflict_view
-                                    .as_ref()
-                                    .and_then(|view| view.path.clone())
-                            });
-
+                        let open_path = this.opened_file.as_ref().map(|entry| entry.path.clone());
                         if let Some(open_path) = open_path {
-                            this.current_diff_cache_key = None;
-                            let fallback_orig = this
-                                .diff_view
-                                .as_ref()
-                                .and_then(|view| view.orig_path.clone());
-                            let entry = this
+                            if let Some(entry) = this
                                 .files
                                 .iter()
                                 .find(|entry| entry.path == open_path)
                                 .cloned()
-                                .unwrap_or(FileEntry {
-                                    path: open_path,
-                                    status: String::new(),
-                                    orig_path: fallback_orig,
-                                });
-
-                            if is_conflict_status(&entry.status) {
-                                this.open_file(entry, window, cx);
-                            } else if let Some(diff_view) = this.diff_view.as_ref() {
-                                let target = diff_view.compare_target.clone();
-                                this.open_file_diff_with_target(entry, target, window, cx);
+                            {
+                                this.opened_file = Some(entry);
+                                this.screen = AppScreen::FileView;
                             } else {
-                                this.open_file(entry, window, cx);
+                                this.close_file_view();
                             }
                         }
                         this.invalidate_changes_tree();
@@ -1627,7 +1708,7 @@ impl GitViewerApp {
                 let app = cx.entity();
                 let tree_state = self.changes_tree.clone();
                 div()
-                    .id("changes-tree-viewport")
+                    .id("changes-tree")
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -1646,7 +1727,6 @@ impl GitViewerApp {
             }
         };
 
-        let compare_control = self.render_compare_target_control(cx);
         let app = cx.entity();
 
         let toolbar = div()
@@ -1658,7 +1738,6 @@ impl GitViewerApp {
             .min_w(px(0.))
             .overflow_hidden()
             .child(div().flex_none().child(filter_bar))
-            .child(div().flex_none().child(compare_control))
             .child(
                 div().flex_none().child(
                     Button::new("changes-toolbar-refresh")
@@ -1836,26 +1915,6 @@ impl GitViewerApp {
             .min_w(px(0.))
             .p(px(12.))
             .gap(px(8.))
-            // .child(
-            //     div()
-            //         .flex()
-            //         .flex_row()
-            //         .items_center()
-            //         .justify_between()
-            //         .gap(px(8.))
-            //         .child(div().text_sm().child("Commit"))
-            //         .child(
-            //             Button::new("commit-info")
-            //                 .icon(IconName::Info)
-            //                 .ghost()
-            //                 .small()
-            //                 .compact()
-            //                 .tooltip(
-            //                     "Commit 只提交勾选的文件（使用 git commit --only）；Diff 里的 Stage/Unstage 依然可用",
-            //                 )
-            //                 .on_click(|_, _, _| {}),
-            //         )
-            // )
             .child(
                 div()
                     .flex()
@@ -2269,7 +2328,7 @@ fn render_changes_tree_item(
                     let entry_for_open = file_entry.clone();
                     let menu = menu
                         .item(
-                            PopupMenuItem::new("打开 Diff")
+                            PopupMenuItem::new("打开")
                                 .icon(Icon::new(IconName::File).xsmall())
                                 .on_click(move |_, window, cx| {
                                     app_for_open.update(cx, |this, cx| {
@@ -2627,25 +2686,6 @@ fn render_status_badge(
         .child(div().text_color(right_color).child(right.to_string()))
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .into_any_element()
-}
-
-pub(super) fn default_compare_target(status: &str) -> CompareTarget {
-    if is_untracked_status(status) {
-        return CompareTarget::HeadToWorktree;
-    }
-
-    let Some((x, y)) = status_xy(status) else {
-        return CompareTarget::HeadToWorktree;
-    };
-
-    if is_modified_status_code(y) {
-        return CompareTarget::IndexToWorktree;
-    }
-    if is_modified_status_code(x) {
-        return CompareTarget::HeadToIndex;
-    }
-
-    CompareTarget::HeadToWorktree
 }
 
 #[derive(Default)]
