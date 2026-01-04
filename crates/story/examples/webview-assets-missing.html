@@ -176,6 +176,41 @@
                     <button id="btn">Invoke greet</button>
                 </div>
                 <pre id="out">Ready.</pre>
+                <hr
+                    style="
+                        margin: 16px 0;
+                        border: none;
+                        border-top: 1px solid rgba(127, 127, 127, 0.25);
+                    "
+                />
+                <div><strong>Channel sanity check</strong>:</div>
+                <div class="row">
+                    <input
+                        id="count"
+                        placeholder="Count to…"
+                        value="8"
+                        inputmode="numeric"
+                    />
+                    <button id="count_btn">Invoke count_to (Channel)</button>
+                </div>
+                <pre id="count_out">Ready.</pre>
+                <hr
+                    style="
+                        margin: 16px 0;
+                        border: none;
+                        border-top: 1px solid rgba(127, 127, 127, 0.25);
+                    "
+                />
+                <div><strong>Channel fetch-path check</strong>:</div>
+                <div class="row">
+                    <button id="large_json_btn">
+                        Invoke channel_large_json (10KB)
+                    </button>
+                    <button id="large_bytes_btn">
+                        Invoke channel_large_bytes (20KB)
+                    </button>
+                </div>
+                <pre id="large_out">Ready.</pre>
                 <script>
                     const $ = (id) => document.getElementById(id);
                     async function invokeGreet() {
@@ -202,6 +237,126 @@
                         }
                     }
                     $("btn").addEventListener("click", invokeGreet);
+
+                    async function invokeCountTo() {
+                        const out = $("count_out");
+                        out.textContent = "Invoking…";
+
+                        const n = Number.parseInt($("count").value, 10);
+                        if (!Number.isFinite(n) || n < 0) {
+                            out.textContent = "Invalid number.";
+                            return;
+                        }
+
+                        let channelId = 0;
+                        channelId =
+                            window.__TAURI_INTERNALS__.transformCallback(
+                                (event) => {
+                                    if (event && event.end) {
+                                        window.__TAURI_INTERNALS__.unregisterCallback(
+                                            channelId,
+                                        );
+                                        out.textContent += "\n(end)";
+                                        return;
+                                    }
+                                    out.textContent +=
+                                        "\n" + JSON.stringify(event, null, 2);
+                                },
+                                false,
+                            );
+
+                        try {
+                            await window.__TAURI_INTERNALS__.invoke(
+                                "count_to",
+                                {
+                                    n,
+                                    onEvent: `__CHANNEL__:${channelId}`,
+                                },
+                            );
+                        } catch (e) {
+                            out.textContent += "\nError: " + e;
+                        }
+                    }
+
+                    $("count_btn").addEventListener("click", invokeCountTo);
+
+                    async function invokeChannelOnce(cmd) {
+                        const out = $("large_out");
+                        out.textContent = `Invoking ${cmd}…`;
+
+                        let channelId = 0;
+                        let nextIndex = 0;
+                        const pending = [];
+                        let endIndex = null;
+                        channelId =
+                            window.__TAURI_INTERNALS__.transformCallback(
+                                (event) => {
+                                    if (event && "end" in event) {
+                                        endIndex = event.index ?? null;
+                                    } else if (
+                                        event &&
+                                        "index" in event &&
+                                        "message" in event
+                                    ) {
+                                        pending[event.index] = event.message;
+                                    }
+
+                                    while (nextIndex in pending) {
+                                        const message = pending[nextIndex];
+                                        delete pending[nextIndex];
+
+                                        if (message instanceof ArrayBuffer) {
+                                            out.textContent += `\n#${nextIndex}: ArrayBuffer(${message.byteLength})`;
+                                        } else if (Array.isArray(message)) {
+                                            out.textContent += `\n#${nextIndex}: number[](${message.length})`;
+                                        } else if (
+                                            typeof message === "string"
+                                        ) {
+                                            out.textContent += `\n#${nextIndex}: string(len=${message.length})`;
+                                        } else {
+                                            out.textContent +=
+                                                "\n" +
+                                                JSON.stringify(
+                                                    {
+                                                        index: nextIndex,
+                                                        message,
+                                                    },
+                                                    null,
+                                                    2,
+                                                );
+                                        }
+
+                                        nextIndex += 1;
+                                    }
+
+                                    if (
+                                        endIndex !== null &&
+                                        nextIndex === endIndex
+                                    ) {
+                                        window.__TAURI_INTERNALS__.unregisterCallback(
+                                            channelId,
+                                        );
+                                        out.textContent += "\n(end)";
+                                    }
+                                },
+                                false,
+                            );
+
+                        try {
+                            await window.__TAURI_INTERNALS__.invoke(cmd, {
+                                onEvent: `__CHANNEL__:${channelId}`,
+                            });
+                        } catch (e) {
+                            out.textContent += "\nError: " + e;
+                        }
+                    }
+
+                    $("large_json_btn").addEventListener("click", () => {
+                        invokeChannelOnce("channel_large_json");
+                    });
+                    $("large_bytes_btn").addEventListener("click", () => {
+                        invokeChannelOnce("channel_large_bytes");
+                    });
                 </script>
             </div>
         </div>

@@ -5,12 +5,14 @@ pub use serde_json;
 pub use wry;
 
 use http::header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serialize_to_javascript::{DefaultTemplate, Template, default_template};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use wry::{Error as WryError, Result, WebView, WebViewBuilder, WebViewId};
 
@@ -20,9 +22,80 @@ pub use gpui_manos_webview_macros::{
 
 // todo: implement dev server
 
+const INVOKE_KEY: &str = "gpui";
+
+pub mod async_runtime {
+    use std::future::Future;
+
+    pub fn block_on<F: Future>(future: F) -> F::Output {
+        pollster::block_on(future)
+    }
+}
+
+thread_local! {
+    static IPC_WEBVIEWS: RefCell<HashMap<String, Weak<wry::WebView>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(crate) fn register_webview_for_ipc(webview: &Rc<wry::WebView>) {
+    let id = webview.id().to_string();
+    IPC_WEBVIEWS.with(|registry| {
+        registry.borrow_mut().insert(id, Rc::downgrade(webview));
+    });
+}
+
+pub(crate) fn unregister_webview_for_ipc(webview_id: &str) {
+    IPC_WEBVIEWS.with(|registry| {
+        registry.borrow_mut().remove(webview_id);
+    });
+}
+
+fn ipc_webview_for_label(webview_label: Option<&str>) -> Option<Rc<wry::WebView>> {
+    IPC_WEBVIEWS.with(|registry| {
+        let weak = {
+            let registry = registry.borrow();
+            if let Some(label) = webview_label {
+                registry.get(label).cloned()
+            } else if registry.len() == 1 {
+                registry.values().next().cloned()
+            } else {
+                None
+            }
+        };
+
+        weak.and_then(|w| w.upgrade())
+    })
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PostMessageOptions {
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    custom_protocol_ipc_blocked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PostMessageRequest {
+    cmd: String,
+    callback: u32,
+    error: u32,
+    #[serde(default)]
+    payload: serde_json::Value,
+    #[serde(default)]
+    options: Option<PostMessageOptions>,
+    #[serde(rename = "__TAURI_INVOKE_KEY__")]
+    invoke_key: String,
+    #[serde(default)]
+    webview_label: Option<String>,
+}
+
 pub struct Invoke {
     pub command: String,
     pub request: http::Request<Vec<u8>>,
+    pub webview_label: Option<String>,
 }
 
 pub type InvokeHandler =
@@ -40,11 +113,25 @@ pub struct Builder<'a> {
 
 impl<'a> Builder<'a> {
     pub fn new() -> Self {
+        let mut handlers: HashMap<
+            String,
+            Arc<dyn Fn(http::Request<Vec<u8>>) -> http::Response<Vec<u8>> + Send + Sync + 'static>,
+        > = HashMap::new();
+
+        handlers.insert(
+            ipc::FETCH_CHANNEL_DATA_COMMAND.to_string(),
+            Arc::new(|request| ipc::fetch_channel_data(request)),
+        );
+        handlers.insert(
+            "plugin:webview|set_webview_zoom".to_string(),
+            Arc::new(|request| ipc::set_webview_zoom(request)),
+        );
+
         Builder {
             builder: WebViewBuilder::new(),
             webview_id: WebViewId::default(),
             invoke_handler: None,
-            handlers: HashMap::new(),
+            handlers,
         }
     }
 
@@ -121,16 +208,28 @@ impl<'a> Builder<'a> {
 
     // todo: implement more professional serve static
     pub fn serve_static<S: ToString + 'static>(self, static_root: S) -> Self {
+        let static_root = static_root.to_string();
         self.apply(move |b| {
+            let static_root_for_asset = static_root.clone();
+            let static_root_for_wry = static_root.clone();
+
             b.with_asynchronous_custom_protocol(
-                "wry".into(),
+                "asset".into(),
                 move |webview_id, request, responder| {
-                    let response = serve_static(webview_id, static_root.to_string(), request)
+                    let response = serve_static(webview_id, static_root_for_asset.clone(), request)
                         .unwrap_or_else(response_internal_server_err);
                     responder.respond(response)
                 },
             )
-            .with_url("wry://localhost")
+            .with_asynchronous_custom_protocol(
+                "wry".into(),
+                move |webview_id, request, responder| {
+                    let response = serve_static(webview_id, static_root_for_wry.clone(), request)
+                        .unwrap_or_else(response_internal_server_err);
+                    responder.respond(response)
+                },
+            )
+            .with_url("asset://localhost")
         })
     }
 
@@ -151,9 +250,151 @@ impl<'a> Builder<'a> {
         let handlers = self.handlers.clone();
         let invoke_handler = self.invoke_handler.clone();
         self.apply(move |b| {
-            b.with_asynchronous_custom_protocol(
+            let handlers_for_post_message = handlers.clone();
+            let invoke_handler_for_post_message = invoke_handler.clone();
+            b.with_ipc_handler(move |request: http::Request<String>| {
+                let message: PostMessageRequest = match serde_json::from_str(request.body()) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        eprintln!("[webview] invalid IPC postMessage payload: {err}");
+                        return;
+                    }
+                };
+
+                if message.invoke_key != INVOKE_KEY {
+                    eprintln!("[webview] rejected IPC postMessage with invalid invoke key");
+                    return;
+                }
+
+                let _guard = ipc::IpcContextGuard::new(message.webview_label.as_deref());
+
+                let payload_bytes = match serde_json::to_vec(&message.payload) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        eprintln!("[webview] failed to serialize IPC payload: {err}");
+                        return;
+                    }
+                };
+
+                let mut request_builder = http::Request::builder()
+                    .method(http::Method::POST)
+                    .uri("ipc://localhost");
+
+                let PostMessageOptions {
+                    headers,
+                    custom_protocol_ipc_blocked: _custom_protocol_ipc_blocked,
+                } = message.options.unwrap_or_default();
+
+                for (key, value) in headers {
+                    if let (Ok(name), Ok(value)) = (
+                        http::header::HeaderName::from_bytes(key.as_bytes()),
+                        http::HeaderValue::from_str(&value),
+                    ) {
+                        request_builder = request_builder.header(name, value);
+                    }
+                }
+
+                let request = match request_builder.body(payload_bytes) {
+                    Ok(request) => request,
+                    Err(err) => {
+                        eprintln!("[webview] failed to build IPC request: {err}");
+                        return;
+                    }
+                };
+
+                let cmd = message.cmd;
+                let api_handler = handlers_for_post_message.get(&cmd).cloned();
+
+                let response = if let Some(ref handler) = invoke_handler_for_post_message {
+                    if let Some(api_handler) = api_handler {
+                        let request_for_invoke = request.clone();
+                        handler(Invoke {
+                            command: cmd.clone(),
+                            request: request_for_invoke,
+                            webview_label: message.webview_label.clone(),
+                        })
+                        .unwrap_or_else(|| api_handler(request))
+                    } else {
+                        handler(Invoke {
+                            command: cmd.clone(),
+                            request,
+                            webview_label: message.webview_label.clone(),
+                        })
+                        .unwrap_or_else(|| ipc::not_found(cmd.clone()))
+                    }
+                } else if let Some(api_handler) = api_handler {
+                    api_handler(request)
+                } else {
+                    ipc::not_found(cmd.clone())
+                };
+
+                let (parts, body) = response.into_parts();
+                let response_header = parts
+                    .headers
+                    .get("Tauri-Response")
+                    .and_then(|value| value.to_str().ok());
+                let callback_id = if response_header == Some("ok") {
+                    message.callback
+                } else {
+                    message.error
+                };
+
+                let content_type = parts
+                    .headers
+                    .get(CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                let content_type = content_type.split(',').next().unwrap_or_default();
+
+                let js_arg = match content_type {
+                    "application/json" => {
+                        let data = serde_json::from_slice::<serde_json::Value>(&body)
+                            .unwrap_or_else(|_| {
+                                serde_json::Value::String(
+                                    String::from_utf8_lossy(&body).into_owned(),
+                                )
+                            });
+                        serde_json::to_string(&data).unwrap_or_else(|_| "null".to_string())
+                    }
+                    "text/plain" => serde_json::to_string(&String::from_utf8_lossy(&body))
+                        .unwrap_or_else(|_| "null".to_string()),
+                    _ => {
+                        let bytes_as_json_array =
+                            serde_json::to_string(&body).unwrap_or_else(|_| "[]".to_string());
+                        format!("new Uint8Array({bytes_as_json_array}).buffer")
+                    }
+                };
+
+                let js = format!("window.__TAURI_INTERNALS__.runCallback({callback_id}, {js_arg});");
+
+                let Some(webview) = ipc_webview_for_label(message.webview_label.as_deref())
+                else {
+                    eprintln!(
+                        "[webview] IPC postMessage fallback used but no webview is registered; cannot run callback for `{cmd}`"
+                    );
+                    return;
+                };
+
+                let _ = webview.evaluate_script(&js);
+            })
+            .with_asynchronous_custom_protocol(
                 "ipc".into(),
                 move |webview_id, request, responder| {
+                    fn respond(
+                        responder: wry::RequestAsyncResponder,
+                        mut response: http::Response<Vec<u8>>,
+                    ) {
+                        response.headers_mut().insert(
+                            http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                            http::HeaderValue::from_static("*"),
+                        );
+                        response.headers_mut().insert(
+                            http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                            http::HeaderValue::from_static("Tauri-Response"),
+                        );
+                        responder.respond(response);
+                    }
+
                     println!(
                         "webview_id: {}, method: {}, scheme: {:?}, host: {:?}, path: {:?}",
                         webview_id,
@@ -163,29 +404,76 @@ impl<'a> Builder<'a> {
                         request.uri().path()
                     );
 
+                    match *request.method() {
+                        http::Method::POST => {}
+                        http::Method::OPTIONS => {
+                            let mut response = http::Response::new(Vec::new());
+                            response.headers_mut().insert(
+                                http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+                                http::HeaderValue::from_static("*"),
+                            );
+                            respond(responder, response);
+                            return;
+                        }
+                        _ => {
+                            let mut response =
+                                http::Response::new("only POST and OPTIONS are allowed".into());
+                            *response.status_mut() = http::StatusCode::METHOD_NOT_ALLOWED;
+                            response.headers_mut().insert(
+                                http::header::CONTENT_TYPE,
+                                http::HeaderValue::from_static("text/plain"),
+                            );
+                            respond(responder, response);
+                            return;
+                        }
+                    }
+
+                    if let Err(response) = ipc::validate_custom_protocol_request(&request) {
+                        respond(responder, response);
+                        return;
+                    }
+
                     let raw_path = request.uri().path().to_string();
                     let command = decode_uri_component(
                         raw_path.strip_prefix('/').unwrap_or(raw_path.as_str()),
                     );
+                    let webview_label = Some(webview_id.to_string());
 
-                    if let Some(ref handler) = invoke_handler {
-                        let invoke = Invoke { command, request };
-                        if let Some(response) = handler(invoke) {
-                            responder.respond(response);
-                            return;
-                        }
+                    let invoke_handler = invoke_handler.clone();
+                    let api_handler = handlers.get(&command).cloned();
 
-                        responder.respond(ipc::not_found(raw_path));
-                        return;
-                    }
+                    std::thread::spawn(move || {
+                        let _guard = ipc::IpcContextGuard::new(webview_label.as_deref());
+                        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || {
+                                if let Some(handler) = invoke_handler {
+                                    if let Some(api_handler) = api_handler {
+                                        let request_for_invoke = request.clone();
+                                        handler(Invoke {
+                                            command: command.clone(),
+                                            request: request_for_invoke,
+                                            webview_label: webview_label.clone(),
+                                        })
+                                        .unwrap_or_else(|| api_handler(request))
+                                    } else {
+                                        handler(Invoke {
+                                            command,
+                                            request,
+                                            webview_label,
+                                        })
+                                        .unwrap_or_else(|| ipc::not_found(raw_path))
+                                    }
+                                } else if let Some(api_handler) = api_handler {
+                                    api_handler(request)
+                                } else {
+                                    ipc::not_found(raw_path)
+                                }
+                            },
+                        ))
+                        .unwrap_or_else(|_| ipc::internal_error("invoke handler panicked"));
 
-                    if let Some(handler) = handlers.get(&command) {
-                        let response = handler(request);
-                        responder.respond(response);
-                        return;
-                    }
-
-                    responder.respond(ipc::not_found(raw_path));
+                        respond(responder, response);
+                    });
                 },
             )
         })
@@ -225,6 +513,559 @@ fn from_hex(byte: u8) -> Option<u8> {
 pub mod ipc {
     use super::*;
     use http::HeaderValue;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    pub const IPC_CHANNEL_PREFIX: &str = "__CHANNEL__:";
+    pub const FETCH_CHANNEL_DATA_COMMAND: &str = "plugin:__TAURI_CHANNEL__|fetch";
+
+    const TAURI_CALLBACK_HEADER_NAME: &str = "Tauri-Callback";
+    const TAURI_ERROR_HEADER_NAME: &str = "Tauri-Error";
+    const TAURI_INVOKE_KEY_HEADER_NAME: &str = "Tauri-Invoke-Key";
+    const ORIGIN_HEADER_NAME: &str = "Origin";
+
+    const CHANNEL_ID_HEADER_NAME: &str = "Tauri-Channel-Id";
+    const MAX_JSON_DIRECT_EXECUTE_THRESHOLD: usize = 8192;
+    const MAX_RAW_DIRECT_EXECUTE_THRESHOLD: usize = 1024;
+
+    const CHANNEL_DATA_TTL: Duration = Duration::from_secs(60);
+    const CHANNEL_DATA_MAX_ENTRIES: usize = 128;
+    const CHANNEL_DATA_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+    static PLATFORM_DISPATCHER: OnceLock<Arc<dyn gpui::PlatformDispatcher>> = OnceLock::new();
+    static CHANNEL_DATA_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static CHANNEL_DATA_QUEUE: OnceLock<Mutex<ChannelDataQueue>> = OnceLock::new();
+
+    #[derive(Debug)]
+    struct ChannelDataEntry {
+        inserted_at: Instant,
+        size_bytes: usize,
+        body: InvokeResponseBody,
+    }
+
+    #[derive(Debug, Default)]
+    struct ChannelDataQueue {
+        entries: HashMap<u32, ChannelDataEntry>,
+        order: VecDeque<u32>,
+        total_bytes: usize,
+    }
+
+    pub(crate) fn init_platform_dispatcher(dispatcher: Arc<dyn gpui::PlatformDispatcher>) {
+        let _ = PLATFORM_DISPATCHER.set(dispatcher);
+    }
+
+    thread_local! {
+        static CURRENT_WEBVIEW_LABEL: std::cell::RefCell<Option<String>> =
+            std::cell::RefCell::new(None);
+    }
+
+    #[doc(hidden)]
+    pub struct IpcContextGuard {
+        previous_webview_label: Option<String>,
+    }
+
+    impl IpcContextGuard {
+        pub fn new(webview_label: Option<&str>) -> Self {
+            let previous_webview_label = CURRENT_WEBVIEW_LABEL
+                .with(|label| label.replace(webview_label.map(|label| label.to_string())));
+
+            Self {
+                previous_webview_label,
+            }
+        }
+    }
+
+    impl Drop for IpcContextGuard {
+        fn drop(&mut self) {
+            let previous_webview_label = self.previous_webview_label.take();
+            CURRENT_WEBVIEW_LABEL.with(|label| {
+                label.replace(previous_webview_label);
+            });
+        }
+    }
+
+    fn current_webview_label() -> Option<String> {
+        CURRENT_WEBVIEW_LABEL.with(|label| label.borrow().clone())
+    }
+
+    fn dispatch_eval_on_main_thread(
+        webview_label: Option<String>,
+        js: String,
+    ) -> std::result::Result<(), String> {
+        let dispatcher = PLATFORM_DISPATCHER.get().cloned().ok_or_else(|| {
+            "gpui platform dispatcher is not initialized (create a gpui_manos_webview::webview::WebView first)"
+                .to_string()
+        })?;
+
+        let (runnable, task) = async_task::spawn(
+            async move {
+                let Some(webview) = super::ipc_webview_for_label(webview_label.as_deref()) else {
+                    eprintln!(
+                        "[webview] IPC requested JS eval but target webview is missing (label={webview_label:?})"
+                    );
+                    return;
+                };
+
+                if let Err(err) = webview.evaluate_script(&js) {
+                    eprintln!("[webview] evaluate_script failed: {err}");
+                }
+            },
+            move |runnable| dispatcher.dispatch_on_main_thread(runnable),
+        );
+
+        runnable.schedule();
+        task.detach();
+        Ok(())
+    }
+
+    pub(crate) fn validate_custom_protocol_request(
+        request: &http::Request<Vec<u8>>,
+    ) -> std::result::Result<(), http::Response<Vec<u8>>> {
+        fn parse_u32_header(
+            headers: &http::HeaderMap,
+            name: &'static str,
+        ) -> std::result::Result<u32, http::Response<Vec<u8>>> {
+            let value = headers
+                .get(name)
+                .ok_or_else(|| bad_request(format!("missing {name} header")))?
+                .to_str()
+                .map_err(|_| bad_request(format!("{name} header value must be a string")))?;
+
+            value
+                .parse()
+                .map_err(|_| bad_request(format!("{name} header value must be a numeric string")))
+        }
+
+        let headers = request.headers();
+
+        let invoke_key = headers
+            .get(TAURI_INVOKE_KEY_HEADER_NAME)
+            .ok_or_else(|| bad_request(format!("missing {TAURI_INVOKE_KEY_HEADER_NAME} header")))?
+            .to_str()
+            .map_err(|_| {
+                bad_request(format!(
+                    "{TAURI_INVOKE_KEY_HEADER_NAME} header value must be a string"
+                ))
+            })?;
+        if invoke_key != INVOKE_KEY {
+            return Err(bad_request("invalid invoke key"));
+        }
+
+        let origin = headers
+            .get(ORIGIN_HEADER_NAME)
+            .ok_or_else(|| bad_request(format!("missing {ORIGIN_HEADER_NAME} header")))?
+            .to_str()
+            .map_err(|_| {
+                bad_request(format!(
+                    "{ORIGIN_HEADER_NAME} header value must be a string"
+                ))
+            })?;
+        if origin != "null" && origin.parse::<http::Uri>().is_err() {
+            return Err(bad_request("Origin header is not a valid URL"));
+        }
+
+        let _ = parse_u32_header(headers, TAURI_CALLBACK_HEADER_NAME)?;
+        let _ = parse_u32_header(headers, TAURI_ERROR_HEADER_NAME)?;
+
+        let content_type = headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let content_type = content_type.split(',').next().unwrap_or_default();
+        let content_type = content_type.split(';').next().unwrap_or_default().trim();
+
+        match content_type {
+            "" | "application/octet-stream" => Ok(()),
+            "application/json" => {
+                if !request.body().is_empty() {
+                    serde_json::from_slice::<serde_json::Value>(request.body())
+                        .map_err(|err| bad_request(format!("invalid JSON body: {err}")))?;
+                }
+                Ok(())
+            }
+            other => Err(bad_request(format!(
+                "content type `{other}` is not implemented"
+            ))),
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum InvokeResponseBody {
+        Json(String),
+        Raw(Vec<u8>),
+    }
+
+    pub trait IpcResponse {
+        fn body(self) -> std::result::Result<InvokeResponseBody, String>;
+    }
+
+    impl<T: serde::Serialize> IpcResponse for T {
+        fn body(self) -> std::result::Result<InvokeResponseBody, String> {
+            serde_json::to_string(&self)
+                .map(InvokeResponseBody::Json)
+                .map_err(|err| err.to_string())
+        }
+    }
+
+    fn channel_data_queue() -> &'static Mutex<ChannelDataQueue> {
+        CHANNEL_DATA_QUEUE.get_or_init(|| Mutex::new(ChannelDataQueue::default()))
+    }
+
+    fn response_body_size(body: &InvokeResponseBody) -> usize {
+        match body {
+            InvokeResponseBody::Json(json) => json.len(),
+            InvokeResponseBody::Raw(bytes) => bytes.len(),
+        }
+    }
+
+    fn prune_channel_data_queue(queue: &mut ChannelDataQueue, now: Instant) {
+        loop {
+            while matches!(queue.order.front(), Some(id) if !queue.entries.contains_key(id)) {
+                queue.order.pop_front();
+            }
+
+            let Some(&oldest_id) = queue.order.front() else {
+                break;
+            };
+
+            let Some(oldest_entry) = queue.entries.get(&oldest_id) else {
+                continue;
+            };
+
+            let is_expired = now.duration_since(oldest_entry.inserted_at) > CHANNEL_DATA_TTL;
+            let over_entries_limit = queue.entries.len() > CHANNEL_DATA_MAX_ENTRIES;
+            let over_bytes_limit =
+                queue.total_bytes > CHANNEL_DATA_MAX_BYTES && queue.entries.len() > 1;
+
+            if !(is_expired || over_entries_limit || over_bytes_limit) {
+                break;
+            }
+
+            queue.order.pop_front();
+            if let Some(entry) = queue.entries.remove(&oldest_id) {
+                queue.total_bytes = queue.total_bytes.saturating_sub(entry.size_bytes);
+            }
+        }
+    }
+
+    fn store_channel_data(body: InvokeResponseBody) -> u32 {
+        let id = CHANNEL_DATA_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let now = Instant::now();
+        let size_bytes = response_body_size(&body);
+
+        let mut queue = channel_data_queue().lock().unwrap();
+        queue.total_bytes = queue.total_bytes.saturating_add(size_bytes);
+        queue.order.push_back(id);
+        queue.entries.insert(
+            id,
+            ChannelDataEntry {
+                inserted_at: now,
+                size_bytes,
+                body,
+            },
+        );
+        prune_channel_data_queue(&mut queue, now);
+        id
+    }
+
+    pub(crate) fn fetch_channel_data(request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+        let Some(id) = request
+            .headers()
+            .get(CHANNEL_ID_HEADER_NAME)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return bad_request("missing channel id header");
+        };
+
+        let now = Instant::now();
+        let mut queue = channel_data_queue().lock().unwrap();
+        prune_channel_data_queue(&mut queue, now);
+        let body = queue.entries.remove(&id);
+        let Some(body) = body else {
+            return not_found(format!("channel data {id}"));
+        };
+        queue.order.retain(|existing_id| *existing_id != id);
+        queue.total_bytes = queue.total_bytes.saturating_sub(body.size_bytes);
+
+        match body.body {
+            InvokeResponseBody::Json(json_string) => {
+                respond(Response::new(json_string.into_bytes(), "application/json"))
+            }
+            InvokeResponseBody::Raw(bytes) => respond(Response::binary(bytes)),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WebviewZoomPayload {
+        #[serde(default)]
+        label: Option<String>,
+        value: f64,
+    }
+
+    fn dispatch_zoom_on_main_thread(
+        webview_label: Option<String>,
+        zoom_factor: f64,
+    ) -> std::result::Result<(), String> {
+        let dispatcher = PLATFORM_DISPATCHER.get().cloned().ok_or_else(|| {
+            "gpui platform dispatcher is not initialized (create a gpui_manos_webview::webview::WebView first)"
+                .to_string()
+        })?;
+
+        let (runnable, task) = async_task::spawn(
+            async move {
+                let Some(webview) = super::ipc_webview_for_label(webview_label.as_deref()) else {
+                    eprintln!(
+                        "[webview] IPC requested zoom but target webview is missing (label={webview_label:?})"
+                    );
+                    return;
+                };
+
+                if let Err(err) = webview.zoom(zoom_factor) {
+                    eprintln!("[webview] zoom failed: {err}");
+                }
+            },
+            move |runnable| dispatcher.dispatch_on_main_thread(runnable),
+        );
+
+        runnable.schedule();
+        task.detach();
+        Ok(())
+    }
+
+    pub(crate) fn set_webview_zoom(request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+        let payload = match serde_json::from_slice::<WebviewZoomPayload>(request.body()) {
+            Ok(payload) => payload,
+            Err(err) => {
+                return bad_request(format!(
+                    "invalid JSON body for plugin:webview|set_webview_zoom: {err}"
+                ));
+            }
+        };
+
+        if !payload.value.is_finite() || payload.value <= 0.0 {
+            return bad_request("zoom value must be a positive, finite number");
+        }
+
+        let target = payload.label.or_else(current_webview_label);
+        if let Err(err) = dispatch_zoom_on_main_thread(target, payload.value) {
+            return internal_error(err);
+        }
+
+        ok_json(&())
+    }
+
+    #[derive(Debug)]
+    pub struct Request {
+        parts: http::request::Parts,
+        body: Vec<u8>,
+    }
+
+    impl Request {
+        pub fn new(parts: http::request::Parts, body: Vec<u8>) -> Self {
+            Self { parts, body }
+        }
+
+        pub fn method(&self) -> &http::Method {
+            &self.parts.method
+        }
+
+        pub fn uri(&self) -> &http::Uri {
+            &self.parts.uri
+        }
+
+        pub fn headers(&self) -> &http::HeaderMap {
+            &self.parts.headers
+        }
+
+        pub fn body(&self) -> &[u8] {
+            &self.body
+        }
+
+        pub fn into_body(self) -> Vec<u8> {
+            self.body
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Response {
+        body: Vec<u8>,
+        content_type: String,
+    }
+
+    impl Response {
+        pub fn new(body: impl Into<Vec<u8>>, content_type: impl Into<String>) -> Self {
+            Self {
+                body: body.into(),
+                content_type: content_type.into(),
+            }
+        }
+
+        pub fn binary(body: impl Into<Vec<u8>>) -> Self {
+            Self::new(body, "application/octet-stream")
+        }
+
+        fn into_http_response(self) -> http::Response<Vec<u8>> {
+            let mut builder = response_builder(http::StatusCode::OK, "ok");
+            builder = builder.header(
+                CONTENT_TYPE,
+                HeaderValue::from_str(&self.content_type)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            builder.body(self.body).unwrap()
+        }
+    }
+
+    impl IpcResponse for Response {
+        fn body(self) -> std::result::Result<InvokeResponseBody, String> {
+            let is_json = self
+                .content_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                == "application/json";
+
+            if is_json {
+                String::from_utf8(self.body)
+                    .map(InvokeResponseBody::Json)
+                    .map_err(|err| err.to_string())
+            } else {
+                Ok(InvokeResponseBody::Raw(self.body))
+            }
+        }
+    }
+
+    pub trait IntoInvokeResponse {
+        fn into_invoke_response(self) -> http::Response<Vec<u8>>;
+    }
+
+    impl<T: serde::Serialize> IntoInvokeResponse for T {
+        fn into_invoke_response(self) -> http::Response<Vec<u8>> {
+            ok_json(&self)
+        }
+    }
+
+    impl IntoInvokeResponse for Response {
+        fn into_invoke_response(self) -> http::Response<Vec<u8>> {
+            self.into_http_response()
+        }
+    }
+
+    pub fn respond<T: IntoInvokeResponse>(value: T) -> http::Response<Vec<u8>> {
+        value.into_invoke_response()
+    }
+
+    #[derive(Debug)]
+    struct ChannelInner {
+        id: u32,
+        webview_label: Option<String>,
+        next_message_index: AtomicUsize,
+    }
+
+    impl Drop for ChannelInner {
+        fn drop(&mut self) {
+            let end_index = self.next_message_index.load(Ordering::Relaxed);
+            let js = format!(
+                "window.__TAURI_INTERNALS__.runCallback({}, {{ end: true, index: {} }});",
+                self.id, end_index
+            );
+            let _ = dispatch_eval_on_main_thread(self.webview_label.clone(), js);
+        }
+    }
+
+    pub struct Channel<TSend = serde_json::Value> {
+        inner: Arc<ChannelInner>,
+        phantom: std::marker::PhantomData<TSend>,
+    }
+
+    impl<TSend> Clone for Channel<TSend> {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                phantom: self.phantom,
+            }
+        }
+    }
+
+    impl<TSend> Channel<TSend> {
+        pub fn id(&self) -> u32 {
+            self.inner.id
+        }
+    }
+
+    impl<TSend> Channel<TSend>
+    where
+        TSend: IpcResponse,
+    {
+        pub fn send(&self, message: TSend) -> std::result::Result<(), String> {
+            let body = message.body()?;
+            let current_index = self
+                .inner
+                .next_message_index
+                .fetch_add(1, Ordering::Relaxed);
+
+            match body {
+                InvokeResponseBody::Json(message)
+                    if message.len() < MAX_JSON_DIRECT_EXECUTE_THRESHOLD =>
+                {
+                    let js = format!(
+                        "window.__TAURI_INTERNALS__.runCallback({}, {{ message: {message}, index: {current_index} }});",
+                        self.inner.id
+                    );
+                    dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+                }
+                InvokeResponseBody::Raw(bytes)
+                    if bytes.len() < MAX_RAW_DIRECT_EXECUTE_THRESHOLD =>
+                {
+                    let bytes_as_json_array =
+                        serde_json::to_string(&bytes).map_err(|err| err.to_string())?;
+                    let js = format!(
+                        "window.__TAURI_INTERNALS__.runCallback({}, {{ message: new Uint8Array({bytes_as_json_array}).buffer, index: {current_index} }});",
+                        self.inner.id
+                    );
+                    dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+                }
+                body => {
+                    let data_id = store_channel_data(body);
+                    let js = format!(
+                        "window.__TAURI_INTERNALS__.invoke('{FETCH_CHANNEL_DATA_COMMAND}', null, {{ headers: {{ '{CHANNEL_ID_HEADER_NAME}': '{data_id}' }} }}).then((response) => window.__TAURI_INTERNALS__.runCallback({}, {{ message: response, index: {current_index} }})).catch(console.error);",
+                        self.inner.id
+                    );
+                    dispatch_eval_on_main_thread(self.inner.webview_label.clone(), js)
+                }
+            }
+        }
+    }
+
+    impl<'de, TSend> serde::Deserialize<'de> for Channel<TSend> {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value: String = serde::Deserialize::deserialize(deserializer)?;
+            let id = value
+                .strip_prefix(IPC_CHANNEL_PREFIX)
+                .and_then(|id| id.parse::<u32>().ok())
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        "invalid channel value `{value}`, expected a string in the `{IPC_CHANNEL_PREFIX}ID` format"
+                    ))
+                })?;
+
+            Ok(Self {
+                inner: Arc::new(ChannelInner {
+                    id,
+                    webview_label: current_webview_label(),
+                    next_message_index: AtomicUsize::new(0),
+                }),
+                phantom: Default::default(),
+            })
+        }
+    }
 
     fn response_builder(
         status_code: http::StatusCode,
@@ -250,11 +1091,31 @@ pub mod ipc {
         }
     }
 
+    pub fn bad_request_json<T: serde::Serialize>(value: &T) -> http::Response<Vec<u8>> {
+        match serde_json::to_vec(value) {
+            Ok(body) => response_builder(http::StatusCode::BAD_REQUEST, "error")
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(body)
+                .unwrap(),
+            Err(err) => internal_error(err),
+        }
+    }
+
     pub fn bad_request<S: ToString>(message: S) -> http::Response<Vec<u8>> {
         response_builder(http::StatusCode::BAD_REQUEST, "error")
             .header(CONTENT_TYPE, HeaderValue::from_static("text/plain"))
             .body(message.to_string().into_bytes())
             .unwrap()
+    }
+
+    pub fn internal_error_json<T: serde::Serialize>(value: &T) -> http::Response<Vec<u8>> {
+        match serde_json::to_vec(value) {
+            Ok(body) => response_builder(http::StatusCode::INTERNAL_SERVER_ERROR, "error")
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(body)
+                .unwrap(),
+            Err(err) => internal_error(err),
+        }
     }
 
     pub fn internal_error<S: ToString>(message: S) -> http::Response<Vec<u8>> {
@@ -312,7 +1173,7 @@ fn serve_static<S: ToString>(
         }
         Err(StaticAssetError::IsDirectory(requested)) => {
             println!("requested path is a directory: {}", requested.display());
-            Ok(response_forbidden(requested.display()))
+            Ok(response_not_found(requested.display()))
         }
         Err(StaticAssetError::Io(err)) => {
             println!("failed to read static asset: {err}");
@@ -354,32 +1215,61 @@ fn resolve_static_asset(
     root: &Path,
     uri_path: &str,
 ) -> std::result::Result<StaticAsset, StaticAssetError> {
-    let relative = sanitize_path(uri_path)?;
-    let candidate = root.join(&relative);
+    fn resolve_candidate(
+        root: &Path,
+        relative: &Path,
+    ) -> std::result::Result<StaticAsset, StaticAssetError> {
+        let candidate = root.join(relative);
 
-    let resolved = match fs::canonicalize(&candidate) {
-        Ok(path) => path,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(StaticAssetError::NotFound(relative));
+        let resolved = match fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(StaticAssetError::NotFound(relative.to_path_buf()));
+            }
+            Err(err) => return Err(StaticAssetError::Io(err)),
+        };
+
+        if !resolved.starts_with(root) {
+            return Err(StaticAssetError::OutsideRoot(relative.to_path_buf()));
         }
-        Err(err) => return Err(StaticAssetError::Io(err)),
-    };
 
-    if !resolved.starts_with(root) {
-        return Err(StaticAssetError::OutsideRoot(relative));
+        if resolved.is_dir() {
+            return Err(StaticAssetError::IsDirectory(relative.to_path_buf()));
+        }
+
+        let bytes = fs::read(&resolved).map_err(StaticAssetError::Io)?;
+        let mime = mime_guess::from_path(&resolved)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
+
+        Ok(StaticAsset { bytes, mime })
     }
 
-    if resolved.is_dir() {
-        return Err(StaticAssetError::IsDirectory(relative));
+    let relative = sanitize_path(uri_path)?;
+
+    let mut candidates = Vec::with_capacity(4);
+    candidates.push(relative.clone());
+
+    let mut html_fallback = relative.clone().into_os_string();
+    html_fallback.push(".html");
+    candidates.push(PathBuf::from(html_fallback));
+
+    let mut index_fallback = relative.clone();
+    index_fallback.push("index.html");
+    candidates.push(index_fallback);
+
+    candidates.push(PathBuf::from("index.html"));
+
+    for candidate in candidates {
+        match resolve_candidate(root, &candidate) {
+            Ok(asset) => return Ok(asset),
+            Err(StaticAssetError::NotFound(_)) | Err(StaticAssetError::IsDirectory(_)) => {}
+            Err(other) => return Err(other),
+        }
     }
 
-    let bytes = fs::read(&resolved).map_err(StaticAssetError::Io)?;
-    let mime = mime_guess::from_path(&resolved)
-        .first_or_octet_stream()
-        .essence_str()
-        .to_string();
-
-    Ok(StaticAsset { bytes, mime })
+    Err(StaticAssetError::NotFound(relative))
 }
 
 fn sanitize_path(path: &str) -> std::result::Result<PathBuf, StaticAssetError> {
@@ -431,6 +1321,9 @@ fn prepare_scripts(
     current_window_label: String,
     current_webview_label: String,
 ) -> std::result::Result<Vec<InitializationScript>, Box<dyn std::error::Error>> {
+    let current_window_label = serde_json::to_string(&current_window_label)?;
+    let current_webview_label = serde_json::to_string(&current_webview_label)?;
+
     let ipc_init = IpcJavascript {
         isolation_origin: "",
     }
@@ -487,8 +1380,8 @@ fn prepare_scripts(
         InvokeInitializationScript {
             process_ipc_message_fn: include_str!("scripts/tauri/process-ipc-message-fn.js"),
             os_name: std::env::consts::OS,
-            fetch_channel_data_command: "plugin:__TAURI_CHANNEL__|fetch",
-            invoke_key: "gpui",
+            fetch_channel_data_command: ipc::FETCH_CHANNEL_DATA_COMMAND,
+            invoke_key: INVOKE_KEY,
         }
         .render_default(&core::default::Default::default())?
         .into_string(),
@@ -567,7 +1460,7 @@ fn initialization_script(
     let core_script = &CoreJavascript {
         os_name: std::env::consts::OS,
         protocol_scheme: "http",
-        invoke_key: "gpui",
+        invoke_key: INVOKE_KEY,
     }
     .render_default(&core::default::Default::default())?
     .to_string();

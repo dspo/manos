@@ -23,10 +23,10 @@
 ## 当前实现快照（我们现在有什么）
 
 Rust 侧（核心入口）
-- `#[gpui_manos_webview::command]`：同步命令宏（`crates/webview-macros/src/lib.rs`）。
+- `#[gpui_manos_webview::command]`：同步/异步命令宏（async 通过 `pollster::block_on` 执行，`crates/webview-macros/src/lib.rs`）。
 - `gpui_manos_webview::generate_handler![...]`：多命令路由（`crates/webview-macros/src/lib.rs`）。
 - `Builder::invoke_handler(...)`：注册 invoke handler（`crates/webview/src/lib.rs`）。
-- `ipc` 模块：构造带 `Tauri-Response` 的 HTTP 响应（`crates/webview/src/lib.rs`）。
+- `ipc` 模块：`Request`/`Response`/`Channel` 与带 `Tauri-Response` 的 HTTP 响应构造（`crates/webview/src/lib.rs`）。
 
 JS 侧（注入脚本）
 - `window.__TAURI_INTERNALS__.invoke`：核心 invoke（`crates/webview/src/scripts/tauri/core.js`）。
@@ -34,10 +34,10 @@ JS 侧（注入脚本）
 - custom-protocol fetch：通过 `ipc://` 发起请求（`crates/webview/src/scripts/tauri/ipc-protocol.js`）。
 
 当前关键限制
-- 只支持同步命令：`async fn` 会被宏拒绝（`crates/webview-macros/src/lib.rs`）。
-- 只支持 JSON 参数 / JSON 返回（`ipc::ok_json`），没有“二进制响应”优化通道。
-- 没有 Channel（流式数据传输）实现（`crates/webview/src/lib.rs` 有 TODO）。
-- 命令函数无法注入 `WebviewWindow` / `AppHandle` / `State<T>` / 原始 `Request` 等上下文（Tauri 文档支持）。
+- async runtime 仅为 `pollster::block_on`（不是完整 Tokio runtime）；且 postMessage fallback 仍在 IPC handler 线程内执行命令。
+- `ipc::Response::binary(...)` 可返回 `ArrayBuffer`（custom-protocol 与 postMessage fallback 均可；fallback 会通过 `eval` 构造 `Uint8Array`，大 payload 可能较慢）。
+- `ipc::Channel<T>` 已实现基础 parity（JSON + binary + 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path + drop 时发送 end），并为 channel data queue 增加 TTL/容量限制以避免内存增长。
+- 命令函数仍无法注入 `WebviewWindow` / `AppHandle` / `State<T>` 等完整上下文（Tauri 文档支持）。
 - 事件系统（Rust 侧 listen/emit）基本未实现，仅有 JS 分发函数骨架（`crates/webview/src/lib.rs`）。
 
 ## 能力差距对照（按文档结构）
@@ -49,14 +49,14 @@ JS 侧（注入脚本）
 | 基础示例 | `#[command]` + `invoke()` | ✅ | 基本可用 | M0/M1 |
 | 传递参数 | `Deserialize` + camelCase 映射 | ⚠️ | 支持 camelCase/`rename_all`；不支持借用参数（如 `&str`）等高级签名 | M1 |
 | 返回数据 | `Serialize` -> Promise resolve | ✅ | 返回 JSON ok | M1 |
-| 返回 ArrayBuffer | `tauri::ipc::Response` | ❌ | 大数据会被 JSON 化/低效，且前端无法拿到真正的 `ArrayBuffer` | M3 |
-| 错误处理 | `Result<T, E: Serialize>`（结构化） | ⚠️ | 仅 `E: ToString` 且返回 `text/plain`；前端很难做结构化错误处理 | M1/M3 |
-| 异步命令 | `async fn` / `#[command(async)]` | ❌ | 无法执行耗时任务而不阻塞；UI 易卡顿 | M2（困难） |
-| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ❌ | 无法做可靠流式/进度回传 | M4（困难） |
+| 返回 ArrayBuffer | `tauri::ipc::Response` | ✅ | `ipc::Response::binary` 在 custom-protocol 与 postMessage fallback 都可得到 `ArrayBuffer` | M3 |
+| 错误处理 | `Result<T, E: Serialize>`（结构化） | ⚠️ | 默认 `E: ToString` 会 reject 为 JSON string；支持 `#[command(error = "json")]` 返回结构化 JSON | M1/M3 |
+| 异步命令 | `async fn` / `#[command(async)]` | ⚠️ | 已支持 `async fn`（`pollster::block_on`）；仍缺少完整 runtime 与更一致的线程模型 | M2（困难） |
+| 通道（Channel） | `tauri::ipc::Channel<T>` 流式传输 | ⚠️ | 已支持 `ipc::Channel<T>`：JSON/binary（通过 `Channel<ipc::Response>`）+ 大 payload `plugin:__TAURI_CHANNEL__|fetch` fast-path；queue 有 TTL/容量限制；仍缺少更完整的生命周期与错误处理 | M4（困难） |
 | 访问 WebviewWindow | 参数注入 `WebviewWindow` | ❌ | 命令里拿不到发起方上下文（label/webview id 等） | M5（困难） |
 | 访问 AppHandle | 参数注入 `AppHandle` | ❌ | 无法在命令内访问全局应用服务（事件/状态/窗口管理等） | M5（困难） |
 | 访问托管状态 | `Builder::manage` + `State<T>` | ❌ | 无统一状态容器 & 注入机制 | M5（困难） |
-| 访问原始请求 | `tauri::ipc::Request`（headers + body） | ⚠️ | 自定义 `invoke_handler` 可拿到 `http::Request<Vec<u8>>`；但命令函数签名拿不到 | M3/M5 |
+| 访问原始请求 | `tauri::ipc::Request`（headers + body） | ✅ | 支持命令参数注入 `gpui_manos_webview::ipc::Request`（method/uri/headers/body） | M3 |
 | 创建多个命令 | `generate_handler![a,b]` | ✅ | 已支持 | M0 |
 
 ### 事件系统（Events）
@@ -78,16 +78,18 @@ JS 侧（注入脚本）
 - 明确并统一协议/URL 方案（至少对齐 `ipc://` 与静态资源 scheme 的可用性）。
 
 建议任务
-- [ ] IPC custom protocol：支持 `OPTIONS` 预检，并限制只允许 `POST/OPTIONS`（对齐 Tauri 行为）。
-- [ ] `Tauri-Response`/`Access-Control-Expose-Headers` 等 header 行为对齐（目前部分已实现，但需要补全一致性）。
-- [ ] postMessage fallback：当 custom protocol fetch 失败时，提供可用的 `window.ipc.postMessage` 路径（当前缺失）。
-- [ ] 协议对齐：当前 `convertFileSrc()` 默认 `asset://`，但静态资源注册的是 `wry://`；需要统一（至少避免前端调用走到不存在的 scheme）。
+- [x] IPC custom protocol：支持 `OPTIONS` 预检，并限制只允许 `POST/OPTIONS`（对齐 Tauri 行为）。
+- [x] `Tauri-Response`/`Access-Control-Expose-Headers` 等 header 行为对齐（目前部分已实现，但需要补全一致性）。
+- [x] IPC 请求校验：custom-protocol 路径校验 `Tauri-Invoke-Key`/`Origin`/`Tauri-Callback`/`Tauri-Error`，并对 `application/json` body 做基本校验（参考 Tauri `ipc/protocol.rs`）。
+- [x] postMessage fallback：当 custom protocol fetch 失败时，提供可用的 `window.ipc.postMessage` 路径（当前缺失）。
+- [x] 协议对齐：当前 `convertFileSrc()` 默认 `asset://`，但静态资源注册的是 `wry://`；需要统一（至少避免前端调用走到不存在的 scheme）。
+- [x] 静态资源 fallback chain：对齐 Tauri `get_asset` 的 `path.html` / `path/index.html` / `index.html` 回退逻辑（用于 SPA route 等场景）。
 
 验收点（建议）
 - `window.__TAURI_INTERNALS__.invoke("cmd")` 在 custom-protocol 可用与不可用两种情况下都能返回。
 
 风险/说明
-- postMessage fallback 在 wry 中是否可用，取决于是否启用 `with_ipc_handler` 等机制；需要先验证 wry 的能力边界。
+- postMessage fallback 依赖 wry 的 `with_ipc_handler`；当前已启用并实现最小可用链路（解析消息 -> 调用 handler -> `eval` 回调）。
 
 ### M1：同步命令能力补齐与“可维护性”提升（3–7 天）
 
@@ -95,9 +97,9 @@ JS 侧（注入脚本）
 - 同步命令在参数/返回/错误上更接近 Tauri 文档的“开发感受”。
 
 建议任务
-- [ ] 命令名唯一性与冲突提示（文档强调唯一性；我们可在 `generate_handler!` 生成期做静态检查，或在运行期做更明确的日志/错误）。
-- [ ] 参数解析增强：对非 JSON payload 给出明确错误；对字段缺失/类型不匹配提供更一致的错误格式。
-- [ ] 错误返回结构化（可选）：引入一个统一的错误 envelope（例如 `{ kind, message }`），并让 `Result<T, E>` 的 `E: Serialize` 时返回 `application/json`。
+- [x] 命令名唯一性与冲突提示：`generate_handler!` 在编译期检测重复命令名并报错。
+- [x] 参数解析增强：检查 `Content-Type`（非 JSON / 二进制 payload 给出明确错误），并在反序列化失败时带上命令名。
+- [x] 错误返回结构化（可选）：`#[command(error = "json")]` 时，`Result<T, E>` 的 `E: Serialize` 将以 `application/json` 返回；默认仍返回 JSON string（来自 `ToString`）。
 
 验收点（建议）
 - JS 侧 `.catch(e => ...)` 能拿到稳定结构的错误对象（或至少稳定字符串）。
@@ -109,6 +111,12 @@ JS 侧（注入脚本）
 
 目标
 - 支持 `async fn` 命令，或支持 `#[command(async)]` 将同步命令 offload 到后台执行，避免 UI 卡顿。
+
+当前状态（已落地第一版）
+- ✅ `#[command]` 支持 `async fn`（通过 `gpui_manos_webview::async_runtime::block_on` 执行）。
+- ✅ `ipc://` custom-protocol 路径的命令执行会 offload 到后台线程，并在完成后再 `respond(...)`，避免阻塞处理线程。
+- ⚠️ `block_on` 不是完整的 async runtime（当前基于 `pollster`）；如果命令依赖 Tokio（如 `tokio::time`/IO），仍需要后续引入 runtime（见下方方案 A）。
+- ⚠️ postMessage fallback 仍在 IPC handler 线程内执行命令（仅在 custom protocol 被阻断时才会走到）。
 
 建议实现路径（择一或组合）
 - 方案 A（可控但侵入）：新增可选 feature 引入 `tokio`（或其它 executor），在 IPC handler 里 `spawn` 并延后 `responder.respond(...)`。
@@ -127,16 +135,16 @@ JS 侧（注入脚本）
 - 对齐文档中“返回 ArrayBuffer”的能力，并为上传/headers 校验等场景提供原始 request 访问。
 
 建议任务
-- [ ] 定义 `gpui_manos_webview::ipc::Response`（或复用现有类型）来表达“原始字节响应 + content-type”。
-- [ ] 允许命令返回该 Response，从而在 JS 侧走 `arrayBuffer()` 分支。
-- [ ] 引入 `gpui_manos_webview::ipc::Request`（headers + body + maybe origin/webview_id），并允许命令参数注入该对象（仅该类型，不做完整 AppHandle/WebviewWindow）。
+- [x] 定义 `gpui_manos_webview::ipc::Response` 来表达“原始字节响应 + content-type”。
+- [x] 允许命令返回该 Response（以及 `Result<Response, E>`），在 `ipc://` custom-protocol 路径下前端可走 `arrayBuffer()` 分支。
+- [x] 引入 `gpui_manos_webview::ipc::Request`（method/uri/headers/body），并支持作为命令参数注入（用于读取 headers 与 raw body bytes）。
 
 验收点（建议）
 - `read_file() -> Response` 前端能拿到 `ArrayBuffer`，且不会被 JSON 序列化成巨大数组。
 - `upload(request: Request)` 能读取 `Authorization` header 与 raw body bytes。
 
 难点/风险
-- 需要在 JS 注入脚本与 Rust 响应 content-type 上达成一致约定（例如 `application/octet-stream`）。
+- postMessage fallback 虽可回传 `ArrayBuffer`，但需要通过 `eval` 注入 `Uint8Array([...]).buffer`，大 payload 可能受性能/字符串大小限制影响。
 
 ### M4：Channel（流式传输）（高价值，但复杂）（1–2 周）
 
@@ -144,9 +152,10 @@ JS 侧（注入脚本）
 - 对齐文档的 `tauri::ipc::Channel<T>`：Rust 可多次发送消息，前端持续接收（用于下载/大文件/进度）。
 
 建议任务
-- [ ] 设计 Channel 协议：创建 channel id、注册回调、发送分片、关闭信号。
-- [ ] Rust 侧实现 channel 存储与发送（线程安全、生命周期管理、webview 关闭清理）。
-- [ ] JS 侧注入与 `@tauri-apps/api` 兼容策略（至少兼容核心行为）。
+- [x] 最小实现：支持命令参数注入 `ipc::Channel<T>`，可多次 `send(T)`，并在 drop 时发送 `{ end: true }`。
+- [x] 多 webview 兼容：通过 `Invoke.webview_label` + `ipc::IpcContextGuard` 贯通上下文，确保 Channel 发送到正确 webview。
+- [x] 大 payload / 二进制优化：内置 `plugin:__TAURI_CHANNEL__|fetch`（Tauri 的 fast-path），Channel 在超过阈值时改为先缓存数据再让前端 invoke 拉取，避免通过 `eval` 直接塞入超大 JSON/bytes。
+- [x] channel data queue 清理：为 `plugin:__TAURI_CHANNEL__|fetch` 的内存队列增加 TTL/容量上限，避免长时间运行下无界增长。
 
 难点/风险（为什么“困难”）
 - 这不仅是“返回一个响应”，而是要维护跨多次消息的状态与回调映射。
@@ -217,4 +226,3 @@ JS 侧（注入脚本）
 - 是否引入 `tokio`（或其它 executor）来支持异步命令与 Channel？（影响依赖、二进制大小、线程模型）
 - 最终静态资源 scheme 选型：统一成 `asset://` / `wry://` / `tauri://` 之一？（影响前端工具链与 `convertFileSrc` 行为）
 - 对错误返回是否引入结构化 envelope？是否默认开启还是 opt-in？
-
