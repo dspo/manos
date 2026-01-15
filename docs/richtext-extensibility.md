@@ -1,14 +1,33 @@
-# RichText Editor 扩展性总结
+# RichText Editor：扩展性（最终架构版）
 
-## 现状：哪些扩展“已经可做”
+当前 RichText 已完成“一次性替换”：编辑内核与扩展机制以 `gpui-plate-core` 为中心（树模型 + ops/transaction + normalize + 插件/命令/查询），`gpui-manos-plate` 仅负责 gpui 视图层与输入/IME/hit-test 的适配。
 
-- **更多文字/背景颜色**：`InlineStyle` 直接存 `fg/bg: Option<Hsla>`；`RichTextState::set_text_color` / `set_highlight_color` 只是示例按钮少。接 `gpui-component` 的 `color_picker` 或自定义调色板即可，无需改文档模型。
-- **新增块类型（TodoList 等）**：块级用 `BlockKind + BlockFormat` 存在节点树里；可加 `BlockKind::Todo { checked: bool }`，渲染时像列表前缀一样绘制 checkbox，交互上在点击命中区域切换状态即可。
-- **对齐（左/中/右）**：可在 `BlockFormat` 增加 `align: TextAlign`，渲染 block wrapper 时设置 `.text_left()/.text_center()/.text_right()`（或对应 `TextStyle`）；命中测试/光标位置跟随 `TextLayout` 一起正确更新。
-- **行距/段距**：行距可通过每块 `.line_height(...)`（`TextStyle` 原生支持），段距可通过 block 容器 `mt/mb` 或 `gap` 实现。
+相关文档：
+- [RichText：插件系统与未来架构计划（激进重构版）](richtext-plugin-system-plan.md)
+- [RichText：已知问题（Tracked Issues）](richtext-known-issues.md)
 
-## 当前模型的边界（需要重构的方向）
+## 代码分层（扩展点在哪里）
 
-- **文档结构（已升级为节点树）**：现在内部是 `RichTextDocument { blocks: Vec<BlockNode> }`，每个 `BlockNode` 有 `format`（块属性）与 `inlines`（`InlineNode::Text(TextNode { text, style })`）。编辑时仍然用“`\n` 连接 blocks”的扁平文本做 hit-test/IME，节点树是富文本的真实来源。
-- **更深层的 Slate/Plate 能力**：目前节点树是“block -> text leaf”的两层结构，足以支撑大多数 inline marks + 简单 block。要做到 Plate 那种嵌套列表、表格、图片/多媒体（void nodes）、块拖拽、schema/normalize 管线等，需要把 `InlineNode` 扩展为真正的 `Node { Element | Text | Void }` 并引入 Path/Operation/Normalize 体系。
-- **序列化/持久化**：节点树已经能表达样式，但还需要定义稳定的存储格式（建议做 versioned JSON），并提供与 Slate JSON 的互转层（因为当前结构天然接近 Slate 的 “element children + text leaf marks” 形态）。
+- **Core（可复用、可测试）**：`crates/plate-core`（crate：`gpui-plate-core`）
+  - 文档模型：`Document/Node/Marks/Attrs`
+  - 编辑语义：`Op/Transaction`、`Editor::apply`、undo/redo
+  - 插件系统：`PluginRegistry`（node spec / normalize passes / commands / queries）
+- **View（gpui 交互、IME、渲染）**：`crates/rich_text`（crate：`gpui-manos-plate`）
+  - `RichTextState`：把 gpui 输入映射为 `Editor` 的 command/transaction，并渲染为 gpui elements
+- **验收入口（示例 UI）**：`crates/story`
+  - `cargo run -p gpui-manos-components-story --example richtext`
+
+## 如何新增能力（推荐做法）
+
+1) 在 `gpui-plate-core` 里新增/扩展插件（推荐：新增独立 plugin struct）
+   - `node_specs()`：声明新节点 kind、role、children 约束、是否 void
+   - `normalize_passes()`：声明结构修复逻辑（输出 ops）
+   - `commands()`：声明可组合命令（稳定字符串 ID），供工具栏/快捷键/菜单触发
+   - `queries()`：声明状态查询（例如 marks/list/table active），供 UI 做 enable/selected
+
+2) 在 `gpui-manos-plate` 的视图层只做“通用适配”
+   - 优先通过 `Editor::run_command(...)` 触发行为（避免在 view 层堆特例）
+   - 只有当涉及 gpui 输入/布局/hit-test/IME 时才在 view 增加逻辑（并保持与 `block_path` 对齐）
+
+3) 在 story 示例里补 UI 入口与验收用例
+   - toolbar/menu/dialog 仅依赖 command/query，不直接依赖插件内部实现

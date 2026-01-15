@@ -1,5 +1,5 @@
 [package]
-name = "gpui-manos-plate"
+name = "gpui-plate-core"
 version = "0.1.0"
 publish = false
 edition.workspace = true
@@ -8,9 +8,5 @@ edition.workspace = true
 doctest = false
 
 [dependencies]
-base64.workspace = true
-gpui.workspace = true
-gpui-component.workspace = true
-gpui-plate-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
