@@ -7,6 +7,52 @@ This repository is intended to host additional GPUI components about a Richtext 
 
 ![img.png](docs/richtext.example.png)
 
+# Mini Tauri on GPUI
+
+A mini-tauri work on webview on GPUI + Wry.
+
+Based on this, we can embed any web interface anywhere inside a GPUI app.
+The GPUI UI and the UI from a Web App can work together seamlessly.
+
+Currently, calling between the frontend (TS/JS) and Rust is supported in both directions.
+Calling Rust from the frontend is identical to how Tauri’s `import { invoke } from "@tauri-apps/api/core"` function is used.
+On the Rust side, we provide Tauri-like macros `#[command]` and `generate_handler![]` .
+However, Tauri’s plugin system is not supported at the moment, because it depends on Tauri’s RuntimeHandler.
+It may be difficult to support to that extent in the future as well.
+
+Some usages:
+
+```rust
+#[command]
+fn greet(name: String) -> Result<String, String> {
+    Ok(format!("Hello, {}! (from GPUI)", name))
+}
+```
+
+```rust
+let builder = Builder::new()
+    .invoke_handler(
+        generate_handler![greet]
+    );
+```
+
+```ts
+import { invoke } from "@tauri-apps/api/core";
+
+function App() {
+  const [greetMsg, setGreetMsg] = useState("");
+  const [name, setName] = useState("");
+
+  async function greet() {
+    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+    setGreetMsg(await invoke("greet", { name }));
+  }
+
+  ...
+````
+
+![gpui-wry](docs/gpui-wry.png)
+
 ## Run
 - Story app: `cargo run`
 - DnD list example: `cargo run --example dnd_list`
