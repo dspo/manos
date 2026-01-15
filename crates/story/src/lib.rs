@@ -6,5 +6,6 @@ pub mod dnd_vtree;
 pub mod gallery;
 pub mod plate_toolbar_buttons;
 pub mod richtext;
+pub mod simple_browser;
 pub mod themes;
 pub mod webview_story;

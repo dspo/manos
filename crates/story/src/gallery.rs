@@ -10,6 +10,7 @@ use crate::dnd_vlist::DndVListExample;
 use crate::dnd_vtree::DndVTreeExample;
 use crate::plate_toolbar_buttons::PlateToolbarButtonsStory;
 use crate::richtext::RichTextExample;
+use crate::simple_browser::SimpleBrowserStory;
 use crate::webview_story::WebViewStory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,7 +22,8 @@ enum StoryId {
     DndVTree,
     RichText,
     PlateToolbarButtons,
-    WebView,
+    WelcomeTauri,
+    SimpleBrowser,
 }
 
 impl StoryId {
@@ -34,7 +36,8 @@ impl StoryId {
             StoryId::DndVTree => "DnD VTree",
             StoryId::RichText => "Rich Text Editor",
             StoryId::PlateToolbarButtons => "Plate Toolbar Buttons",
-            StoryId::WebView => "WebView",
+            StoryId::WelcomeTauri => "Welcome Tauri",
+            StoryId::SimpleBrowser => "Simple Browser",
         }
     }
 }
@@ -48,7 +51,8 @@ pub struct StoryGallery {
     dnd_vtree: Option<Entity<DndVTreeExample>>,
     richtext: Option<Entity<RichTextExample>>,
     plate_toolbar_buttons: Option<Entity<PlateToolbarButtonsStory>>,
-    webview: Option<Entity<WebViewStory>>,
+    welcome_tauri: Option<Entity<WebViewStory>>,
+    simple_browser: Option<Entity<SimpleBrowserStory>>,
 }
 
 impl StoryGallery {
@@ -66,7 +70,8 @@ impl StoryGallery {
             dnd_vtree: None,
             richtext: None,
             plate_toolbar_buttons: None,
-            webview: None,
+            welcome_tauri: None,
+            simple_browser: None,
         })
     }
 
@@ -75,19 +80,35 @@ impl StoryGallery {
             return;
         }
 
-        if self.selected == StoryId::WebView {
-            if let Some(webview) = &self.webview {
-                webview.update(cx, |story, cx| story.set_visible(false, cx));
+        match self.selected {
+            StoryId::WelcomeTauri => {
+                if let Some(story) = &self.welcome_tauri {
+                    story.update(cx, |story, cx| story.set_visible(false, cx));
+                }
             }
-        }
+            StoryId::SimpleBrowser => {
+                if let Some(story) = &self.simple_browser {
+                    story.update(cx, |story, cx| story.set_visible(false, cx));
+                }
+            }
+            _ => {}
+        };
 
         self.selected = next;
 
-        if self.selected == StoryId::WebView {
-            if let Some(webview) = &self.webview {
-                webview.update(cx, |story, cx| story.set_visible(true, cx));
+        match self.selected {
+            StoryId::WelcomeTauri => {
+                if let Some(story) = &self.welcome_tauri {
+                    story.update(cx, |story, cx| story.set_visible(true, cx));
+                }
             }
-        }
+            StoryId::SimpleBrowser => {
+                if let Some(story) = &self.simple_browser {
+                    story.update(cx, |story, cx| story.set_visible(true, cx));
+                }
+            }
+            _ => {}
+        };
 
         cx.notify();
     }
@@ -170,16 +191,29 @@ impl StoryGallery {
         view
     }
 
-    fn ensure_webview(
+    fn ensure_welcome_tauri(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<WebViewStory> {
-        if let Some(view) = &self.webview {
+        if let Some(view) = &self.welcome_tauri {
             return view.clone();
         }
         let view = WebViewStory::view(window, cx);
-        self.webview = Some(view.clone());
+        self.welcome_tauri = Some(view.clone());
+        view
+    }
+
+    fn ensure_simple_browser(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SimpleBrowserStory> {
+        if let Some(view) = &self.simple_browser {
+            return view.clone();
+        }
+        let view = SimpleBrowserStory::view(window, cx);
+        self.simple_browser = Some(view.clone());
         view
     }
 
@@ -200,19 +234,19 @@ impl StoryGallery {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("统一的 Story Gallery：左侧选择示例/组件，右侧查看与交互。"),
+                    .child("A unified Story Gallery: pick a story on the left, preview and interact on the right."),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("WebView Story 需要先构建前端资源：`cd crates/story/examples/webview-app && pnpm install && pnpm build`。"),
+                    .child("Welcome Tauri requires web assets: `cd crates/story/examples/webview-app && pnpm install && pnpm build`."),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("Rich Text Editor 支持 Open/Save 等菜单动作；建议先在右侧选中该 Story 再使用菜单。"),
+                    .child("Rich Text Editor exposes menu actions (Open/Save/...). Select the story first before using the menu."),
             )
             .into_any_element()
     }
@@ -251,7 +285,8 @@ impl StoryGallery {
                 "Plate Toolbar",
                 IconName::Palette,
             ),
-            item(StoryId::WebView, "WebView", IconName::Globe),
+            item(StoryId::WelcomeTauri, "Welcome Tauri", IconName::Frame),
+            item(StoryId::SimpleBrowser, "Simple Browser", IconName::Globe),
         ]);
 
         let getting_started_menu =
@@ -284,18 +319,28 @@ impl Render for StoryGallery {
             StoryId::PlateToolbarButtons => self
                 .ensure_plate_toolbar_buttons(window, cx)
                 .into_any_element(),
-            StoryId::WebView => {
-                let view = self.ensure_webview(window, cx);
+            StoryId::WelcomeTauri => {
+                let view = self.ensure_welcome_tauri(window, cx);
+                view.update(cx, |story, cx| story.set_visible(true, cx));
+                view.into_any_element()
+            }
+            StoryId::SimpleBrowser => {
+                let view = self.ensure_simple_browser(window, cx);
                 view.update(cx, |story, cx| story.set_visible(true, cx));
                 view.into_any_element()
             }
         };
 
-        // Hide WebView immediately when it is not selected, otherwise it may remain visible
-        // at the last bounds (it is a native view).
-        if self.selected != StoryId::WebView {
-            if let Some(webview) = &self.webview {
-                webview.update(cx, |story, cx| story.set_visible(false, cx));
+        // Hide webviews immediately when they are not selected, otherwise they may remain visible
+        // at the last bounds (they are native views).
+        if self.selected != StoryId::WelcomeTauri {
+            if let Some(story) = &self.welcome_tauri {
+                story.update(cx, |story, cx| story.set_visible(false, cx));
+            }
+        }
+        if self.selected != StoryId::SimpleBrowser {
+            if let Some(story) = &self.simple_browser {
+                story.update(cx, |story, cx| story.set_visible(false, cx));
             }
         }
 
