@@ -3,6 +3,8 @@ pub mod dnd_list;
 pub mod dnd_tree;
 pub mod dnd_vlist;
 pub mod dnd_vtree;
+pub mod gallery;
 pub mod plate_toolbar_buttons;
 pub mod richtext;
 pub mod themes;
+pub mod webview_story;

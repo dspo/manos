@@ -54,12 +54,8 @@ function App() {
 ![gpui-wry](docs/gpui-wry.png)
 
 ## Run
-- Story app: `cargo run`
-- DnD list example: `cargo run --example dnd_list`
-- DnD tree example: `cargo run --example dnd_tree`
-- Rich text example: `cargo run --example richtext`
-- WebView example: `cargo run --example webview` (loads `crates/story/examples/webview-app/dist` if present; otherwise shows a friendly hint page)
-- Plate toolbar buttons: `cargo run --example plate_toolbar_buttons`
+- Story gallery app: `cargo run` (left sidebar selects stories; right side renders the selected view)
+- WebView story: build assets first: `cd crates/story/examples/webview-app && pnpm install && pnpm build` (loads `crates/story/examples/webview-app/dist` if present; otherwise shows a friendly hint page)
 
 ## Docs
 

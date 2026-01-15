@@ -2,7 +2,7 @@ use gpui::*;
 use gpui_component::{Root, TitleBar};
 use gpui_manos_components::assets::ExtrasAssetSource;
 use gpui_manos_components_story::app_menus;
-use gpui_manos_components_story::richtext::RichTextExample;
+use gpui_manos_components_story::gallery::StoryGallery;
 use gpui_manos_components_story::themes;
 
 fn main() {
@@ -21,9 +21,9 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    window.set_window_title("Manos Components");
-                    let app_menu_bar = app_menus::init("Manos Components", window, cx);
-                    let view = RichTextExample::view(app_menu_bar, window, cx);
+                    window.set_window_title("Manos Stories");
+                    let app_menu_bar = app_menus::init("Manos Stories", window, cx);
+                    let view = StoryGallery::view(app_menu_bar, window, cx);
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )?;

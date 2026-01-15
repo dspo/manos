@@ -1,11 +1,11 @@
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
-    div, prelude::FluentBuilder as _, px, uniform_list, App, AppContext as _, Context, CursorStyle,
-    ElementId, Entity, EntityId, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
-    ListSizingBehavior, ParentElement as _, Pixels, Point, Render, RenderOnce, ScrollStrategy,
-    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled,
-    UniformListScrollHandle, Window,
+    App, AppContext as _, Context, CursorStyle, ElementId, Entity, EntityId, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, ListSizingBehavior, ParentElement as _, Pixels, Point,
+    Render, RenderOnce, ScrollStrategy, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px,
+    uniform_list,
 };
 use gpui_component::list::ListItem;
 use gpui_component::scroll::{Scrollbar, ScrollbarState};

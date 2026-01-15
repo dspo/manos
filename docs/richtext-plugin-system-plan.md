@@ -7,6 +7,8 @@
 - 工具层 UI 组件（Toolbar）参考：[Plate Toolbar Buttons（GPUI 组件实现教程）](plate-toolbar-buttons.md)
 - 暂不处理/已知问题清单：[RichText Known Issues / Deferred Work](richtext-known-issues.md)
 
+> 说明：本文中历史命令 `cargo run -p gpui-manos-components-story --example richtext` 已废弃；请使用 `cargo run` 启动 Story Gallery，并在左侧选择 `Rich Text`。
+
 ---
 
 ## 1. 现状复盘（最终架构，已落地）
@@ -297,12 +299,12 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 1) **每一步都产出一个“端到端可运行”的编辑器体验**（哪怕功能集不大，但闭环完整：输入/选择/撤销/渲染/保存加载/插件组合）。
 2) **每一步都处于最终架构之内**（同构验证），不会引入未来要推翻的临时框架。
 
-> 新内核已以独立 crate 落地：`crates/plate-core`（crate 名称：`gpui-plate-core`），并通过 `crates/story/examples/richtext.rs` 提供验收入口；并已完成 `gpui-manos-plate`（`crates/rich_text`）的一次性替换壳层。
+> 新内核已以独立 crate 落地：`crates/plate-core`（crate 名称：`gpui-plate-core`），并通过 Story Gallery 的 `Rich Text` 页面提供验收入口（实现位于 `crates/story/src/richtext.rs`）；并已完成 `gpui-manos-plate`（`crates/rich_text`）的一次性替换壳层。
 
 本项目采用的落地位置与命名约定：
 - 新内核 crate：`crates/plate-core`
 - crate 名称：`gpui-plate-core`
-- 建议示例入口：`cargo run --example richtext`（位于 `crates/story/examples/richtext.rs`）
+- 建议示例入口：`cargo run`，在 Story Gallery 左侧选择：`Rich Text`
 
 内置命令与查询（便于工具层/插件协作）：
 - Command IDs（示例）：`core.insert_divider`、`image.insert`、`marks.toggle_bold`、`marks.toggle_italic`、`marks.toggle_underline`、`marks.toggle_strikethrough`、`marks.toggle_code`、`marks.set_link`、`marks.unset_link`、`marks.set_text_color`、`marks.unset_text_color`、`marks.set_highlight_color`、`marks.unset_highlight_color`、`block.set_heading`、`block.unset_heading`、`code_block.toggle`、`block.set_align`、`blockquote.wrap_selection`、`blockquote.unwrap`、`toggle.wrap_selection`、`toggle.unwrap`、`toggle.toggle_collapsed`、`todo.toggle`、`todo.toggle_checked`、`block.indent_increase`、`block.indent_decrease`、`list.toggle_bulleted`、`list.toggle_ordered`、`list.unwrap`、`mention.insert`、`table.insert`、`table.insert_row_above`、`table.insert_row_below`、`table.insert_col_left`、`table.insert_col_right`、`table.delete_row`、`table.delete_col`、`table.delete_table`、`columns.insert`、`columns.unwrap`、`columns.set_widths`
@@ -384,8 +386,8 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 所有编辑都必须通过 `Transaction { ops }` 应用；禁止在 core 里提供“直接 mutate 树”的后门 API（避免绕过 normalize/undo）。
 
 **要验收什么**
-- 能运行一个新的示例：`crates/story/examples/richtext.rs`
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
+- 能运行一个新的示例：Story Gallery 的 `Rich Text` 页面（实现位于 `crates/story/src/richtext.rs`）
+- 运行方式：`cargo run`，在 Story Gallery 左侧选择：`Rich Text`
 - 手动验收清单（Iteration 1 通过标准）：
   - **可输入**：启动后无需点击即可直接输入（英文/符号），文本出现在首段（paragraph）。
   - **IME 中文**：拼音预编辑时显示下划线；选字提交后不残留拼音字母。
@@ -588,7 +590,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 将 `gpui-manos-plate`（`crates/rich_text`）从旧 monolith 一次性切换为 `gpui-plate-core` 驱动：
   - 对外保留 `RichTextState/RichTextEditor`（以及 `RichTextValue = PlateValue`），但内部不再使用旧 blocks 模型
   - 旧实现源码直接移除，避免双轨继续存在
-- 将验收入口统一到：`cargo run -p gpui-manos-components-story --example richtext`
+- 将验收入口统一到：`cargo run`
 
 **怎么实现（关键做法）**
 - 不为“兼容旧格式/旧模型”牺牲底层：旧 Slate JSON 如需支持，应以**独立适配器插件/独立 crate**实现（不进入内核默认路径）
@@ -596,7 +598,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 **要验收什么**
 - 编译：`cargo check -p gpui-manos-plate`
-- 示例：`cargo run -p gpui-manos-components-story --example richtext`
+- 示例：`cargo run`
   - app menu 的 Edit actions（Undo/Redo/Cut/Copy/Paste/SelectAll）在编辑器聚焦时可用
   - Open/Save/Save As 能读写 `gpui-plate` JSON（例如 `plate-core.example.json`）
 - 文档：`docs/richtext-extensibility.md`、`docs/richtext-plugin-system-plan.md`、`docs/richtext-known-issues.md` 链接与入口说明准确
