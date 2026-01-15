@@ -1,0 +1,11 @@
+[package]
+name = "git-viewer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+diffview = { path = "../diffview" }
+gpui.workspace = true
+gpui-component.workspace = true

@@ -1,8 +1,7 @@
 use gpui::*;
 use gpui_component::{Root, TitleBar};
 use gpui_manos_components::assets::ExtrasAssetSource;
-use gpui_manos_components_story::app_menus;
-use gpui_manos_components_story::richtext::RichTextExample;
+use gpui_manos_components_story::dnd_vlist::DndVListExample;
 use gpui_manos_components_story::themes;
 
 fn main() {
@@ -10,7 +9,6 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        gpui_manos_plate::init(cx);
         themes::init(cx);
         cx.activate(true);
 
@@ -21,9 +19,8 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    window.set_window_title("Manos Components");
-                    let app_menu_bar = app_menus::init("Manos Components", window, cx);
-                    let view = RichTextExample::view(app_menu_bar, window, cx);
+                    window.set_window_title("DnD VList");
+                    let view = DndVListExample::view(window, cx);
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )?;

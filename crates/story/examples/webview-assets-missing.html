@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Web assets missing</title>
+        <style>
+            :root {
+                color-scheme: light dark;
+                font-family:
+                    ui-sans-serif,
+                    system-ui,
+                    -apple-system,
+                    Segoe UI,
+                    Roboto,
+                    Arial,
+                    sans-serif;
+            }
+            body {
+                margin: 0;
+                padding: 24px;
+            }
+            .center {
+                display: flex;
+                justify-content: center;
+            }
+            .card {
+                max-width: 860px;
+                border: 1px solid rgba(127, 127, 127, 0.35);
+                border-radius: 12px;
+                padding: 16px;
+            }
+            .banner {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 10px;
+                padding: 12px 14px;
+                border-radius: 12px;
+                border: 1px solid rgba(255, 0, 0, 0.35);
+                background: rgba(255, 0, 0, 0.08);
+                color: rgb(220, 38, 38);
+                font-weight: 800;
+                letter-spacing: 0.2px;
+                margin-bottom: 14px;
+                text-align: center;
+            }
+            .banner .icon {
+                width: 22px;
+                height: 22px;
+                border-radius: 999px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border: 1px solid rgba(255, 0, 0, 0.35);
+                background: rgba(255, 0, 0, 0.12);
+                line-height: 1;
+            }
+            code,
+            pre {
+                font-family:
+                    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+                    monospace;
+            }
+            pre {
+                margin: 12px 0 0;
+                padding: 12px;
+                border-radius: 10px;
+                border: 1px solid rgba(127, 127, 127, 0.35);
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            .row {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+                flex-wrap: wrap;
+                margin-top: 12px;
+            }
+            input {
+                padding: 10px 12px;
+                border-radius: 10px;
+                border: 1px solid rgba(127, 127, 127, 0.35);
+                min-width: 240px;
+            }
+            button {
+                padding: 10px 12px;
+                border-radius: 10px;
+                border: 1px solid rgba(127, 127, 127, 0.35);
+                cursor: pointer;
+            }
+            .terminal {
+                margin-top: 12px;
+                border-radius: 12px;
+                border: 1px solid rgba(127, 127, 127, 0.35);
+                overflow: hidden;
+            }
+            .terminal .title {
+                padding: 10px 12px;
+                font-size: 12px;
+                opacity: 0.75;
+                border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+                background: rgba(127, 127, 127, 0.06);
+            }
+            .terminal .body {
+                padding: 12px;
+                background: rgba(0, 0, 0, 0.15);
+            }
+            .terminal .line {
+                display: flex;
+                gap: 10px;
+                align-items: baseline;
+                line-height: 1.6;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            .terminal .prompt {
+                opacity: 0.7;
+                user-select: none;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="center">
+            <div class="card">
+                <div class="banner">
+                    <span class="icon">!</span>
+                    <span>Web assets not found</span>
+                </div>
+
+                <div>Expected file:</div>
+                <pre><code>__EXPECTED_PATH__</code></pre>
+
+                <div class="terminal">
+                    <div class="title">
+                        Build webview-app [at crates/story/examples/webview-app]
+                    </div>
+                    <div class="body">
+                        <div class="line">
+                            <span class="prompt">$</span
+                            ><code>cd crates/story/examples/webview-app</code>
+                        </div>
+                        <div class="line">
+                            <span class="prompt">$</span
+                            ><code>pnpm install</code>
+                        </div>
+                        <div class="line">
+                            <span class="prompt">$</span><code>pnpm build</code>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="terminal">
+                    <div class="title">Run example [at repo root]</div>
+                    <div class="body">
+                        <div class="line">
+                            <span class="prompt">$</span
+                            ><code>cargo run --example webview</code>
+                        </div>
+                    </div>
+                </div>
+
+                <hr
+                    style="
+                        margin: 16px 0;
+                        border: none;
+                        border-top: 1px solid rgba(127, 127, 127, 0.25);
+                    "
+                />
+                <div>
+                    <strong>IPC sanity check</strong> (still works without
+                    static assets):
+                </div>
+                <div class="row">
+                    <input id="name" placeholder="Type a name…" value="Manos" />
+                    <button id="btn">Invoke greet</button>
+                </div>
+                <pre id="out">Ready.</pre>
+                <hr
+                    style="
+                        margin: 16px 0;
+                        border: none;
+                        border-top: 1px solid rgba(127, 127, 127, 0.25);
+                    "
+                />
+                <div><strong>Channel sanity check</strong>:</div>
+                <div class="row">
+                    <input
+                        id="count"
+                        placeholder="Count to…"
+                        value="8"
+                        inputmode="numeric"
+                    />
+                    <button id="count_btn">Invoke count_to (Channel)</button>
+                </div>
+                <pre id="count_out">Ready.</pre>
+                <hr
+                    style="
+                        margin: 16px 0;
+                        border: none;
+                        border-top: 1px solid rgba(127, 127, 127, 0.25);
+                    "
+                />
+                <div><strong>Channel fetch-path check</strong>:</div>
+                <div class="row">
+                    <button id="large_json_btn">
+                        Invoke channel_large_json (10KB)
+                    </button>
+                    <button id="large_bytes_btn">
+                        Invoke channel_large_bytes (20KB)
+                    </button>
+                </div>
+                <pre id="large_out">Ready.</pre>
+                <script>
+                    const $ = (id) => document.getElementById(id);
+                    async function invokeGreet() {
+                        const out = $("out");
+                        out.textContent = "Invoking…";
+                        const name = $("name").value;
+                        if (
+                            !window.__TAURI_INTERNALS__ ||
+                            !window.__TAURI_INTERNALS__.invoke
+                        ) {
+                            out.textContent =
+                                "Missing __TAURI_INTERNALS__.invoke(). Check initialization scripts.";
+                            return;
+                        }
+                        try {
+                            const result =
+                                await window.__TAURI_INTERNALS__.invoke(
+                                    "greet",
+                                    { name },
+                                );
+                            out.textContent = String(result);
+                        } catch (e) {
+                            out.textContent = "Error: " + e;
+                        }
+                    }
+                    $("btn").addEventListener("click", invokeGreet);
+
+                    async function invokeCountTo() {
+                        const out = $("count_out");
+                        out.textContent = "Invoking…";
+
+                        const n = Number.parseInt($("count").value, 10);
+                        if (!Number.isFinite(n) || n < 0) {
+                            out.textContent = "Invalid number.";
+                            return;
+                        }
+
+                        let channelId = 0;
+                        channelId =
+                            window.__TAURI_INTERNALS__.transformCallback(
+                                (event) => {
+                                    if (event && event.end) {
+                                        window.__TAURI_INTERNALS__.unregisterCallback(
+                                            channelId,
+                                        );
+                                        out.textContent += "\n(end)";
+                                        return;
+                                    }
+                                    out.textContent +=
+                                        "\n" + JSON.stringify(event, null, 2);
+                                },
+                                false,
+                            );
+
+                        try {
+                            await window.__TAURI_INTERNALS__.invoke(
+                                "count_to",
+                                {
+                                    n,
+                                    onEvent: `__CHANNEL__:${channelId}`,
+                                },
+                            );
+                        } catch (e) {
+                            out.textContent += "\nError: " + e;
+                        }
+                    }
+
+                    $("count_btn").addEventListener("click", invokeCountTo);
+
+                    async function invokeChannelOnce(cmd) {
+                        const out = $("large_out");
+                        out.textContent = `Invoking ${cmd}…`;
+
+                        let channelId = 0;
+                        let nextIndex = 0;
+                        const pending = [];
+                        let endIndex = null;
+                        channelId =
+                            window.__TAURI_INTERNALS__.transformCallback(
+                                (event) => {
+                                    if (event && "end" in event) {
+                                        endIndex = event.index ?? null;
+                                    } else if (
+                                        event &&
+                                        "index" in event &&
+                                        "message" in event
+                                    ) {
+                                        pending[event.index] = event.message;
+                                    }
+
+                                    while (nextIndex in pending) {
+                                        const message = pending[nextIndex];
+                                        delete pending[nextIndex];
+
+                                        if (message instanceof ArrayBuffer) {
+                                            out.textContent += `\n#${nextIndex}: ArrayBuffer(${message.byteLength})`;
+                                        } else if (Array.isArray(message)) {
+                                            out.textContent += `\n#${nextIndex}: number[](${message.length})`;
+                                        } else if (
+                                            typeof message === "string"
+                                        ) {
+                                            out.textContent += `\n#${nextIndex}: string(len=${message.length})`;
+                                        } else {
+                                            out.textContent +=
+                                                "\n" +
+                                                JSON.stringify(
+                                                    {
+                                                        index: nextIndex,
+                                                        message,
+                                                    },
+                                                    null,
+                                                    2,
+                                                );
+                                        }
+
+                                        nextIndex += 1;
+                                    }
+
+                                    if (
+                                        endIndex !== null &&
+                                        nextIndex === endIndex
+                                    ) {
+                                        window.__TAURI_INTERNALS__.unregisterCallback(
+                                            channelId,
+                                        );
+                                        out.textContent += "\n(end)";
+                                    }
+                                },
+                                false,
+                            );
+
+                        try {
+                            await window.__TAURI_INTERNALS__.invoke(cmd, {
+                                onEvent: `__CHANNEL__:${channelId}`,
+                            });
+                        } catch (e) {
+                            out.textContent += "\nError: " + e;
+                        }
+                    }
+
+                    $("large_json_btn").addEventListener("click", () => {
+                        invokeChannelOnce("channel_large_json");
+                    });
+                    $("large_bytes_btn").addEventListener("click", () => {
+                        invokeChannelOnce("channel_large_bytes");
+                    });
+                </script>
+            </div>
+        </div>
+    </body>
+</html>

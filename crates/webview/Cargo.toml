@@ -1,0 +1,20 @@
+[package]
+name = "gpui-manos-webview"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui.workspace = true
+gpui-manos-webview-macros.workspace = true
+wry.workspace = true
+raw-window-handle.workspace = true
+http.workspace = true
+serialize-to-javascript.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+mime_guess = "2.0"
+pollster = "0.4"
+async-task = "4.7.1"
+
+[lib]
+path = "src/lib.rs"
