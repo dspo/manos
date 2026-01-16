@@ -53,13 +53,13 @@ impl Render for DndVListExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("提示：该示例基于 `gpui-component::v_virtual_list`，每行高度不同；拖拽整行以重排。"),
+                            .child("Tip: built on `gpui-component::v_virtual_list` with variable row heights; drag a row to reorder."),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(format!("当前选中：{selected_id}")),
+                            .child(format!("Selected: {selected_id}")),
                     ),
             )
             .child(
@@ -105,7 +105,7 @@ impl Render for DndVListExample {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child("Debug (顺序/高度)"),
+                                    .child("Debug (order / height)"),
                             )
                             .child(
                                 div()

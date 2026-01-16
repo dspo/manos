@@ -47,13 +47,13 @@ impl Render for DndListExample {
                             .child("DnD List"),
                     )
                     .child(div().text_sm().text_color(theme.muted_foreground).child(
-                        "提示：拖拽整行以重排（也可配置为仅手柄可拖）；目标行会高亮并显示黑色插入线（上/下分别表示插入到该行之前/之后）；禁用项不可拖拽。",
+                        "Tip: drag the whole row to reorder (or configure it to drag only by handle). The target row will highlight and show a black insertion line (top/bottom indicates insert before/after). Disabled items cannot be dragged.",
                     ))
                     .child(
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(format!("当前选中：{selected_id}")),
+                            .child(format!("Selected: {selected_id}")),
                     ),
             )
             .child(
@@ -99,7 +99,7 @@ impl Render for DndListExample {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child("Debug (当前顺序)"),
+                                    .child("Debug (current order)"),
                             )
                             .child(
                                 div()
