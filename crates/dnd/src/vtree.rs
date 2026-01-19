@@ -1,14 +1,14 @@
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
-    div, prelude::FluentBuilder as _, px, size, App, AppContext as _, Context, CursorStyle,
-    ElementId, Entity, EntityId, FocusHandle, Hsla, InteractiveElement as _, IntoElement,
-    ListSizingBehavior, ParentElement as _, Pixels, Point, Render, RenderOnce, ScrollStrategy,
-    SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
+    App, AppContext as _, Context, CursorStyle, ElementId, Entity, EntityId, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, ListSizingBehavior, ParentElement as _, Pixels, Point,
+    Render, RenderOnce, ScrollStrategy, SharedString, Size, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::list::ListItem;
 use gpui_component::scroll::{Scrollbar, ScrollbarState};
-use gpui_component::{v_virtual_list, ActiveTheme as _, StyledExt as _, VirtualListScrollHandle};
+use gpui_component::{ActiveTheme as _, StyledExt as _, VirtualListScrollHandle, v_virtual_list};
 
 use crate::common::DragGhost;
 

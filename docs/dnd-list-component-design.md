@@ -291,7 +291,7 @@ There is a large battery of drag-related tests for pinned/unpinned moves and spl
 ### 9.1 Crates 与示例入口
 
 - **DnD Components**：`crates/dnd`（crate 名：`gpui-manos-dnd`）
-  - 示例：`cargo run --example dnd_list` / `cargo run --example dnd_tree` / `cargo run --example dnd_vlist` / `cargo run --example dnd_vtree`
+  - 预览：`cargo run`（Story Gallery 左侧选择：`DnD → List/Tree/VList/VTree`）
   - story 页面：`crates/story/src/dnd_list.rs` / `crates/story/src/dnd_tree.rs` / `crates/story/src/dnd_vlist.rs` / `crates/story/src/dnd_vtree.rs`
   - 说明文档：`docs/dnd-tree.md`
 

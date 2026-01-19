@@ -5,18 +5,18 @@ mod vlist;
 mod vtree;
 
 pub use list::{
-    dnd_list, DndList, DndListDropTarget, DndListItem, DndListReorder, DndListRowState,
-    DndListState,
+    DndList, DndListDropTarget, DndListItem, DndListReorder, DndListRowState, DndListState,
+    dnd_list,
 };
 pub use tree::{
-    dnd_tree, DndTree, DndTreeDropTarget, DndTreeEntry, DndTreeIndicatorCap, DndTreeIndicatorStyle,
-    DndTreeItem, DndTreeRowState, DndTreeState,
+    DndTree, DndTreeDropTarget, DndTreeEntry, DndTreeIndicatorCap, DndTreeIndicatorStyle,
+    DndTreeItem, DndTreeRowState, DndTreeState, dnd_tree,
 };
 pub use vlist::{
-    dnd_vlist, DndVList, DndVListDropTarget, DndVListItem, DndVListReorder, DndVListRowState,
-    DndVListState,
+    DndVList, DndVListDropTarget, DndVListItem, DndVListReorder, DndVListRowState, DndVListState,
+    dnd_vlist,
 };
 pub use vtree::{
-    dnd_vtree, DndVTree, DndVTreeDropTarget, DndVTreeEntry, DndVTreeIndicatorCap,
-    DndVTreeIndicatorStyle, DndVTreeItem, DndVTreeRowState, DndVTreeState,
+    DndVTree, DndVTreeDropTarget, DndVTreeEntry, DndVTreeIndicatorCap, DndVTreeIndicatorStyle,
+    DndVTreeItem, DndVTreeRowState, DndVTreeState, dnd_vtree,
 };

@@ -53,13 +53,13 @@ impl Render for DndTreeExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("提示：拖拽节点；目标行会高亮并显示插入线（指针在目标行上半区=Before，下半区=After）；层级由水平拖动位移决定（向右更深、向左更浅）；水平手势：光标保持在本行且横向位移 > 24px 且主导时，向左=提升一级（跳出父节点，插入到父节点子树之后），向右=降低一级（变为左侧兄弟的子节点并自动展开）；插入线样式可通过 `indicator_style / indicator_color / indicator_cap` 配置。"),
+                            .child("Tip: drag nodes to reorder. The target row highlights with an insertion line (upper half = Before, lower half = After). Horizontal drag changes depth (right = deeper, left = shallower). When the horizontal delta > 24px and dominates: left promotes one level; right demotes one level (as a child of the left sibling, auto-expands). Indicator styling: `indicator_style / indicator_color / indicator_cap`."),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(format!("当前选中：{selected_id}")),
+                            .child(format!("Selected: {selected_id}")),
                     ),
             )
             .child(
@@ -97,7 +97,7 @@ impl Render for DndTreeExample {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child("Debug (当前树结构)"),
+                                    .child("Debug (tree structure)"),
                             )
                             .child(
                                 div()

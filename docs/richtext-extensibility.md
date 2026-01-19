@@ -15,7 +15,7 @@
 - **View（gpui 交互、IME、渲染）**：`crates/rich_text`（crate：`gpui-manos-plate`）
   - `RichTextState`：把 gpui 输入映射为 `Editor` 的 command/transaction，并渲染为 gpui elements
 - **验收入口（示例 UI）**：`crates/story`
-  - `cargo run -p gpui-manos-components-story --example richtext`
+  - `cargo run`，在 Story Gallery 左侧选择：`Rich Text`
 
 ## 如何新增能力（推荐做法）
 

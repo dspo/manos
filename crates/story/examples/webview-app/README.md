@@ -4,4 +4,4 @@ This is the default template of developing with Tauri, React and Typescript in V
 
 Now it can run on GPUI.
 
-Please install and build it before you run `cargo run --example webview` in the root directory.
+Please install and build it before you run `cargo run` and select `Welcome Tauri` in the Story Gallery (at repo root).

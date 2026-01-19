@@ -1,17 +1,17 @@
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    div, prelude::FluentBuilder as _, px, uniform_list, App, AppContext as _, Context, CursorStyle,
-    ElementId, Entity, EntityId, FocusHandle, InteractiveElement as _, IntoElement,
-    ListSizingBehavior, Modifiers, ParentElement as _, Pixels, Render, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, UniformListScrollHandle, Window,
+    App, AppContext as _, Context, CursorStyle, ElementId, Entity, EntityId, FocusHandle,
+    InteractiveElement as _, IntoElement, ListSizingBehavior, Modifiers, ParentElement as _,
+    Pixels, Render, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::list::ListItem;
 use gpui_component::scroll::{Scrollbar, ScrollbarState};
 use gpui_component::{ActiveTheme as _, StyledExt as _};
 
 use crate::common::{
-    reorder_to_index_for_drop_after_last, reorder_to_index_for_drop_on_row, DragGhost,
+    DragGhost, reorder_to_index_for_drop_after_last, reorder_to_index_for_drop_on_row,
 };
 
 const CONTEXT: &str = "DndList";

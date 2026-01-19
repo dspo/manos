@@ -1,31 +1,45 @@
-use gpui::{
-    App, AppContext, Application, Bounds, Context, Entity, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{App, AppContext as _, Context, Entity, Render, Window};
 use gpui_manos_webview::webview::WebView;
 use gpui_manos_webview::wry::WebViewId;
 use serde::Serialize;
 use std::path::PathBuf;
 
-fn main() {
-    Application::new().run(|cx: &mut App| {
-        cx.activate(true);
-
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(900.), px(640.0)),
-                cx,
-            ))),
-            is_resizable: true,
-            ..Default::default()
-        };
-
-        cx.open_window(options, webview_view).unwrap();
-    });
+pub struct WebViewStory {
+    webview: Entity<WebView>,
+    visible: bool,
 }
 
-fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
-    app.new(|cx: &mut Context<WebView>| {
+impl WebViewStory {
+    pub fn view(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let webview = build_webview(window, cx);
+        cx.new(|_| Self {
+            webview,
+            visible: true,
+        })
+    }
+
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        if visible {
+            self.webview.update(cx, |webview, _| webview.show());
+        } else {
+            self.webview.update(cx, |webview, _| webview.hide());
+        }
+        cx.notify();
+    }
+}
+
+impl Render for WebViewStory {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        self.webview.clone()
+    }
+}
+
+fn build_webview(window: &mut Window, cx: &mut App) -> Entity<WebView> {
+    cx.new(|cx: &mut Context<WebView>| {
         let static_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/webview-app/dist");
         let index_html = static_root.join("index.html");
@@ -48,11 +62,11 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
             builder.serve_static(static_root.to_string_lossy().to_string())
         } else {
             eprintln!(
-                "[webview example] missing web assets: {}",
+                "[webview story] missing web assets: {}",
                 index_html.to_string_lossy()
             );
 
-            let template = include_str!("webview-assets-missing.html");
+            let template = include_str!("../examples/webview-assets-missing.html");
             let html = template.replace(
                 "__EXPECTED_PATH__",
                 &escape_html(&index_html.to_string_lossy()),
@@ -62,8 +76,6 @@ fn webview_view(window: &mut gpui::Window, app: &mut App) -> Entity<WebView> {
         };
 
         let webview = builder.build_as_child(window).unwrap();
-        #[cfg(debug_assertions)]
-        webview.open_devtools();
 
         WebView::new(webview, window, cx)
     })
@@ -155,6 +167,6 @@ fn escape_html(input: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('"', "&quot;")
+        .replace('\"', "&quot;")
         .replace('\'', "&#39;")
 }

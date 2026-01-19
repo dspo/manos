@@ -11,7 +11,7 @@
 你可以一边看一边跑示例验收：
 
 - 运行 story：`cargo run`
-- 运行独立示例：`cargo run --example dnd_tree`
+- 在 Story Gallery 左侧选择：`DnD → Tree`
 - 跑单元测试：`cargo test -p gpui-manos-dnd`
 
 ---
@@ -266,7 +266,7 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 示例文件：
 
 - UI：`crates/story/src/dnd_tree.rs`
-- Example 入口：`crates/story/examples/dnd_tree.rs`
+- 预览入口：`cargo run`，在 Story Gallery 左侧选择：`DnD → Tree`
 
 你可以重点关注：
 
@@ -279,7 +279,7 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 为了避免“文本并非 item 左对齐”导致用户误读层级，示例在每行最左侧固定渲染 icon，并将插入线基准 `indent_offset` 对齐到 icon 起点：
 
 - 行渲染：`crates/story/src/dnd_tree.rs`
-- assets 加载：`crates/story/examples/dnd_tree.rs` 使用 `Application::new().with_assets(ExtrasAssetSource::new())`
+- assets 加载：`crates/story/src/main.rs` 使用 `Application::new().with_assets(ExtrasAssetSource::new())`
 - icon 资源：`crates/extras/assets/icons/{square-library,library,text-align-start,pen-line}.svg`
 
 ---

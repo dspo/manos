@@ -68,13 +68,13 @@ impl Render for DndVTreeExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("提示：该示例基于 `gpui-component::v_virtual_list`，不同节点行高不同；拖拽时 y 命中/插入线计算使用前缀和；水平拖动可改变层级。"),
+                            .child("Tip: built on `gpui-component::v_virtual_list` with variable row heights per node. While dragging, y-hit testing / indicator placement uses prefix sums; horizontal drag changes depth."),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(format!("当前选中：{selected_id}")),
+                            .child(format!("Selected: {selected_id}")),
                     ),
             )
             .child(
@@ -83,7 +83,7 @@ impl Render for DndVTreeExample {
                     .items_center()
                     .child(
                         Button::new("dnd-vtree-height-inc")
-                            .label("选中 +12px")
+                            .label("Selected +12px")
                             .ghost()
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.tree.update(cx, |tree, cx| {
@@ -100,7 +100,7 @@ impl Render for DndVTreeExample {
                     )
                     .child(
                         Button::new("dnd-vtree-height-dec")
-                            .label("选中 -12px")
+                            .label("Selected -12px")
                             .ghost()
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.tree.update(cx, |tree, cx| {
@@ -119,7 +119,7 @@ impl Render for DndVTreeExample {
                     )
                     .child(
                         Button::new("dnd-vtree-height-toggle")
-                            .label("选中 高/低 切换")
+                            .label("Toggle Selected Height")
                             .ghost()
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.tree.update(cx, |tree, cx| {
@@ -140,7 +140,7 @@ impl Render for DndVTreeExample {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(format!("选中行高：{selected_height}")),
+                            .child(format!("Selected row height: {selected_height}")),
                     ),
             )
             .child(
@@ -181,7 +181,7 @@ impl Render for DndVTreeExample {
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child("Debug (树结构)"),
+                                    .child("Debug (tree structure)"),
                             )
                             .child(
                                 div()

@@ -1,26 +1,45 @@
 # Manos
 
-> "A rich text editor built on `gpui` and `gpui-component`, inspired by `plate.js`."
+This repository implements a set of GPUI ideas, including (but not limited to) an enhanced WebView component, a Plate.js-like rich text editor component, dnd-list, and a dnt tree component.
+The original intention of this repository is to validate some GPUI inspirations, not to provide production components.
+This repository is still under active development; many APIs are not exposed, are immature, or are changing frequently, and many features are still experimental.
+This code can serve as a starting point for learning GPUI and developing on GPUI, but it is not recommended for production use.
+This repository makes extensive use of AI tools for programming, agents like Codex, models like GPT-5.2.
+Some code in this repository is directly copied from repositories such as [Tauri](https://github.com/tauri-apps/tauri), [Zed](https://github.com/zed-industries/zed), [GPUI](https://www.gpui.rs/), and [GPUI Component](https://github.com/longbridge/gpui-component) (in cases where it cannot be cleanly referenced in Cargo.toml), so it inherits their licenses.
 
-This repository is intended to host additional GPUI components about a Richtext Editor built on top of `gpui` and
-`gpui-component`.
+# "Tauri" on GPUI
 
-![img.png](docs/richtext.example.png)
+![gpui-wry](docs/gpui-wry.png)
 
-# Mini Tauri on GPUI
-
-A mini-tauri work on webview on GPUI + Wry.
+A component to support Tauri API work on [GPUI](https://www.gpui.rs/) + [Wry](https://github.com/tauri-apps/wry).
+Dedicated to hybrid GUI development combining GPUI and frontend technologies.
 
 Based on this, we can embed any web interface anywhere inside a GPUI app.
-The GPUI UI and the UI from a Web App can work together seamlessly.
+The GPUI UI and the Web App UI can work together seamlessly.
 
 Currently, calling between the frontend (TS/JS) and Rust is supported in both directions.
-Calling Rust from the frontend is identical to how Tauri’s `import { invoke } from "@tauri-apps/api/core"` function is used.
-On the Rust side, we provide Tauri-like macros `#[command]` and `generate_handler![]` .
-However, Tauri’s plugin system is not supported at the moment, because it depends on Tauri’s RuntimeHandler.
-It may be difficult to support to that extent in the future as well.
 
-Some usages:
+From the code below, calling Rust from the frontend works exactly like Tauri’s `invoke` API (`import { invoke } from "@tauri-apps/api/core"`).
+In other words, it’s the same as in a Tauri project.
+In fact, Tauri’s default example project can be migrated to this Webview component without changing a single line.
+
+```ts
+import { invoke } from "@tauri-apps/api/core";
+
+function App() {
+  const [greetMsg, setGreetMsg] = useState("");
+  const [name, setName] = useState("");
+
+  async function greet() {
+    setGreetMsg(await invoke("greet", { name }));
+  }
+
+  ...
+}
+```
+
+On the Rust side, we provide Tauri-like macros `#[command]` and `generate_handler![]`.
+Usage:
 
 ```rust
 #[command]
@@ -36,33 +55,18 @@ let builder = Builder::new()
     );
 ```
 
-```ts
-import { invoke } from "@tauri-apps/api/core";
+However, Tauri’s plugin system is not supported at the moment, because it depends on Tauri’s RuntimeHandler.
+It may be difficult to support to that extent in the future as well.
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+## Plate.rs -- A plate.js like richtext editor component.
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+> "A rich text editor built on `gpui` and `gpui-component`, inspired by `plate.js`."
 
-  ...
-````
+This repository is intended to host additional GPUI components about a Richtext Editor built on top of `gpui` and
+`gpui-component`.
 
-![gpui-wry](docs/gpui-wry.png)
+![img.png](docs/richtext.example.png)
 
-## Run
-- Story app: `cargo run`
-- DnD list example: `cargo run --example dnd_list`
-- DnD tree example: `cargo run --example dnd_tree`
-- Rich text example: `cargo run --example richtext`
-- WebView example: `cargo run --example webview` (loads `crates/story/examples/webview-app/dist` if present; otherwise shows a friendly hint page)
-- Plate toolbar buttons: `cargo run --example plate_toolbar_buttons`
-
-## Docs
-
-- DnD List design: `docs/dnd-list-component-design.md`
-- DnD Tree implementation notes: `docs/dnd-tree.md`
-- WebView module: `crates/webview/README.MD`
+# Run
+- Story gallery app: `cargo run` (left sidebar selects stories; right side renders the selected view)
+- Welcome Tauri story (WebView): build assets first: `cd crates/story/examples/webview-app && pnpm install && pnpm build` (loads `crates/story/examples/webview-app/dist` if present; otherwise shows a friendly hint page)

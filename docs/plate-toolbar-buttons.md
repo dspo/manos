@@ -9,7 +9,7 @@
 
 本仓库提供了一个集中预览页面：
 
-- 运行：`cargo run --example plate_toolbar_buttons`
+- 运行：`cargo run`，在 Story Gallery 左侧选择：`Plate Toolbar`
 - 入口：`crates/story/src/plate_toolbar_buttons.rs`
 
 ## 组件与模块位置
@@ -46,7 +46,7 @@ fn main() {
 参考实现：
 
 - `crates/story/src/main.rs`
-- `crates/story/examples/plate_toolbar_buttons.rs`
+- `crates/story/src/plate_toolbar_buttons.rs`
 
 ## 关键点 2：Icon 的复用方式
 
