@@ -2,7 +2,7 @@
 
 本教程介绍如何在本仓库中使用/扩展 `plate.js` 风格的 Toolbar Buttons，并说明这些组件是如何用 `gpui + gpui-component` 的方式组织起来的。
 
-这些组件也将作为 RichText 编辑器“工具层插件（Tooling Plugins）”的重要组成部分；编辑器未来架构与插件系统计划见：
+这些组件也将作为 RichText 编辑器"工具层插件（Tooling Plugins）"的重要组成部分；编辑器未来架构与插件系统计划见：
 - [RichText：插件系统与未来架构计划（激进重构版）](richtext-plugin-system-plan.md)
 
 ## 运行预览
@@ -14,25 +14,25 @@
 
 ## 组件与模块位置
 
-- 组件库：`crates/extras`
-  - SVG 资源：`crates/extras/src/assets.rs`
-  - Toolbar 组件：`crates/extras/src/plate_toolbar.rs`
+- 组件库：`crates/assets`（crate：`gpui-manos-assets`）
+  - SVG 资源：`crates/assets/src/assets.rs`
+  - Toolbar 组件：`crates/assets/src/plate_toolbar.rs`
 - Story（预览页）：`crates/story/src/plate_toolbar_buttons.rs`
 
 对外 API：
 
-- 资源：`gpui_manos_components::assets::ExtrasAssetSource`
-- Toolbar：`gpui_manos_components::plate_toolbar::*`
+- 资源：`gpui_manos_assets::assets::ExtrasAssetSource`
+- Toolbar：`gpui_manos_assets::plate_toolbar::*`
 
 ## 关键点 1：让 SVG 能显示（资产源）
 
 GPUI 的 `svg().path("...")` 会从 `App` 的 `AssetSource` 里加载文件内容，所以要在 `main` 里配置资源。
 
-本仓库用 `ExtrasAssetSource` 把 `crates/extras/assets/icons/*.svg` 编译进二进制并提供给 GPUI：
+本仓库用 `ExtrasAssetSource` 把 `crates/assets/assets/icons/*.svg` 编译进二进制并提供给 GPUI：
 
 ```rust
 use gpui::*;
-use gpui_manos_components::assets::ExtrasAssetSource;
+use gpui_manos_assets::assets::ExtrasAssetSource;
 
 fn main() {
     let app = Application::new().with_assets(ExtrasAssetSource::new());
@@ -52,13 +52,13 @@ fn main() {
 
 `PlateIconName` 对齐了 `plate.js` 示例中的 SVG（本质是 lucide icons），并实现了 `gpui_component::IconNamed`：
 
-- SVG 文件：`crates/extras/assets/icons/*.svg`
-- 路径映射：`crates/extras/src/plate_toolbar.rs`（`impl IconNamed for PlateIconName`）
+- SVG 文件：`crates/assets/assets/icons/*.svg`
+- 路径映射：`crates/assets/src/plate_toolbar.rs`（`impl IconNamed for PlateIconName`）
 
 使用方式：
 
 ```rust
-use gpui_manos_components::plate_toolbar::PlateIconName;
+use gpui_manos_assets::plate_toolbar::PlateIconName;
 use gpui_component::Icon;
 
 let icon = Icon::new(PlateIconName::Undo2);
@@ -66,13 +66,13 @@ let icon = Icon::new(PlateIconName::Undo2);
 
 如果要新增一个图标：
 
-1. 添加 SVG 文件到 `crates/extras/assets/icons/xxx.svg`
-2. 在 `crates/extras/src/assets.rs` 的 `ASSETS` 数组里注册路径
-3. 在 `crates/extras/src/plate_toolbar.rs` 的 `PlateIconName` 增加枚举值，并在 `IconNamed::path` 里映射到 `icons/xxx.svg`
+1. 添加 SVG 文件到 `crates/assets/assets/icons/xxx.svg`
+2. 在 `crates/assets/src/assets.rs` 的 `ASSETS` 数组里注册路径
+3. 在 `crates/assets/src/plate_toolbar.rs` 的 `PlateIconName` 增加枚举值，并在 `IconNamed::path` 里映射到 `icons/xxx.svg`
 
 ## 关键点 3：Toolbar Button 的“gpui-component 风格”实现思路
 
-以 `PlateToolbarButton` 为例（`crates/extras/src/plate_toolbar.rs`）：
+以 `PlateToolbarButton` 为例（`crates/assets/src/plate_toolbar.rs`）：
 
 - **Builder 风格**：struct + `#[derive(IntoElement)]` + `impl RenderOnce`
 - **主题一致性**：在 `render()` 里读取 `cx.theme()`，用 `muted/accent/border/...` 等 token
@@ -112,7 +112,7 @@ let icon = Icon::new(PlateIconName::Undo2);
 `PlateToolbarColorPicker` 是一个可复用组件，可用于字体颜色/高亮色：
 
 ```rust
-use gpui_manos_components::plate_toolbar::{PlateIconName, PlateToolbarColorPicker};
+use gpui_manos_assets::plate_toolbar::{PlateIconName, PlateToolbarColorPicker};
 
 PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
     .tooltip("Text color")
@@ -129,7 +129,7 @@ PlateToolbarColorPicker::new("text-color", PlateIconName::Baseline)
 ## 代码示例：组合一个 Toolbar Group
 
 ```rust
-use gpui_manos_components::plate_toolbar::*;
+use gpui_manos_assets::plate_toolbar::*;
 
 div()
     .flex()

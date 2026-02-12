@@ -13,7 +13,7 @@ use gpui_component::{
     notification::Notification,
     popover::Popover,
 };
-use gpui_manos_components::plate_toolbar::{
+use gpui_manos_assets::plate_toolbar::{
     PlateIconName, PlateToolbarButton, PlateToolbarColorPicker, PlateToolbarDropdownButton,
     PlateToolbarIconButton, PlateToolbarRounding, PlateToolbarSeparator,
 };
@@ -21,8 +21,8 @@ use gpui_manos_plate::{BlockAlign, CommandInfo, PlateValue, PortabilityReport, R
 
 use crate::app_menus::{
     About, COMMAND_PALETTE_CONTEXT, CollectAssets, CommandPalette, CommandPaletteSelectNext,
-    CommandPaletteSelectPrev, EmbedLocalImages, ExportPlateBundle, ExportPortableJson,
-    FIND_CONTEXT, Find, FindNext, FindPrev, InsertImage, Open,
+    CommandPaletteSelectPrev, EmbedLocalImages, ExportMarkdown, ExportPlateBundle, ExportPortableJson,
+    FIND_CONTEXT, Find, FindNext, FindPrev, FindReplace, ImportMarkdown, InsertImage, InsertMath, Open,
     PortabilityReport as ShowPortabilityReport, Save, SaveAs, SetLink,
 };
 
@@ -35,6 +35,8 @@ pub struct RichTextExample {
     emoji_input: Entity<InputState>,
     mention_input: Entity<InputState>,
     find_input: Entity<InputState>,
+    replace_input: Entity<InputState>,
+    math_input: Entity<InputState>,
 }
 
 impl RichTextExample {
@@ -81,6 +83,18 @@ impl RichTextExample {
             state
         });
 
+        let replace_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Replace with…", window, cx);
+            state
+        });
+
+        let math_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("E = mc^2", window, cx);
+            state
+        });
+
         cx.observe(&find_input, |this, _, cx| {
             let query = this.find_input.read(cx).value().to_string();
             this.editor.update(cx, |editor, cx| {
@@ -98,6 +112,8 @@ impl RichTextExample {
             emoji_input,
             mention_input,
             find_input,
+            replace_input,
+            math_input,
         }
     }
 
@@ -332,6 +348,147 @@ impl RichTextExample {
                     true
                 })
         });
+    }
+
+    fn open_find_replace_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let find_input = self.find_input.clone();
+        let replace_input = self.replace_input.clone();
+        let editor = self.editor.clone();
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let find_input = find_input.clone();
+            let replace_input = replace_input.clone();
+            let editor = editor.clone();
+            let handle = find_input.focus_handle(cx);
+            window.focus(&handle);
+            let content = cx.new(|_cx| {
+                FindReplaceDialogView::new(editor.clone(), find_input.clone(), replace_input.clone())
+            });
+            dialog
+                .title("Find & Replace")
+                .w(px(520.))
+                .child(content)
+                .on_ok(move |_, window, cx| {
+                    let handle = editor.read(cx).focus_handle();
+                    window.focus(&handle);
+                    true
+                })
+        });
+    }
+
+    fn open_math_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let math_input = self.math_input.clone();
+        let editor = self.editor.clone();
+
+        math_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let math_input = math_input.clone();
+            let editor = editor.clone();
+            let handle = math_input.focus_handle(cx);
+            window.focus(&handle);
+            dialog
+                .title("Insert Math Formula (LaTeX)")
+                .w(px(520.))
+                .child(div().p(px(12.)).child(Input::new(&math_input).w_full()))
+                .on_ok(move |_, window, cx| {
+                    let latex = math_input.read(cx).value().trim().to_string();
+                    if !latex.is_empty() {
+                        editor.update(cx, |editor, cx| {
+                            let _ = editor.command_run("math.insert_block", Some(serde_json::json!({ "latex": latex })), cx);
+                        });
+                    }
+                    let handle = editor.read(cx).focus_handle();
+                    window.focus(&handle);
+                    true
+                })
+        });
+    }
+
+    fn export_markdown(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.editor.clone();
+        let directory = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let suggested_name = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_stem().map(|name| format!("{}.md", name.to_string_lossy())))
+            .unwrap_or_else(|| "document.md".to_string());
+
+        let picked = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        cx.spawn_in(window, async move |_, window| {
+            let path: PathBuf = picked.await.ok()?.ok()??;
+            let markdown = window
+                .update(|_window, cx| {
+                    editor.read(cx).query_run_json("markdown.export", None).ok()
+                })
+                .ok()??;
+
+            let md_str = markdown.as_str().unwrap_or("");
+            let result = std::fs::write(&path, md_str);
+
+            window
+                .update(|window, cx| match result {
+                    Ok(()) => {
+                        window.push_notification(
+                            Notification::new()
+                                .message(format!("Exported Markdown to {}", path.display()))
+                                .autohide(true),
+                            cx,
+                        );
+                    }
+                    Err(err) => {
+                        window.push_notification(
+                            Notification::new()
+                                .message(format!("Failed to export: {err}"))
+                                .autohide(true),
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
+    }
+
+    fn import_markdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import Markdown".into()),
+        });
+
+        let editor = self.editor.clone();
+        cx.spawn_in(window, async move |_, window| {
+            let path: PathBuf = picked.await.ok()?.ok()??.into_iter().next()?;
+            let content = std::fs::read_to_string(&path).ok()?;
+
+            window
+                .update(|window, cx| {
+                    editor.update(cx, |editor, cx| {
+                        let _ = editor.command_run("markdown.import", Some(serde_json::json!({ "markdown": content })), cx);
+                    });
+                    window.push_notification(
+                        Notification::new()
+                            .message(format!("Imported Markdown from {}", path.display()))
+                            .autohide(true),
+                        cx,
+                    );
+                })
+                .ok();
+
+            Some(())
+        })
+        .detach();
     }
 
     fn open_portability_report_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -985,6 +1142,18 @@ impl Render for RichTextExample {
             }))
             .on_action(cx.listener(|this, _: &Find, window, cx| {
                 this.open_find_dialog(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindReplace, window, cx| {
+                this.open_find_replace_dialog(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &InsertMath, window, cx| {
+                this.open_math_dialog(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExportMarkdown, window, cx| {
+                this.export_markdown(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ImportMarkdown, window, cx| {
+                this.import_markdown(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FindNext, window, cx| {
                 this.editor.update(cx, |editor, cx| {
@@ -1919,6 +2088,36 @@ impl Render for RichTextExample {
                             })),
                     )
                     .child(PlateToolbarSeparator)
+                    // New feature buttons
+                    .child(
+                        PlateToolbarIconButton::new("find-replace", PlateIconName::Search)
+                            .tooltip("Find & Replace (Cmd/Ctrl+H)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_find_replace_dialog(window, cx);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("math", PlateIconName::Sigma)
+                            .tooltip("Insert Math Formula (LaTeX)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_math_dialog(window, cx);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("export-md", PlateIconName::FileText)
+                            .tooltip("Export as Markdown")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.export_markdown(window, cx);
+                            })),
+                    )
+                    .child(
+                        PlateToolbarIconButton::new("import-md", PlateIconName::FileInput)
+                            .tooltip("Import from Markdown")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.import_markdown(window, cx);
+                            })),
+                    )
+                    .child(PlateToolbarSeparator)
                     .child(
                         PlateToolbarIconButton::new("command-palette", PlateIconName::Ellipsis)
                             .tooltip("Command Palette")
@@ -2137,6 +2336,144 @@ impl Render for FindDialogView {
                                     .disabled(!has_matches)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.editor.update(cx, |editor, cx| editor.find_next(cx));
+                                        let handle = this.find_input.focus_handle(cx);
+                                        window.focus(&handle);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+}
+
+struct FindReplaceDialogView {
+    editor: Entity<RichTextState>,
+    find_input: Entity<InputState>,
+    replace_input: Entity<InputState>,
+}
+
+impl FindReplaceDialogView {
+    fn new(
+        editor: Entity<RichTextState>,
+        find_input: Entity<InputState>,
+        replace_input: Entity<InputState>,
+    ) -> Self {
+        Self {
+            editor,
+            find_input,
+            replace_input,
+        }
+    }
+}
+
+impl Render for FindReplaceDialogView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let find_query = self.find_input.read(cx).value().to_string();
+        let matches: Vec<serde_json::Value> = self
+            .editor
+            .read(cx)
+            .query_run(
+                "find_replace.matches",
+                Some(serde_json::json!({ "query": find_query, "case_sensitive": false })),
+            )
+            .unwrap_or_default();
+        let total = matches.len();
+        let has_matches = total > 0;
+        let stats = if has_matches {
+            format!("{total} matches")
+        } else {
+            "No matches".to_string()
+        };
+
+        div()
+            .p(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("Find:"),
+                    )
+                    .child(Input::new(&self.find_input).w_full()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child("Replace with:"),
+                    )
+                    .child(Input::new(&self.replace_input).w_full()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child(stats),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                Button::new("Replace")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!has_matches)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let find = this.find_input.read(cx).value().to_string();
+                                        let replace = this.replace_input.read(cx).value().to_string();
+                                        this.editor.update(cx, |editor, cx| {
+                                            let _ = editor.command_run(
+                                                "find_replace.replace",
+                                                Some(serde_json::json!({
+                                                    "query": find,
+                                                    "replacement": replace,
+                                                    "case_sensitive": false
+                                                })),
+                                                cx,
+                                            );
+                                        });
+                                        let handle = this.find_input.focus_handle(cx);
+                                        window.focus(&handle);
+                                    })),
+                            )
+                            .child(
+                                Button::new("Replace All")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!has_matches)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let find = this.find_input.read(cx).value().to_string();
+                                        let replace = this.replace_input.read(cx).value().to_string();
+                                        this.editor.update(cx, |editor, cx| {
+                                            let _ = editor.command_run(
+                                                "find_replace.replace_all",
+                                                Some(serde_json::json!({
+                                                    "query": find,
+                                                    "replacement": replace,
+                                                    "case_sensitive": false
+                                                })),
+                                                cx,
+                                            );
+                                        });
                                         let handle = this.find_input.focus_handle(cx);
                                         window.focus(&handle);
                                     })),

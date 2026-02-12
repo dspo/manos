@@ -1,3 +1,4 @@
+pub mod plugins;
 pub mod webview;
 pub use http;
 pub use serde;
@@ -67,6 +68,79 @@ fn ipc_webview_for_label(webview_label: Option<&str>) -> Option<Rc<wry::WebView>
     })
 }
 
+/// Emit an event to the webview's JavaScript side.
+///
+/// This function sends an event with a payload to the JavaScript event listeners
+/// registered via `@tauri-apps/api/event.listen()`.
+///
+/// # Arguments
+/// * `webview` - The target WebView to emit the event to
+/// * `event` - The event name
+/// * `payload` - The payload to send (must be serializable)
+pub fn emit<T: Serialize>(webview: &wry::WebView, event: &str, payload: T) -> Result<()> {
+    let webview_label = webview.id().to_string();
+    let handler_ids = plugins::event::get_handler_ids_for_event(event, Some(&webview_label));
+    if handler_ids.is_empty() {
+        return Ok(());
+    }
+
+    let payload_json =
+        serde_json::to_string(&payload).map_err(|_| wry::Error::MessageSender)?;
+    let event_escaped =
+        serde_json::to_string(event).map_err(|_| wry::Error::MessageSender)?;
+
+    // Call runCallback for each registered handler
+    let callbacks: Vec<String> = handler_ids
+        .iter()
+        .map(|id| {
+            format!(
+                "window.__TAURI_INTERNALS__.runCallback({id}, {{event: {event_escaped}, payload: {payload_json}}})"
+            )
+        })
+        .collect();
+
+    let js = format!("(function() {{ {} }})()", callbacks.join("; "));
+    webview.evaluate_script(&js)
+}
+
+/// Emit an event to a webview by its label.
+///
+/// # Arguments
+/// * `webview_label` - The label of the target webview (None for the only registered webview)
+/// * `event` - The event name
+/// * `payload` - The payload to send (must be serializable)
+pub fn emit_to<T: Serialize>(
+    webview_label: Option<&str>,
+    event: &str,
+    payload: T,
+) -> std::result::Result<(), String> {
+    let webview = ipc_webview_for_label(webview_label)
+        .ok_or_else(|| "webview not found".to_string())?;
+
+    let label = webview_label.or_else(|| Some(webview.id())).map(|s| s.to_string());
+    let handler_ids = plugins::event::get_handler_ids_for_event(event, label.as_deref());
+    if handler_ids.is_empty() {
+        return Ok(());
+    }
+
+    let payload_json =
+        serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    let event_escaped =
+        serde_json::to_string(event).map_err(|e| e.to_string())?;
+
+    let callbacks: Vec<String> = handler_ids
+        .iter()
+        .map(|id| {
+            format!(
+                "window.__TAURI_INTERNALS__.runCallback({id}, {{event: {event_escaped}, payload: {payload_json}}})"
+            )
+        })
+        .collect();
+
+    let js = format!("(function() {{ {} }})()", callbacks.join("; "));
+    webview.evaluate_script(&js).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct PostMessageOptions {
@@ -126,6 +200,26 @@ impl<'a> Builder<'a> {
             "plugin:webview|set_webview_zoom".to_string(),
             Arc::new(|request| ipc::set_webview_zoom(request)),
         );
+
+        // Register dialog plugin handlers
+        for (name, handler) in plugins::dialog::handlers() {
+            handlers.insert(name, handler);
+        }
+
+        // Register clipboard plugin handlers
+        for (name, handler) in plugins::clipboard::handlers() {
+            handlers.insert(name, handler);
+        }
+
+        // Register opener plugin handlers
+        for (name, handler) in plugins::opener::handlers() {
+            handlers.insert(name, handler);
+        }
+
+        // Register event plugin handlers
+        for (name, handler) in plugins::event::handlers() {
+            handlers.insert(name, handler);
+        }
 
         Builder {
             builder: WebViewBuilder::new(),
@@ -1516,6 +1610,15 @@ pub(crate) fn event_initialization_script(function_name: &str, listeners: &str) 
             eventData.id = id
             window.__TAURI_INTERNALS__.runCallback(listener.handlerId, eventData)
           }}
+        }}
+      }}
+    }});
+
+    // Event plugin internals for unlisten support
+    Object.defineProperty(window, '__TAURI_EVENT_PLUGIN_INTERNALS__', {{
+      value: {{
+        unregisterListener: function(event, eventId) {{
+          // Cleanup handled in Rust via plugin:event|unlisten
         }}
       }}
     }});

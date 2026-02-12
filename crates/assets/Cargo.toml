@@ -1,5 +1,5 @@
 [package]
-name = "gpui-manos-components"
+name = "gpui-manos-assets"
 version = "0.1.0"
 publish = false
 edition.workspace = true
@@ -10,3 +10,5 @@ doctest = false
 [dependencies]
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-component-assets = "0.5"
+rust-embed = "8"

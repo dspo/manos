@@ -202,6 +202,11 @@ impl PluginRegistry {
     }
 
     pub fn richtext() -> Self {
+        use crate::plugins::{
+            BlockSelectionPlugin, DndPlugin, FindReplacePlugin, MarkdownPlugin, MathPlugin,
+            SlashCommandPlugin,
+        };
+
         let plugins: Vec<Box<dyn PlatePlugin>> = vec![
             Box::new(CoreParagraphPlugin),
             Box::new(CoreDividerPlugin),
@@ -223,6 +228,12 @@ impl PluginRegistry {
             Box::new(MentionPlugin),
             Box::new(EmojiPlugin),
             Box::new(ImagePlugin),
+            Box::new(MathPlugin),
+            Box::new(BlockSelectionPlugin),
+            Box::new(FindReplacePlugin),
+            Box::new(SlashCommandPlugin),
+            Box::new(DndPlugin),
+            Box::new(MarkdownPlugin),
         ];
         Self::new(plugins).expect("richtext registry must be valid")
     }

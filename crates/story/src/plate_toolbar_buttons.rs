@@ -7,7 +7,7 @@ use gpui_component::WindowExt as _;
 use gpui_component::input::InputState;
 use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
-use gpui_manos_components::plate_toolbar::{
+use gpui_manos_assets::plate_toolbar::{
     PlateIconName, PlateToolbarColorPicker, PlateToolbarDropdownButton, PlateToolbarIconButton,
     PlateToolbarSeparator, PlateToolbarSplitButton, PlateToolbarStepper,
 };

@@ -78,6 +78,22 @@ pub struct CommandPaletteSelectNext;
 #[action(namespace = richtext_example, no_json)]
 pub struct Quit;
 
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = richtext_example, no_json)]
+pub struct FindReplace;
+
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = richtext_example, no_json)]
+pub struct InsertMath;
+
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = richtext_example, no_json)]
+pub struct ExportMarkdown;
+
+#[derive(Action, Clone, PartialEq, Eq)]
+#[action(namespace = richtext_example, no_json)]
+pub struct ImportMarkdown;
+
 pub fn init(
     title: impl Into<SharedString>,
     window: &mut Window,
