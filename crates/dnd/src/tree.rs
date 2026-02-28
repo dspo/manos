@@ -8,6 +8,7 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::list::ListItem;
+use gpui_component::menu::{ContextMenuExt, PopupMenu};
 use gpui_component::scroll::{Scrollbar, ScrollbarState};
 use gpui_component::{ActiveTheme as _, StyledExt as _};
 
@@ -229,6 +230,11 @@ pub struct DndTreeState {
     drag_start_mouse_position: Option<Point<Pixels>>,
     render_item:
         Rc<dyn Fn(usize, &DndTreeEntry, DndTreeRowState, &mut Window, &mut App) -> ListItem>,
+    context_menu_builder: Option<
+        Rc<dyn Fn(&DndTreeEntry, PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>,
+    >,
+    on_double_click: Option<Rc<dyn Fn(&DndTreeEntry, &mut Window, &mut App)>>,
+    on_expand: Option<Rc<dyn Fn(&DndTreeEntry, bool, &mut Window, &mut App)>>,
 }
 
 impl DndTreeState {
@@ -249,6 +255,9 @@ impl DndTreeState {
             drop_preview: None,
             drag_start_mouse_position: None,
             render_item: Rc::new(|_, _, _, _, _| ListItem::new("dnd-tree-empty")),
+            context_menu_builder: None,
+            on_double_click: None,
+            on_expand: None,
         }
     }
 
@@ -312,6 +321,40 @@ impl DndTreeState {
         self
     }
 
+    /// Set a context menu builder for tree items.
+    ///
+    /// The builder receives the entry being right-clicked and should return a configured PopupMenu.
+    pub fn context_menu<F>(mut self, builder: F) -> Self
+    where
+        F: Fn(&DndTreeEntry, PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+    {
+        self.context_menu_builder = Some(Rc::new(builder));
+        self
+    }
+
+    /// Set a callback for double-click events on tree items.
+    ///
+    /// The callback receives the entry that was double-clicked.
+    pub fn on_double_click<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&DndTreeEntry, &mut Window, &mut App) + 'static,
+    {
+        self.on_double_click = Some(Rc::new(callback));
+        self
+    }
+
+    /// Set a callback for expand/collapse events on tree items.
+    ///
+    /// The callback receives the entry and the new expanded state (true = expanded).
+    /// This is useful for lazy loading children when a folder is expanded.
+    pub fn on_expand<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&DndTreeEntry, bool, &mut Window, &mut App) + 'static,
+    {
+        self.on_expand = Some(Rc::new(callback));
+        self
+    }
+
     pub fn set_items(&mut self, items: impl Into<Vec<DndTreeItem>>, cx: &mut Context<Self>) {
         self.root_items = items.into();
         self.selected_ix = None;
@@ -363,7 +406,34 @@ impl DndTreeState {
         }
     }
 
-    fn toggle_expand(&mut self, ix: usize) {
+    /// Toggle expand state and invoke the on_expand callback.
+    fn toggle_expand_with_callback(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(entry) = self.entries.get_mut(ix) else {
+            return;
+        };
+        if !entry.is_folder() {
+            return;
+        }
+        let new_expanded = !entry.is_expanded();
+        entry.item.state.borrow_mut().expanded = new_expanded;
+
+        // Call on_expand callback if provided
+        if let Some(callback) = &self.on_expand {
+            if let Some(entry) = self.entries.get(ix).cloned() {
+                callback(&entry, new_expanded, window, cx);
+            }
+        }
+
+        self.rebuild_entries();
+    }
+
+    /// Toggle expand without callback (for internal use in key handlers).
+    fn toggle_expand_silent(&mut self, ix: usize) {
         let Some(entry) = self.entries.get_mut(ix) else {
             return;
         };
@@ -422,7 +492,7 @@ impl DndTreeState {
                 };
                 if entry.is_folder() && !entry.is_expanded() {
                     let selected_id = entry.item().id.clone();
-                    self.toggle_expand(selected_ix);
+                    self.toggle_expand_silent(selected_ix);
                     if let Some(ix) = self
                         .entries
                         .iter()
@@ -456,7 +526,7 @@ impl DndTreeState {
 
                 if entry.is_folder() && entry.is_expanded() {
                     let selected_id = entry.item().id.clone();
-                    self.toggle_expand(selected_ix);
+                    self.toggle_expand_silent(selected_ix);
                     if let Some(ix) = self
                         .entries
                         .iter()
@@ -490,7 +560,7 @@ impl DndTreeState {
                 }
 
                 let selected_id = entry.item().id.clone();
-                self.toggle_expand(selected_ix);
+                self.toggle_expand_silent(selected_ix);
                 self.selected_ix = self
                     .entries
                     .iter()
@@ -509,12 +579,24 @@ impl DndTreeState {
     fn on_entry_click(
         &mut self,
         ix: usize,
-        _event: &gpui::ClickEvent,
-        _window: &mut Window,
+        event: &gpui::ClickEvent,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.selected_ix = Some(ix);
-        self.toggle_expand(ix);
+
+        // Handle double-click
+        if event.click_count() == 2 {
+            if let Some(ref callback) = self.on_double_click {
+                if let Some(entry) = self.entries.get(ix).cloned() {
+                    callback(&entry, window, cx);
+                }
+            }
+        } else {
+            // Single click: toggle expand for folders
+            self.toggle_expand_with_callback(ix, window, cx);
+        }
+
         cx.notify();
     }
 
@@ -1020,6 +1102,7 @@ impl Render for DndTreeState {
         }
 
         let render_item = Rc::clone(&self.render_item);
+        let context_menu_builder = self.context_menu_builder.clone();
         let state_entity = cx.entity();
         let dragged_id = self.dragged_id.clone();
         let drop_preview = self.drop_preview.clone();
@@ -1095,6 +1178,7 @@ impl Render for DndTreeState {
             .relative()
             .child(
                 uniform_list("entries", self.entries.len(), {
+                    let context_menu_builder = context_menu_builder.clone();
                     cx.processor(move |state, visible_range: Range<usize>, window, cx| {
                         let drop_target_bg = cx.theme().drop_target;
                         let mut items = Vec::with_capacity(visible_range.len());
@@ -1180,7 +1264,19 @@ impl Render for DndTreeState {
                                     }
                                 });
 
-                            items.push(row);
+                            // Add context menu if builder is provided
+                            if let Some(ref builder) = context_menu_builder {
+                                let entry_clone = entry.clone();
+                                let builder = builder.clone();
+                                items.push(
+                                    row.context_menu(move |menu, window, cx| {
+                                        builder(&entry_clone, menu, window, cx)
+                                    })
+                                    .into_any_element(),
+                                );
+                            } else {
+                                items.push(row.into_any_element());
+                            }
                         }
                         items
                     })

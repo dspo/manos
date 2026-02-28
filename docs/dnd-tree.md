@@ -280,7 +280,7 @@ Tree 的 `After(target)` 语义是：插入到 target 的同级 **并位于 targ
 
 - 行渲染：`crates/story/src/dnd_tree.rs`
 - assets 加载：`crates/story/src/main.rs` 使用 `Application::new().with_assets(ExtrasAssetSource::new())`
-- icon 资源：`crates/extras/assets/icons/{square-library,library,text-align-start,pen-line}.svg`
+- icon 资源：`crates/assets/assets/icons/{square-library,library,text-align-start,pen-line}.svg`
 
 ---
 

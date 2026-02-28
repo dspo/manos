@@ -244,6 +244,46 @@ struct FindActiveMatch {
     range_index: usize,
 }
 
+/// Drag state for block reordering.
+#[derive(Clone, Debug)]
+struct BlockDragState {
+    /// Path of the block being dragged.
+    source_path: Vec<usize>,
+}
+
+/// Data carried during a block drag operation.
+#[derive(Clone)]
+struct BlockDragData {
+    /// Entity ID of the RichTextState that owns this drag.
+    state_id: EntityId,
+    /// Path of the block being dragged.
+    source_path: Vec<usize>,
+    /// Label to show in the drag ghost.
+    label: SharedString,
+}
+
+/// Ghost element shown during block drag.
+struct BlockDragGhost {
+    label: SharedString,
+}
+
+impl Render for BlockDragGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .text_color(theme.popover_foreground)
+            .text_sm()
+            .child(self.label.clone())
+    }
+}
+
 pub struct RichTextState {
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
@@ -264,6 +304,8 @@ pub struct RichTextState {
     columns_resizing: Option<ColumnsResizeState>,
     did_auto_focus: bool,
     pending_notifications: Vec<String>,
+    /// Current block drag state (if any).
+    block_drag: Option<BlockDragState>,
 }
 
 const PLATE_CLIPBOARD_FRAGMENT_KIND: &str = "gpui-manos-plate/fragment";
@@ -327,6 +369,166 @@ impl PlateClipboardFragment {
 }
 
 impl RichTextState {
+    // ========================================================================
+    // Drag and Drop methods
+    // ========================================================================
+
+    fn on_block_drag_start(
+        &mut self,
+        drag: &BlockDragData,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.state_id != cx.entity_id() {
+            return;
+        }
+        self.block_drag = Some(BlockDragState {
+            source_path: drag.source_path.clone(),
+        });
+        cx.notify();
+    }
+
+    fn on_block_drop(
+        &mut self,
+        drag: &BlockDragData,
+        target_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.state_id != cx.entity_id() {
+            return;
+        }
+
+        let from = drag.source_path.clone();
+        if from.len() != 1 {
+            // Only support top-level block reordering for now
+            return;
+        }
+
+        let from_ix = from[0];
+        if from_ix == target_ix || from_ix + 1 == target_ix {
+            // No-op: dropping on self or immediately after self
+            return;
+        }
+
+        // Calculate the actual destination index
+        let to_ix = if target_ix > from_ix {
+            target_ix - 1
+        } else {
+            target_ix
+        };
+
+        let args = serde_json::json!({
+            "from": [from_ix],
+            "to": [to_ix]
+        });
+
+        if let Err(e) = self.editor.run_command("dnd.move_node", Some(args)) {
+            self.queue_notification(format!("Failed to move block: {}", e.message()), cx);
+        }
+
+        self.block_drag = None;
+        self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
+        cx.notify();
+    }
+
+    fn on_block_drop_after_last(
+        &mut self,
+        drag: &BlockDragData,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.state_id != cx.entity_id() {
+            return;
+        }
+
+        let from = drag.source_path.clone();
+        if from.len() != 1 {
+            return;
+        }
+
+        let from_ix = from[0];
+        let to_ix = self.editor.doc().children.len() - 1;
+
+        if from_ix == to_ix {
+            // Already at the end
+            return;
+        }
+
+        let args = serde_json::json!({
+            "from": [from_ix],
+            "to": [to_ix]
+        });
+
+        if let Err(e) = self.editor.run_command("dnd.move_node", Some(args)) {
+            self.queue_notification(format!("Failed to move block: {}", e.message()), cx);
+        }
+
+        self.block_drag = None;
+        self.text_block_order = text_block_paths(self.editor.doc(), self.editor.registry());
+        cx.notify();
+    }
+
+    fn block_label_for_path(&self, path: &[usize]) -> SharedString {
+        if path.len() != 1 {
+            return "Block".into();
+        }
+
+        let Some(node) = self.editor.doc().children.get(path[0]) else {
+            return "Block".into();
+        };
+
+        match node {
+            Node::Element(el) => {
+                // Try to get a meaningful label from the block
+                let kind = &el.kind;
+                match kind.as_str() {
+                    "paragraph" => {
+                        // Get first few characters of text
+                        let text: String = el
+                            .children
+                            .iter()
+                            .filter_map(|n| match n {
+                                Node::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        let preview = text.chars().take(30).collect::<String>();
+                        if preview.is_empty() {
+                            "Paragraph".into()
+                        } else if text.len() > 30 {
+                            format!("{}...", preview).into()
+                        } else {
+                            preview.into()
+                        }
+                    }
+                    "heading" => {
+                        let level = el
+                            .attrs
+                            .get("level")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1);
+                        format!("Heading {}", level).into()
+                    }
+                    "code_block" => "Code Block".into(),
+                    "blockquote" => "Blockquote".into(),
+                    "toggle" => "Toggle".into(),
+                    "columns" => "Columns".into(),
+                    "table" => "Table".into(),
+                    "bulleted_list" | "ordered_list" => "List".into(),
+                    _ => kind.clone().into(),
+                }
+            }
+            Node::Void(v) => match v.kind.as_str() {
+                "divider" => "Divider".into(),
+                "image" => "Image".into(),
+                _ => v.kind.clone().into(),
+            },
+            Node::Text(_) => "Text".into(),
+        }
+    }
+
     fn queue_notification(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.pending_notifications.push(message.into());
         cx.notify();
@@ -887,6 +1089,7 @@ impl RichTextState {
             columns_resizing: None,
             did_auto_focus: false,
             pending_notifications: Vec::new(),
+            block_drag: None,
         }
     }
 
@@ -2973,6 +3176,26 @@ impl RichTextState {
         Ok(())
     }
 
+    pub fn query_run<T: serde::de::DeserializeOwned>(
+        &self,
+        id: &str,
+        args: Option<serde_json::Value>,
+    ) -> Result<T, String> {
+        self.editor
+            .run_query::<T>(id, args)
+            .map_err(|e| e.message().to_string())
+    }
+
+    pub fn query_run_json(
+        &self,
+        id: &str,
+        args: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        self.editor
+            .run_query_json(id, args)
+            .map_err(|e| e.message().to_string())
+    }
+
     fn scroll_cursor_into_view(&mut self) -> bool {
         let Some(block_path) = self.active_text_block_path() else {
             return false;
@@ -4329,6 +4552,14 @@ impl RichTextState {
                     } else {
                         format!("![{alt}]({src})")
                     }
+                }
+                "math_inline" => {
+                    let latex = v.attrs.get("latex").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("${latex}$")
+                }
+                "math_block" => {
+                    let latex = v.attrs.get("latex").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("$$\n{latex}\n$$")
                 }
                 _ => v.inline_text(),
             }
@@ -7183,11 +7414,36 @@ impl Render for RichTextState {
             RichTextBlockBoundsElement::new(state.clone(), path, kind, inner).into_any_element()
         }
 
+        // Clear drag state if no active drag
+        if !cx.has_active_drag() {
+            self.block_drag = None;
+        }
+
+        let block_drag = self.block_drag.clone();
+        let state_id = cx.entity_id();
+        let drop_target_bg = theme.drop_target;
+        let drag_border = theme.drag_border;
+
         let mut blocks: Vec<AnyElement> = Vec::new();
+        let block_count = self.editor.doc().children.len();
+
         for (ix, node) in self.editor.doc().children.iter().enumerate() {
-            blocks.push(render_block(
+            let path = vec![ix];
+            let label = self.block_label_for_path(&path);
+            let is_dragging = block_drag
+                .as_ref()
+                .map(|d| d.source_path == path)
+                .unwrap_or(false);
+
+            let drag_data = BlockDragData {
+                state_id,
+                source_path: path.clone(),
+                label: label.clone(),
+            };
+
+            let block_element = render_block(
                 node,
-                vec![ix],
+                path.clone(),
                 window,
                 &theme,
                 &state,
@@ -7195,7 +7451,101 @@ impl Render for RichTextState {
                 columns_resizing.as_ref(),
                 &mut self.embedded_image_cache,
                 self.document_base_dir.as_deref(),
-            ));
+            );
+
+            // Wrap block with drag handle and drop target
+            let block_with_dnd = div()
+                .id(("dnd-block", ix))
+                .relative()
+                .group("dnd-block")
+                .when(is_dragging, |this| this.opacity(0.5))
+                // Drop target styling
+                .drag_over::<BlockDragData>(move |style, drag, _window, _cx| {
+                    if drag.state_id != state_id {
+                        return style;
+                    }
+                    let drag_ix = drag.source_path.first().copied().unwrap_or(0);
+                    if drag_ix == ix || drag_ix + 1 == ix {
+                        return style;
+                    }
+                    let mut style = style.bg(drop_target_bg.alpha(drop_target_bg.a.max(0.1)));
+                    style = style.border_color(drag_border);
+                    if ix < drag_ix {
+                        style = style.border_t_2();
+                    } else {
+                        style = style.border_b_2();
+                    }
+                    style
+                })
+                .on_drop::<BlockDragData>(cx.listener(move |this, drag, window, cx| {
+                    this.on_block_drop(drag, ix, window, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(4.))
+                        // Drag handle (visible on hover)
+                        .child({
+                            let drag_data_clone = drag_data.clone();
+                            let state_clone = state.clone();
+                            div()
+                                .id(("dnd-handle", ix))
+                                .w(px(20.))
+                                .h(px(24.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor(CursorStyle::OpenHand)
+                                .rounded(px(4.))
+                                .opacity(0.)
+                                .group_hover("dnd-block", |this| this.opacity(1.))
+                                .hover(|this| this.bg(theme.muted))
+                                .text_color(theme.muted_foreground)
+                                .text_size(px(14.))
+                                .child("⋮⋮")
+                                .on_drag(drag_data_clone, move |drag, _offset, window, cx| {
+                                    state_clone.update(cx, |state, cx| {
+                                        state.on_block_drag_start(drag, window, cx);
+                                    });
+                                    let label = drag.label.clone();
+                                    cx.new(|_| BlockDragGhost { label })
+                                })
+                        })
+                        // Block content
+                        .child(div().flex_1().min_w(px(0.)).child(block_element)),
+                );
+
+            blocks.push(block_with_dnd.into_any_element());
+        }
+
+        // Add a drop zone after the last block
+        if block_count > 0 {
+            blocks.push(
+                div()
+                    .id("dnd-drop-after-last")
+                    .h(px(20.))
+                    .w_full()
+                    .drag_over::<BlockDragData>(move |style, drag, _window, _cx| {
+                        if drag.state_id != state_id {
+                            return style;
+                        }
+                        let drag_ix = drag.source_path.first().copied().unwrap_or(0);
+                        if drag_ix == block_count - 1 {
+                            return style;
+                        }
+                        style
+                            .bg(drop_target_bg.alpha(drop_target_bg.a.max(0.1)))
+                            .border_t_2()
+                            .border_color(drag_border)
+                    })
+                    .on_drop::<BlockDragData>(cx.listener(|this, drag, window, cx| {
+                        this.on_block_drop_after_last(drag, window, cx);
+                    }))
+                    .into_any_element(),
+            );
         }
 
         div()

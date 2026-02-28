@@ -1,5 +1,5 @@
 [package]
-name = "gpui-manos-components-story"
+name = "gpui-manos-story"
 version = "0.1.0"
 publish = false
 edition.workspace = true
@@ -8,7 +8,7 @@ edition.workspace = true
 anyhow.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
-gpui-manos-components.workspace = true
+gpui-manos-assets.workspace = true
 gpui-manos-dnd.workspace = true
 gpui-manos-plate.workspace = true
 gpui-manos-webview.workspace = true

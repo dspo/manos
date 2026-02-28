@@ -1,11 +1,11 @@
 [workspace]
 members = [
+  "crates/assets",
   "crates/diffview",
   "crates/dnd",
-  "crates/extras",
   "crates/git-viewer",
   "crates/plate-core",
-  "crates/rich_text",
+  "crates/plate",
   "crates/story",
   "crates/webview",
   "crates/webview-macros",
@@ -22,9 +22,9 @@ anyhow = "1"
 base64 = "0.22"
 gpui = "0.2.2"
 gpui-component = "0.4.0"
-gpui-manos-components = { path = "crates/extras", version = "0.1.0" }
+gpui-manos-assets = { path = "crates/assets", version = "0.1.0" }
 gpui-manos-dnd = { path = "crates/dnd", version = "0.1.0" }
-gpui-manos-plate = { path = "crates/rich_text", version = "0.1.0" }
+gpui-manos-plate = { path = "crates/plate", version = "0.1.0" }
 gpui-plate-core = { path = "crates/plate-core", version = "0.1.0" }
 gpui-manos-webview = { path = "crates/webview", version = "0.1.0" }
 gpui-manos-webview-macros = { path = "crates/webview-macros", version = "0.1.0" }
@@ -37,3 +37,4 @@ similar = "2"
 serialize-to-javascript = { version = "0.1.2" }
 sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
 wry = { version = "0.53.5" }
+pulldown-cmark = "0.12"

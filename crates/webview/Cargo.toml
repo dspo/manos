@@ -15,6 +15,9 @@ serde_json.workspace = true
 mime_guess = "2.0"
 pollster = "0.4"
 async-task = "4.7.1"
+rfd = "0.15"
+arboard = "3"
+open = "5"
 
 [lib]
 path = "src/lib.rs"

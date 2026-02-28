@@ -97,6 +97,18 @@ impl VoidNode {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("😀")
                 .to_string(),
+            "math_inline" => {
+                let latex = self
+                    .attrs
+                    .get("latex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if latex.is_empty() {
+                    "$...$".to_string()
+                } else {
+                    format!("${latex}$")
+                }
+            }
             _ => "□".to_string(),
         }
     }
@@ -118,6 +130,18 @@ impl VoidNode {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("😀")
                 .len(),
+            "math_inline" => {
+                let latex = self
+                    .attrs
+                    .get("latex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if latex.is_empty() {
+                    5 // "$...$"
+                } else {
+                    latex.len() + 2 // "$" + latex + "$"
+                }
+            }
             _ => 1,
         }
     }

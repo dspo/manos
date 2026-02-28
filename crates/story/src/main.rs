@@ -1,9 +1,9 @@
 use gpui::*;
 use gpui_component::{Root, TitleBar};
-use gpui_manos_components::assets::ExtrasAssetSource;
-use gpui_manos_components_story::app_menus;
-use gpui_manos_components_story::gallery::StoryGallery;
-use gpui_manos_components_story::themes;
+use gpui_manos_assets::assets::ExtrasAssetSource;
+use gpui_manos_story::app_menus;
+use gpui_manos_story::gallery::StoryGallery;
+use gpui_manos_story::themes;
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;

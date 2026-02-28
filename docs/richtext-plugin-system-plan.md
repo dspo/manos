@@ -1,13 +1,13 @@
 # RichText：插件系统与未来架构计划（激进重构版）
 
-本文基于对本仓库 `gpui-manos-plate`（`crates/rich_text`）的实现细读，给出一份**面向未来与最佳实践**的重构计划：直接对齐 Plate/Slate 体系常见的设计（树模型、operations、normalize、可组合插件），不再规划 v1 过渡态。
+本文基于对本仓库 `gpui-manos-plate`（`crates/plate`）的实现细读，给出一份**面向未来与最佳实践**的重构计划：直接对齐 Plate/Slate 体系常见的设计（树模型、operations、normalize、可组合插件），不再规划 v1 过渡态。
 
 相关背景与当前实现边界见：
 - [RichText Editor：扩展性与重构方向（面向未来）](richtext-extensibility.md)
 - 工具层 UI 组件（Toolbar）参考：[Plate Toolbar Buttons（GPUI 组件实现教程）](plate-toolbar-buttons.md)
 - 暂不处理/已知问题清单：[RichText Known Issues / Deferred Work](richtext-known-issues.md)
 
-> 说明：本文中历史命令 `cargo run -p gpui-manos-components-story --example richtext` 已废弃；请使用 `cargo run` 启动 Story Gallery，并在左侧选择 `Rich Text`。
+> 说明：本文中历史命令 `cargo run -p gpui-manos-story --example richtext` 已废弃；请使用 `cargo run` 启动 Story Gallery，并在左侧选择 `Rich Text`。
 
 ---
 
@@ -44,7 +44,7 @@
 - keybindings & actions：`gpui_manos_plate::init` 绑定到 `RichText` key context
 
 对应文件：
-- `crates/rich_text/src/state.rs`
+- `crates/plate/src/state.rs`
 
 ### 1.4 序列化：无损 versioned JSON（PlateValue）
 
@@ -65,7 +65,7 @@
 
 新增一个能力（例如：新块、新输入规则、新序列化字段、新渲染容器）通常会同时涉及：
 - `crates/plate-core/src/plugin.rs`：schema/normalize/commands/queries（能力的“可组合本体”）
-- `crates/rich_text/src/state.rs`：仅当涉及 gpui 输入/IME/hit-test/渲染时才需要扩展（尽量保持通用）
+- `crates/plate/src/state.rs`：仅当涉及 gpui 输入/IME/hit-test/渲染时才需要扩展（尽量保持通用）
 - `crates/plate-core/src/serde_value.rs`：仅当涉及持久化字段/格式升级时需要修改
 - `crates/story/src/richtext.rs`：示例 UI 入口与验收
 
@@ -251,7 +251,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 你们不接受“中间态架构”，因此实施应遵循：
 - **先在最终架构下实现最小闭环**（Document/Selection/Transaction/Renderer/Serialize + 2~3 个基础插件），作为技术验证
-- **验证通过后一次性替换旧实现**：旧 `crates/rich_text` 的 monolith 不应与新内核长期并存
+- **验证通过后一次性替换旧实现**：旧 `crates/plate` 的 monolith 不应与新内核长期并存
 - **所有里程碑都应是最终架构的子集**：每一步都在同一套 Node/Op/Normalize/Plugin 体系上叠加能力
 
 ### Milestone A：内核最小闭环（最终架构的最小子集）
@@ -299,7 +299,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 1) **每一步都产出一个“端到端可运行”的编辑器体验**（哪怕功能集不大，但闭环完整：输入/选择/撤销/渲染/保存加载/插件组合）。
 2) **每一步都处于最终架构之内**（同构验证），不会引入未来要推翻的临时框架。
 
-> 新内核已以独立 crate 落地：`crates/plate-core`（crate 名称：`gpui-plate-core`），并通过 Story Gallery 的 `Rich Text` 页面提供验收入口（实现位于 `crates/story/src/richtext.rs`）；并已完成 `gpui-manos-plate`（`crates/rich_text`）的一次性替换壳层。
+> 新内核已以独立 crate 落地：`crates/plate-core`（crate 名称：`gpui-plate-core`），并通过 Story Gallery 的 `Rich Text` 页面提供验收入口（实现位于 `crates/story/src/richtext.rs`）；并已完成 `gpui-manos-plate`（`crates/plate`）的一次性替换壳层。
 
 本项目采用的落地位置与命名约定：
 - 新内核 crate：`crates/plate-core`
@@ -319,7 +319,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 已补齐（架构对齐）：工具层状态已通过 `Query API` 获取（与 “CommandRegistry + Query API” 约束一致），并校准了多行选区渲染与三击选段行为。
 - 已记录问题：双击选词对中文边界不理想，见 [`docs/richtext-known-issues.md`](richtext-known-issues.md)。
 - Iteration 6（Table）已实现：TablePlugin（schema + normalize + commands + query）与 `richtext` 的 table 可编辑闭环。
-- Iteration 7（壳层替换）已实现：`gpui-manos-plate` 已从旧 `crates/rich_text` monolith 切换为 `gpui-plate-core` 驱动的最终架构实现。
+- Iteration 7（壳层替换）已实现：`gpui-manos-plate` 已从旧 `crates/plate` monolith 切换为 `gpui-plate-core` 驱动的最终架构实现。
 - Iteration 8（Marks Pro）已实现：Italic/Underline/Strike/Code/Colors（命令/查询/渲染/工具栏）闭环。
 - Iteration 9（Schema-driven TextBlock + Heading）已实现：text block 判定由 `node_specs` 驱动；新增 Heading 插件与 toolbar dropdown（H1/H2/H3/Paragraph）。
 - Iteration 10（容器型 Block + Blockquote）已实现：BlockquotePlugin（schema + normalize + commands + query）+ view 递归渲染（包含 table cell 内嵌容器）+ toolbar Quote。
@@ -424,7 +424,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - **scroll-to-caret**：EditorState 持有 `ScrollHandle` 与 `viewport_bounds`；根据 `TextLayout.position_for_index` 得到 caret bounds，用与旧版一致的 margin 规则计算并更新 `scroll_handle.set_offset(...)`。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行方式：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 2 通过标准）：
   - **滚动可用**：
     - 连续 Enter 生成大量段落后，编辑区出现纵向滚动条；滚轮/触控板滚动可用。
@@ -465,7 +465,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 规范化全部走 normalize pass：例如 list 的“段落 → list item 包裹”、退出列表、合并/拆分列表等，都用 ops 表达并可撤销。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行方式：`cargo run -p gpui-manos-story --example richtext`
 - 回归样本：`plate-core.example.json`（建议用 Open 打开并 Save/Reload 验证 round-trip）
   - 手动验收清单（Iteration 3 通过标准）：
   - **Toolbar（命令化）**：
@@ -496,7 +496,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - view 层：所有 gpui `TextLayout` index 都先映射到 row offset，再映射到 leaf path；IME 的 replace/marked 也走 row-level replace。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行方式：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 4 通过标准）：
   - **范围粗体**：选中部分文本点击 Bold/`Cmd/Ctrl+B`，仅选区变粗；再次 toggle 恢复；Undo/Redo 生效。
   - **范围链接**：选中部分文本 Set Link，仅选区呈现链接；Unlink 仅移除选区链接；Undo/Redo 生效。
@@ -530,7 +530,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 光标移动/删除使用 `prev/next_cursor_offset_in_row` 跳过 void；replace/split 时保持 void 不可分割。
 
 **要验收什么**
-- 运行方式：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行方式：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 5 通过标准）：
   - **插入 mention**：点击工具栏按钮或按 `Cmd/Ctrl+Shift+M` 插入 `@Alice`，光标落在其后。
   - **原子导航**：左右方向键跨过 mention；Backspace/Delete 一次删除整个 mention；Undo/Redo 生效。
@@ -569,7 +569,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 粘贴/全选等命令改为基于 `block_path`（保证 table cell 内行为正确）
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 6 通过标准）：
   - **插入表格**：点击工具栏 Table 插入 2×2，光标落在左上 cell 可输入。
@@ -587,7 +587,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 ### Iteration 7：一次性替换现有实现（壳层替换，已完成）
 
 **要实现什么**
-- 将 `gpui-manos-plate`（`crates/rich_text`）从旧 monolith 一次性切换为 `gpui-plate-core` 驱动：
+- 将 `gpui-manos-plate`（`crates/plate`）从旧 monolith 一次性切换为 `gpui-plate-core` 驱动：
   - 对外保留 `RichTextState/RichTextEditor`（以及 `RichTextValue = PlateValue`），但内部不再使用旧 blocks 模型
   - 旧实现源码直接移除，避免双轨继续存在
 - 将验收入口统一到：`cargo run`
@@ -611,7 +611,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 >
 > 说明：旧 toolbar 中的“字号（A-/A/A+）”属于 **block-level 属性**，不属于本迭代的 inline marks 范畴；将以独立迭代补齐（见 Iteration 23）。
 >
-> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/rich_text/src/state.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/plate/src/state.rs`、`crates/story/src/richtext.rs`）。
 >
 > 旧版示例截图（参考）：![Legacy RichText toolbar](richtext.example.png)
 
@@ -643,7 +643,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - `code` 的 monospace 使用 `cx.theme().mono_font_family`，背景色建议使用 theme 的 muted（若用户显式设置 highlight_color 则以用户值为准）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 8 通过标准）：
   - **四种格式按钮**：Bold/Italic/Underline/Strike/Code 均可切换；对选区生效、对 caret（collapsed selection）会影响后续输入。
@@ -682,7 +682,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - `block.set_heading/unset_heading` 本质是“替换当前 block kind + attrs”，必须走 ops/transaction，避免 bypass normalize/undo。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 9 通过标准）：
   - **Heading 设置**：Heading dropdown 可切换 H1/H2/H3/Paragraph；渲染字号变化明显。
@@ -720,7 +720,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - Quote 按钮只读 `blockquote.is_active`（query）决定 wrap/unwrap，只调用 command，不直连树结构。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - **Wrap/Unwrap**：选中 1~N 个段落点击 Quote → 变成 blockquote 容器；再点一次可还原。
 - **容器内编辑**：quote 内输入/换行/Undo/Redo 正常；鼠标点击可正确定位 caret。
@@ -758,7 +758,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - Todo 按钮只读 `todo.is_active`（query）并触发 `todo.toggle`（command）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - **插入/切换**：点击 Todo 将 paragraph 变为 todo_item，再点还原。
 - **勾选**：点击 checkbox 勾选/取消；Undo/Redo 可回滚。
@@ -795,7 +795,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 缩进只影响布局（padding），不进入 undo/serialize 之外的状态；命中测试仍以 `layout_cache`（text bounds）为准。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 12 通过标准）：
   - **Indent 按钮**：Indent/Outdent 可对 paragraph/heading/todo_item 生效；多段选区时整段一起缩进/反缩进。
@@ -836,7 +836,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 折叠只影响渲染与可见 block order，不修改文档结构；undo/redo 通过 command→tx 自动覆盖。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 13 通过标准）：
   - **Wrap/Unwrap**：选中多段（至少 2 行）后点 Toggle，将选区 blocks 包进一个 toggle；再点 Toggle 还原（selection 不乱跳）。
@@ -878,7 +878,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - AutoformatOnSpace 优先从 tx 的“block children replace ops”还原当前块文本与 caret 全局 offset（无 doc clone）；必要时 fallback 到 `preview_transaction`；转换用“追加 Remove/Insert block node ops”表达（保证 undo 语义与审计性）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 14 通过标准）：
   - 在空段落行首依次键入下列 marker，并确认自动转换且光标在内容起点：
@@ -918,7 +918,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 复用 link 的 dialog/input 模式：只负责获取 src 并触发 command，不直接触碰树结构。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 15 通过标准）：
   - **插入**：点击 toolbar 的 Image → 输入一个 URL → OK：
@@ -952,7 +952,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `Backspace/Delete` 在进入文本删除逻辑前先处理 `selected_block_path`，保证行为可预测。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 16 通过标准）：
   - **点击选中**：插入一个 image 或 divider 后，用鼠标单击该块 → 出现高亮边框（ring）。
   - **键盘删除**：保持该块处于选中态：
@@ -980,7 +980,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 保持“编辑器外粘贴”的可用性：image fallback 为 `![alt](src)`，divider fallback 为 `---`。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 17 通过标准）：
   - **复制/粘贴**：
     - 插入 image/divider → 单击选中（出现 ring）→ Cmd/Ctrl+C
@@ -1018,7 +1018,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Clipboard payload 复用 Iteration 17 的 `PlateClipboardFragment`，但允许节点类型扩展为 `Element | Void`，并在 paste 中用 op 序列插入/替换。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 18 通过标准）：
   - **选中可见**：Alt-click paragraph / blockquote / toggle / table：
     - 对应 block 出现 ring 高亮；重复 Alt-click 可在同一位置的嵌套 block 间切换，最终可取消选中。
@@ -1040,7 +1040,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - `duplicate_selected_block`：clone 当前 `Node::Element | Node::Void`，插入到其后一个 sibling 位置（`Op::InsertNode`）。
   - `move_selected_block_up/down`：在同一 parent children 内做 remove+insert（注意索引变化），并把选中态移动到新位置。
   - `delete_selected_block`：复用现有 RemoveNode 能力（与 Backspace/Delete 一致）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - toolbar 新增 “Duplicate / Move Up / Move Down / Delete Block” 按钮：
     - 仅当存在 `selected_block_path` 时可用。
     - Move Up/Down 在到达边界时 disabled。
@@ -1054,7 +1054,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 在 apply tx 前先计算 `selected_block_path_after`，在 apply 成功后重新写回并 `cx.notify()`（保证可连续多次 move/duplicate）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 19 通过标准）：
   - **Duplicate**：Alt-click 选中一个 paragraph/toggle/table → 点击 Duplicate → 该 block 在其后复制一份；Undo/Redo 正确。
   - **Move**：Alt-click 选中一个 block → 点击 Move Up/Down → 该 block 在同一 parent 内上移/下移一格；边界按钮 disabled；Undo/Redo 正确。
@@ -1084,7 +1084,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - `mode: block`：复用现有 block fragment paste（插入/替换 block 子树 + 保证后继可落 caret）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 20 通过标准）：
   - **marks 无损**：输入一段文字，分别设置 bold/italic/underline/strike/code/link/color → 选中其中一部分 Cmd/Ctrl+C → 在另一处 Cmd/Ctrl+V：应保留 marks（不是只粘 plain text）。
   - **inline void 无损**：插入 mention（或其它 inline void）→ 框选包含 mention 的范围 Cmd/Ctrl+C/V：mention 仍为 inline void（不是退化为 `@label` 文本）。
@@ -1105,7 +1105,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `gpui-manos-plate`（view）：
   - 渲染：`code_block` 使用 mono 字体并显示 container（背景/边框/圆角），与普通 paragraph/heading 形成明显区分。
   - 命中测试：点击在 code block 的 container 内（包含 padding）也应落到该 text block（保证体验不被 padding 削弱）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - “Block type” 下拉菜单新增 “Code Block” 选项，并在 code block 激活时显示为当前选中项。
 
 **怎么实现（关键做法）**
@@ -1114,7 +1114,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - story：下拉菜单点击时确保先退出 code block 再设置 heading（或反之），从而保持语义一致、命令可组合。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 21 通过标准）：
   - **创建/取消 code block**：在任意段落中打开 “Block type” → 选择 “Code Block”：
     - 该段应切换为 code block；再次选择 “Paragraph” 应恢复为普通段落。
@@ -1135,7 +1135,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `gpui-manos-plate`（view）：
   - 渲染：读取 text block attrs `align`，映射到 `TextStyle.text_align`（paragraph/heading/code_block/list_item/todo_item 等所有 text block）。
   - wrapper：新增 `command_set_align(BlockAlign)` 与 `block_align()`（供 toolbar 使用）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - toolbar 新增 Align 下拉菜单（复用 `PlateToolbarDropdownButton + Popover` 模式）：
     - icon 根据当前 align 展示（Left/Center/Right）。
     - 点击 item 执行 `block.set_align`，并在执行后将 focus 还给 editor（与其它 toolbar 行为一致）。
@@ -1145,7 +1145,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - view 渲染只做纯映射：attrs → `TextStyle.text_align`，不引入额外 state；对齐属于可序列化、可撤销的文档态。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 22 通过标准）：
   - **单段对齐**：光标在段落内 → Align 菜单依次选择 Left/Center/Right：文本对齐实时变化；Undo/Redo 正确。
   - **多段对齐**：跨 2~3 段落框选 → 选择 Center：所有被选段落均居中；再次选择 Right/Left 同理。
@@ -1161,7 +1161,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `gpui-manos-plate`（wrapper/view）：
   - wrapper：对外暴露 `command_set_font_size(u64)` / `command_unset_font_size()` / `block_font_size() -> Option<u64>`（供工具层使用）。
   - 渲染：text block 读取 `font_size` attrs 并映射到 `TextStyle.text_size`（heading 可覆盖其默认字号）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - toolbar 增加字号控件（推荐与旧 UI 对齐为 A-/A/A+ 三段）：
     - A-：字号 -1（clamp 到 `8..=72`），执行 `block.set_font_size`。
     - A：重置（执行 `block.unset_font_size`，回到缺省字号/heading 默认字号）。
@@ -1177,7 +1177,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 保持工具层“只依赖 command/query”：字号控件不直接读写 doc；仅调用 wrapper 命令并在执行后把 focus 还给 editor。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 23 通过标准）：
   - **单段字号**：光标在 paragraph 内点击 A+/A-：字号变化明显；Undo/Redo 正确。
   - **重置**：点击 A：回到缺省字号（heading 回到其默认字号），Undo/Redo 正确。
@@ -1198,7 +1198,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
        - 优先选中光标附近“词”并应用 link（给出立即可见反馈）；
        - 若找不到可用范围（空段/纯空白）：插入 URL 文本并带 link marks（确保用户看到结果）。
   - `command_unset_link()` 不变。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - toolbar 增加 Unlink 按钮（仅当 link active 时可用），并在 block selection（Alt-click 选中 block 子树）时禁用 Link/Unlink。
 
 **怎么实现（关键做法）**
@@ -1207,7 +1207,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 插入 URL 使用一次性 transaction（避免 “先 set marks 再 insert text” 导致 Undo 需要按两次）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 24 通过标准）：
   - **对选区 Set Link**：框选一段文字 → 点击 Link → 输入 URL → OK：选区变为蓝色下划线；Undo/Redo 正常。
   - **对 caret 附近 Set Link（选词）**：光标落在一个英文单词中间 → Set Link：应把该单词整段变为链接（不要求中文分词完美）。
@@ -1222,7 +1222,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 > 目标：`HeadingPlugin` 的 schema/command/query 已支持 `level: 1..=6`，但示例 UI 只暴露了 H1~H3；本迭代将 block type 下拉补齐 H4/H5/H6，让“能力支持范围”与“可发现的 UI”一致。
 
 **要实现什么**
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - Block type 下拉菜单新增 `Heading 4/Heading 5/Heading 6` 三个条目，行为与 H1~H3 完全一致：
     - 若当前是 code block：先 toggle 回 paragraph，再 set heading level（保持互转规则一致）。
     - 点击后 focus 还给 editor。
@@ -1232,7 +1232,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 仅补齐 UI 暴露面，避免引入新的“半功能状态”。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 25 通过标准）：
   - **菜单项可用**：Block type 下拉中出现 Heading 4/5/6。
   - **设置与渲染**：选择 Heading 4/5/6 后，渲染字号/字重变化明显；再次切换 Paragraph 可恢复。
@@ -1247,7 +1247,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - `gpui-manos-plate`（wrapper）：
   - 提供 `command_list()`（供工具层展示命令列表）。
   - 提供 `command_run(id, args_json)`（允许工具层以 string id + 可选 args 执行任意命令）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - 新增 “Command Palette” 入口（toolbar 按钮 + Edit 菜单项），打开一个对话框：
     - Search input：按 `id/label` 过滤命令。
     - Args input：可选 JSON（空则 `None`），用于执行需要 args 的命令（如 `block.set_heading` / `table.insert` / `marks.set_link`）。
@@ -1258,7 +1258,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 过滤策略采用简单 case-insensitive substring（后续可升级为 fuzzy，属于纯工具层改进，不影响内核）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 26 通过标准）：
   - **打开面板**：点击 toolbar “Command Palette” 或菜单 `Edit → Command Palette` 会出现对话框。
   - **搜索过滤**：输入 `bold`/`table`/`toggle` 等关键字，列表会即时过滤。
@@ -1291,7 +1291,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 拖拽交互：
     - 拖拽时只更新 view 的 “preview widths”（不写入 doc，不污染 undo 栈）。
     - mouse up 时通过 `columns.set_widths` 一次性提交（undo/redo 为 1 步）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - toolbar 增加 Columns 插入/移除入口（并保持 focus 还给 editor）。
 
 **怎么实现（关键做法）**
@@ -1299,7 +1299,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - view 侧用 `block_bounds_cache` 获取各列真实 bounds 来计算拖拽 delta（兼容 handle 宽度/间距，不依赖“纯数学推导”）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 27 通过标准）：
   - **插入**：点击 Columns 按钮后出现 2 列；光标在第一列可直接输入；Tab/方向键/鼠标点击可在两列间移动光标。
@@ -1311,7 +1311,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：让“插件命令”不仅可执行，还**可发现、可检索、可理解**。本迭代在不牺牲底层原则（命令执行仍只走 `Editor::run_command`）的前提下，为命令引入更丰富的 UI-neutral metadata，并将其用于命令面板的键盘优先体验。
 >
-> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/rich_text/src/state.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/plate/src/state.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-plate-core`：
@@ -1323,7 +1323,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 选择性为现有命令补齐 metadata（至少覆盖 toolbar 已暴露的命令）。
 - `gpui-manos-plate`：
   - `command_list()` 返回 `id/label/description/keywords/args_example`（按需）。
-- `gpui-manos-components-story`：
+- `gpui-manos-story`：
   - Command Palette 升级：
     - 支持键盘上下选择、Enter 执行、Esc 关闭。
     - 搜索同时匹配 `id/label/keywords`（可保留 substring，后续再升级 fuzzy）。
@@ -1335,7 +1335,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - command palette 的键盘交互不影响 editor 输入：打开 dialog 时 focus 在 search input；执行成功后 focus 还给 editor。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 28 通过标准）：
   - **快捷键打开**：`Cmd/Ctrl+Shift+P` 打开命令面板。
   - **键盘执行**：上下键选择命令，Enter 执行并关闭；Esc 关闭不执行。
@@ -1345,7 +1345,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：把 table 的编辑能力补齐到“像个编辑器”：不止能插入 table，还要能在任意位置 **向上/向下插入行、向左/向右插入列、删除整张表**，并把 toolbar 从“堆按钮”升级为 **Row/Column 两个菜单**（更接近 plate 的工具结构，也更可扩展）。
 >
-> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/rich_text/src/state.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/plate/src/state.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-plate-core`：
@@ -1355,7 +1355,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - `table.delete_table`
 - `gpui-manos-plate`：
   - 新增 wrapper API：`command_insert_table_row_above`、`command_insert_table_col_left`、`command_delete_table`
-- `gpui-manos-components-story`：
+- `gpui-manos-story`：
   - toolbar 的 table 区域升级为两个下拉菜单：
     - Row：Insert row above / Insert row below / Delete row / Delete table
     - Column：Insert column left / Insert column right / Delete column
@@ -1367,7 +1367,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - delete table 采用“remove + insert paragraph 同位替换”，保证 block parent 结构合法且选区有落点。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 29 通过标准）：
   - **Row menu**：光标在 table 内，打开 Row 菜单：
@@ -1386,7 +1386,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 > 状态：已实现（`crates/story/src/richtext.rs`）。
 
 **要实现什么**
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - `richtext` toolbar 容器固定为 `w_full`，并开启横向滚动（overflow-x scroll）。
 
 **怎么实现（关键做法）**
@@ -1394,7 +1394,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 不改动任何 core/view/插件逻辑：这是纯工具层 UI 体验修复。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 30 通过标准）：
   - **窄窗口可访问全部按钮**：将窗口宽度缩到不足以显示全部 toolbar 按钮时，toolbar 可横向滚动访问右侧按钮（触控板横向滚动；鼠标可尝试 Shift+滚轮）。
   - **不影响编辑体验**：横向滚动 toolbar 不应影响编辑区输入、选择、快捷键与 Undo/Redo。
@@ -1403,7 +1403,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：在不引入新依赖的前提下，用一个“足够小但完整闭环”的能力验证：**新增一个 inline void 节点**（emoji），并打通 command/serialize/copy/paste/tooling 全链路。这类能力是 plate/slate 插件生态里非常常见的基础积木（mention/emoji/tag/variable…）。
 >
-> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/plate-core/src/core.rs`、`crates/rich_text/src/state.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/plate-core/src/core.rs`、`crates/plate/src/state.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-plate-core`：
@@ -1414,7 +1414,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - `VoidNode::inline_text/inline_text_len` 支持 `emoji`（用于渲染、hit-test、plain text、selection snapping）。
 - `gpui-manos-plate`：
   - 新增 wrapper：`command_insert_emoji(emoji, cx)`（对外保持“命令驱动”的调用方式）。
-- `gpui-manos-components-story`：
+- `gpui-manos-story`：
   - toolbar 新增 Emoji 按钮（`Smile`），打开 dialog 输入 emoji 字符并插入；执行后 focus 还给 editor。
 
 **怎么实现（关键做法）**
@@ -1422,7 +1422,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - attrs 直接存 JSON：不引入 UI 类型或 emoji 库；未来如需 shortname/skin tone/搜索，可在工具层独立增强。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 单测：`cargo test -p gpui-plate-core`
 - 手动验收清单（Iteration 31 通过标准）：
   - **插入**：点击 toolbar Emoji → 输入 `😀` → OK，emoji 出现在光标处，Undo/Redo 正常。
@@ -1437,7 +1437,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 > 状态：已实现（`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - 新增 action：`SetLink`。
   - keybinding：macOS `Cmd+K`；Windows/Linux `Ctrl+K`（仅在 `gpui_manos_plate::CONTEXT` 下生效）。
   - Edit 菜单新增 `Set Link...`（触发同一 action）。
@@ -1447,7 +1447,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 保持“命令驱动”：dialog 仅收集 URL，最终仍调用 `RichTextState::command_set_link/command_unset_link`（底层仍走 `marks.set_link/marks.unset_link`）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 32 通过标准）：
   - **快捷键打开**：在编辑器聚焦时按 `Cmd/Ctrl+K` 打开 Set Link dialog。
   - **编辑已存在链接**：光标在 link 内按 `Cmd/Ctrl+K`，对话框应自动填充当前 URL；修改后 OK 生效，Undo/Redo 正常。
@@ -1459,13 +1459,13 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 > - Image：不仅是占位卡片，而是能**真实加载并渲染**（失败时有 fallback），并支持 `Cmd/Ctrl+Click` 打开 `src`。
 > - Mention：不再硬编码插入 `Alice`，而是提供 label 输入（dialog），验证 “inline void 的可配置插入”。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - image 渲染：`Node::Void(kind == "image")` 使用 gpui `img(src)` 实际渲染（loading/fallback），并保留 caption（src/alt）。
   - 交互：对 image block 支持 `Cmd/Ctrl+Click` 打开 `src`（不影响普通点击的 block 选中语义）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - Mention toolbar：点击后打开 dialog 输入 label，OK 后插入（仍走 `mention.insert` 命令）。
 
 **怎么实现（关键做法）**
@@ -1473,7 +1473,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Mention dialog 只负责收集 label：最终调用 `RichTextState::command_insert_mention`（底层仍走 command/undo/serialize）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 33 通过标准）：
   - **Image 真渲染**：插入 image（输入一个可访问的 png/jpg/gif/webp 或 svg URL）后，image 区域应显示实际图片；加载中/失败时显示 fallback。
   - **打开 src**：对 image 区域按 `Cmd/Ctrl+Click` 应打开该 `src`（浏览器）。
@@ -1483,13 +1483,13 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：引入一个“纯派生的 overlay/decoration”能力，用于搜索高亮、拼写检查、诊断提示等；本迭代用 Find（查找）做端到端验证：**不修改文档、不进入 undo 栈**，仅在视图层绘制高亮。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 在每个 text block line 上支持绘制 “find matches” 高亮（半透明背景），并保证 selection/caret 仍然清晰可见。
   - find query 属于 session state：不进入 JSON、也不进入 undo/redo。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - 新增 action `Find`：
     - 快捷键：macOS `Cmd+F`、Windows/Linux `Ctrl+F`（仅在编辑器 key context 生效）。
     - Edit 菜单新增 `Find...` 入口。
@@ -1500,7 +1500,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - Find matches 使用 “block_path -> Vec<Range<usize>>（byte offsets）” 缓存，文档变更时刷新（不依赖 layout_cache）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 34 通过标准）：
   - **打开 Find**：在编辑器聚焦时按 `Cmd/Ctrl+F`，或 Edit 菜单 `Find...`，打开对话框。
   - **高亮匹配**：输入 `Heading` / `task` / `@` 等文本，编辑区所有匹配处出现高亮；输入 `😀` 可高亮 emoji 文本（作为 inline void 的 display text）。
@@ -1511,13 +1511,13 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：让 Find 从“能高亮”升级为“可用的查找体验”：支持 next/prev 导航、展示匹配统计，并区分“当前匹配”高亮。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 维护 active match（block_path + range），并提供 `find_next/find_prev/find_stats`（不修改 doc，不进 undo）。
   - 渲染层：当前匹配使用更强的高亮色（区别于其他匹配）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - 新增 actions：`FindNext` / `FindPrev`：
     - 快捷键：macOS `Cmd+G` / `Cmd+Shift+G`；Windows/Linux `Ctrl+G` / `Ctrl+Shift+G`
     - Edit 菜单增加 `Find Next` / `Find Previous`
@@ -1531,7 +1531,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 导航仅更新 selection（collapsed 到 match.start）与 active match：不修改 doc、不产生 undo step。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 35 通过标准）：
   - **导航快捷键**：打开 Find 输入 query 后（Find input 聚焦也可），按 `Cmd/Ctrl+G` 依次跳到下一匹配并 wrap 到首个；`Cmd/Ctrl+Shift+G` 反向遍历。
   - **统计与当前高亮**：Find dialog 显示 `current/total`；当前 match 高亮更明显（且 selection/caret 仍清晰）。
@@ -1541,10 +1541,10 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：把 image 从“能插入一个 void block”升级为“可用的媒体插入体验”：默认从文件选择器插入本地图片，同时保留 URL 插入路径；并确保本地图片可可靠渲染与打开。
 >
-> 状态：已实现（`crates/story/src/richtext.rs`、`crates/rich_text/src/state.rs`）。
+> 状态：已实现（`crates/story/src/richtext.rs`、`crates/plate/src/state.rs`）。
 
 **要实现什么**
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - toolbar 的 Image 按钮：Click 打开文件选择器，选中文件后插入 image；Shift+Click 打开原有 “Insert Image（URL）” 对话框。
 - `gpui-manos-plate`（view）：
   - 插入 image 时对 `~/` 做展开，并在可用时 canonicalize（保持 doc 内 `src` 的稳定性）。
@@ -1556,7 +1556,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 该迭代只改 view/example：不引入新的 core 节点/operation，也不改变 undo/redo 语义。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 36 通过标准）：
   - **文件插入**：点击 toolbar 的 Image 按钮，弹出文件选择器；选择一张图片后，编辑器插入 image block，并将光标放到其后的新段落。
   - **URL 插入**：Shift+Click Image 按钮，输入一个 `https://...` 图片 URL 并确认，可插入 image block（加载失败时显示 fallback 也可接受）。
@@ -1568,7 +1568,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：补齐“媒体输入”的两个高频路径：拖拽图片文件、粘贴剪贴板图片（截图）。这两条路径打通后，图片插入不再强依赖 toolbar/file picker，对用户更自然。
 >
-> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/rich_text/src/state.rs`）。
+> 状态：已实现（`crates/plate-core/src/plugin.rs`、`crates/plate/src/state.rs`）。
 
 **要实现什么**
 - `gpui-plate-core`（core）：
@@ -1587,7 +1587,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 将图片 bytes 编码为 `data:<mime>;base64,...` 并作为 `src` 执行 `image.insert_many`（完整持久化与渲染细节见 Iteration 39）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 37 通过标准）：
   - **拖拽插入**：从 Finder/资源管理器拖拽 1 张图片到编辑器任意位置 → 插入 1 个 image block，光标落到其后新段落；拖拽多张图片 → 插入多个 image block。
   - **拖拽定位**：拖到文档中部（某段落附近） → 图片应插入在该位置附近（基于 drop hit-test 设置 caret）。
@@ -1599,10 +1599,10 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：把 “toolbar → file picker 插图” 从 demo 级提升到“可用”：支持多选一次插入多张图，并在失败/无效选择时给出可见反馈，解决“点击没有任何反应”的体验问题。
 >
-> 状态：已实现（`crates/story/src/richtext.rs`、`crates/rich_text/src/state.rs`）。
+> 状态：已实现（`crates/story/src/richtext.rs`、`crates/plate/src/state.rs`）。
 
 **要实现什么**
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - Image 按钮的文件选择器允许多选，选中 1~N 张图片后一次性插入（单个操作）。
   - file picker 打开失败时显示 notification（Linux/平台错误等）。
   - 若用户选中非图片文件，显示 “No supported image files selected.” 的 notification（避免静默无反应）。
@@ -1617,7 +1617,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 选中路径但无任何图片 → notification 提示。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 38 通过标准）：
   - **多选插图**：点击 toolbar Image → file picker 可多选；选择多张图片后确认 → 依次插入多个 image block，并将光标放到末尾新段落。
   - **无效选择反馈**：只选择非图片文件（或混合但无图片）→ 弹出通知 “No supported image files selected.”
@@ -1627,13 +1627,13 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：让“粘贴截图”成为真正可保存/可迁移的内容：不再依赖临时文件路径，而是把剪贴板图片以内嵌 `data:<mime>;base64,...` 的形式写入 `image.src`；并在渲染层显式支持 `data:` URL 解码与缓存，保证保存/打开 JSON 后依然可显示。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - `Cmd/Ctrl+V` 粘贴 `ClipboardEntry::Image` 时：生成 `data:` URL 并插入 image block（不写临时文件）。
   - 渲染 image 时：当 `src` 为 `data:` URL，解码为 `gpui::Image` 并用内存图片渲染；对同一个 `src` 做缓存，避免每次 render 都重复 base64 decode。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - 无需新增 UI；直接复用现有 Open/Save/Save As 进行 round-trip 验收。
 
 **怎么实现（关键做法）**
@@ -1645,7 +1645,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 缓存：`HashMap<String, Arc<Image>>`（key 为 data URL，本地持久化一致）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 39 通过标准）：
   - **粘贴截图即插入**：复制一张截图到剪贴板 → 编辑器聚焦后 `Cmd/Ctrl+V` → 插入 image block，且能正常显示图片内容。
   - **保存后仍可显示**：执行 `Save As...` 保存 JSON，关闭窗口/重启示例后 `Open...` 打开该 JSON → 图片仍可显示（不依赖临时目录/外部文件）。
@@ -1655,12 +1655,12 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：补齐“可迁移文档”的最后一块：drop/file picker 插入的本地路径图片，默认仍是文件路径引用；通过一键命令把这些本地图片转换为内嵌 `data:` URL，让文档可以单文件（JSON）携带所有媒体内容并跨机器打开。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 新增 `command_embed_local_images`：遍历文档内所有 image void nodes，对符合条件的本地路径图片做 `src` 替换（`/abs/path` / `file://...` → `data:<mime>;base64,...`），并保持 undo/redo 为 1 步。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - File 菜单新增入口 `Embed Local Images (Data URL)`，执行后给出 notification（包含 embedded/skipped/failed 统计）。
 
 **怎么实现（关键做法）**
@@ -1669,7 +1669,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 渲染层复用 Iteration 39 的 data URL 解码与缓存：转换后无需额外适配即可显示。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 40 通过标准）：
   - **插入本地图片**：通过 toolbar Image（file picker）或拖拽插入至少 1 张本地图片（此时 caption 通常会展示路径）。
   - **一键内嵌**：执行菜单 `File → Embed Local Images (Data URL)`：
@@ -1682,12 +1682,12 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：把 “内嵌化” 从“修改文档的编辑操作”升级为“导出能力”：导出一份可迁移 JSON（本地图片自动内嵌为 data URL），但**不改变**当前编辑器文档状态（不产生 undo step，不影响继续编辑）。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 提供一个纯函数/工具方法：输入 `PlateValue`，输出“portable PlateValue”（本地图片 `src` 内嵌为 data URL）以及统计信息（embedded/skipped/failed）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - File 菜单新增 `Export Portable JSON...`：
     - 弹出保存路径选择；
     - 在后台完成本地图片读取 + base64 编码 + 写文件；
@@ -1698,7 +1698,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - example 层在触发导出时先 snapshot 当前 `PlateValue`，再在 `spawn_in` 异步任务中转换与写入，避免阻塞 UI。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 41 通过标准）：
   - **不修改当前文档**：插入一张本地图片（src 为路径），执行 `File → Export Portable JSON...`：
     - 导出成功后，编辑器里的图片仍保持“路径 src”（caption 仍显示路径），并且 undo/redo 栈不增加额外步骤。
@@ -1711,14 +1711,14 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：提供 “不膨胀 JSON、但仍可迁移” 的第二条路径：导出为 `plate.bundle.json` + `assets/` 文件夹，并让编辑器能够在 `Open...` 时基于 JSON 所在目录解析相对 `image.src`（例如 `assets/xxx.png`），实现 **folder-level portability**。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/rich_text/src/types.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/plate/src/types.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 引入 `document_base_dir: Option<PathBuf>`，用于渲染与交互时解析相对资源路径。
   - image 渲染与 `Cmd/Ctrl+Click` 打开行为：支持 `data:`、绝对路径、`file://`、以及相对路径（`base_dir.join(src)`）。
   - 提供 `RichTextState::make_plate_value_bundle(value, document_base_dir)`：将可解析的本地图片重写为 `assets/<hash>.<ext>`，并返回需要写出的 assets（bytes）与统计信息（bundled/skipped/failed）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - `Open...` 读取 JSON 时，把 `path.parent()` 作为 `document_base_dir` 传给 editor；`Save As...` 写出后同步更新 base dir。
   - File 菜单新增 `Export Plate Bundle...`：选择导出 JSON 路径后，在同目录创建 `assets/`，写出 assets 与 JSON，并以 notification 展示统计信息。
 
@@ -1732,7 +1732,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - 失败/不可解析的保持原 src（计入 failed/skipped）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 42 通过标准）：
   - **Bundle 导出闭环**：插入至少 1 张本地图片（file picker/拖拽均可）→ 执行 `File → Export Plate Bundle...`：
     - 选择保存路径后导出成功；
@@ -1749,14 +1749,14 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 > 1) 文档已关联到一个目录（base dir）时，插入本地图片优先存相对 `src`（例如 `assets/logo.png`），便于整个文件夹搬迁；
 > 2) 对包含相对 `src` 的文档执行 `Save As...` 时，自动复制被引用的相对 assets 到新目录，避免保存后编辑器立刻找不到图片。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 新增 `normalize_image_src_for_document`：当 `document_base_dir` 存在且图片位于 base dir 内时，把绝对路径归一化为相对 `src`（并统一为 `/` 分隔符）。
   - 统一所有插图入口都走同一套逻辑（file picker / dialog / drag&drop）。
   - 提供 `referenced_relative_image_paths()` 供上层在保存时收集需复制的相对 assets。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - `Save As...`：若从旧 base dir 保存到新 base dir，且文档引用了相对图片资源，则把这些文件按相对路径复制到新目录（并在 notification 中展示 copied/failed/skipped）。
 
 **怎么实现（关键做法）**
@@ -1768,7 +1768,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 复制时 `canonicalize(src)` 并要求其仍位于旧 base dir 内（避免 `..` 越界），再复制到新目录对应位置。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 43 通过标准）：
   - **相对插入默认生效**：
     - `Open...` 打开一个 JSON（确保 base dir 已设置），并在同目录创建/准备一个 `assets/` 图片文件；
@@ -1783,7 +1783,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：解决 “portable JSON 太大不适合版本管理” 的问题：在导出 bundle 时，把 `data:`（剪贴板截图 / Embed Local Images / Export Portable JSON 产生的内嵌图片）也外置为 `assets/<hash>.<ext>`，让 bundle JSON 仍保持轻量可读。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/rich_text/src/types.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/plate/src/types.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
@@ -1792,7 +1792,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
     - 根据 mime 推断扩展名（尽可能保持常见格式）；
     - 写出 `assets/<hash>.<ext>` 并把 `image.src` 替换为相对路径。
   - `BundleExportReport` 增加 `bundled_data_url` 统计（用于 UX 反馈）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - `Export Plate Bundle...` notification 展示 `data` 计数（当 bundled_data_url > 0）。
 
 **怎么实现（关键做法）**
@@ -1802,7 +1802,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 与本地文件路径走同一套 hash + 去重写入逻辑。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 44 通过标准）：
   - **截图→bundle→小 JSON**：
     - 复制一张截图到剪贴板 → 编辑器 `Cmd/Ctrl+V` 插入（此时 `src` 为 `data:`）；
@@ -1816,7 +1816,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：把 “文件夹级可迁移” 变成日常编辑的默认工作流：提供一个**会修改当前文档**的命令，把所有本地图片引用（绝对路径/`file://`/相对路径）与 `data:` 图片统一写入到当前文档目录的 `./assets/` 中，并把 `image.src` 重写为 `assets/<hash>.<ext>`。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/rich_text/src/types.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/plate/src/types.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
@@ -1826,7 +1826,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
       - 本地路径 → 读取 bytes → `assets/<hash>.<ext>`；
       - `data:` → base64 decode → `assets/<hash>.<ext>`；
     - 写文件到 `base_dir/assets/`（按 hash 去重），并用单个 `Transaction` 批量改写 `image.src`（单步 undo）。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - File 菜单新增 `Collect Assets into ./assets (Rewrite src)`；
   - 若文档未保存（无 base dir）则提示先 `Save As...`。
 
@@ -1835,7 +1835,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 文件写入先于 `SetNodeAttrs`：写入失败则不改写对应节点 src，避免文档指向不存在的 asset。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 45 通过标准）：
   - **本地路径 → 资产化**：
     - `Open...` 打开一个 JSON（确保 base dir 已设置）；
@@ -1855,13 +1855,13 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 > - 提供 `Portability Report...` 对话框集中展示（errors/warnings + 分类统计）；
 > - 在报告中提供一键动作：`Collect Assets` / `Export Bundle…` / `Export Portable JSON…`。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`、`crates/rich_text/src/types.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`、`crates/plate/src/types.rs`、`crates/story/src/app_menus.rs`、`crates/story/src/richtext.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
   - 新增 `portability_report()`：扫描文档中所有 `image` 的 `src` 并分类统计（data/http/absolute/relative），输出 errors/warnings 与问题列表（缺失文件、绝对路径、外链、data URL 等）。
   - 公开 `document_base_dir()` 供上层展示 base dir 与解析语义对齐。
-- `gpui-manos-components-story`（example）：
+- `gpui-manos-story`（example）：
   - File 菜单新增 `Portability Report...`，打开报告对话框（含一键动作按钮）。
   - `Save`/`Save As...`：保存成功后若仍存在 errors/warnings，在 notification 中附带 portability 摘要与入口提示。
   - `Export Portable JSON...` / `Export Plate Bundle...`：导出前若检测到缺失图片，先弹 warning 提示用户检查报告（导出仍继续）。
@@ -1873,7 +1873,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 直接调用现有导出/collect 的实现（不引入新的中间状态）。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 46 通过标准）：
   - **报告入口**：`File → Portability Report...` 可打开对话框，展示 base dir、统计与 issues 列表。
   - **一键动作**：在报告里点击 `Collect Assets` / `Export Bundle…` / `Export Portable JSON…` 均可正常执行并有 notification。
@@ -1897,7 +1897,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 - 插入仍复用 `RichTextState::command_insert_image` 的 normalize（base dir 存在时写相对 `src`）与渲染逻辑，不引入新的中间状态。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 47 通过标准）：
   - **Toolbar 入口**：点击 Image 按钮必定弹出对话框；Shift+Click 仍可打开系统 file picker 并插入图片。
   - **菜单/快捷键入口**：`Edit → Insert Image...` 与 `Cmd/Ctrl+Shift+I` 均可打开对话框。
@@ -1908,7 +1908,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
 
 > 目标：把 “失败静默” 彻底消灭。任何插件 command 或 tx apply 失败，都必须在 UI 上有明确反馈（含 `command id` / `tx source`），从而让验收与问题定位不再依赖猜测。
 >
-> 状态：已实现（`crates/rich_text/src/state.rs`）。
+> 状态：已实现（`crates/plate/src/state.rs`）。
 
 **要实现什么**
 - `gpui-manos-plate`（view）：
@@ -1922,7 +1922,7 @@ normalize 不应是“到处 if”，而应成为插件体系的一等公民：
   - 通过 `std::mem::take` 确保每条消息只弹一次，不会在重绘中重复刷屏。
 
 **要验收什么**
-- 运行入口：`cargo run -p gpui-manos-components-story --example richtext`
+- 运行入口：`cargo run -p gpui-manos-story --example richtext`
 - 手动验收清单（Iteration 48 通过标准）：
   - **命令失败可见**：打开 Command Palette（`Cmd/Ctrl+Shift+P`），选择 `marks.set_link`，不填 args 直接执行 → 应提示类似 `Command failed (marks.set_link): Missing args.url`。
   - **apply 失败可见（开发校验）**：当出现内部 apply/normalize 错误时，应弹出 `Apply failed (source): ...`（此项通常不应在正常使用中触发；目的是避免一旦触发时静默无提示）。
