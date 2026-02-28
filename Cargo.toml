@@ -3,7 +3,6 @@ members = [
   "crates/assets",
   "crates/diffview",
   "crates/dnd",
-  "crates/excalidraw",
   "crates/git-viewer",
   "crates/plate-core",
   "crates/plate",
